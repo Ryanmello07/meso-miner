@@ -72,6 +72,12 @@ func newFlapGuard(stableAfter time.Duration, base time.Duration) *flapGuard {
 	}
 }
 
+// isYoung reports whether a session of this length counts as a flap. It does
+// not advance the streak.
+func (self *flapGuard) isYoung(lived time.Duration) bool {
+	return 0 <= self.stableAfter && lived < self.stableAfter
+}
+
 // sessionEnded records a finished session and returns the extra wait before the
 // next connect. Zero means reconnect right away, as before the guard.
 func (self *flapGuard) sessionEnded(lived time.Duration) time.Duration {

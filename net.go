@@ -436,6 +436,11 @@ const proxySOCKS5DialTimeout = 30 * time.Second
 // that counts bytes against this proxy's bandwidth index.
 func (self *ProxySettings) NewDialContext(ctx context.Context, forward proxy.Dialer) DialContextFunction {
 	return func(ctx context.Context, network string, addr string) (net.Conn, error) {
+		// one dial of the connect attempt that carries these stats, if any
+		attempt := attemptStatsFrom(ctx)
+		if attempt != nil {
+			attempt.dials.Add(1)
+		}
 		host, port, err := net.SplitHostPort(addr)
 		if err == nil {
 			if ip := net.ParseIP(host); ip == nil {
@@ -473,8 +478,8 @@ func (self *ProxySettings) NewDialContext(ctx context.Context, forward proxy.Dia
 		}
 
 		bw := RegisteredProxyBandwidth(self.Index)
-		if bw != nil {
-			tc := &trackedConn{Conn: conn, bw: bw}
+		if bw != nil || attempt != nil {
+			tc := &trackedConn{Conn: conn, bw: bw, attempt: attempt}
 			return tc, nil
 		}
 
@@ -498,8 +503,11 @@ func trackDirect(conn net.Conn, bw *ProxyBandwidth) net.Conn {
 
 type trackedConn struct {
 	net.Conn
-	bw   *ProxyBandwidth
-	once sync.Once
+	bw *ProxyBandwidth
+	// attempt, when set, also credits the bytes to the connect attempt that
+	// opened this connection (see attemptStats)
+	attempt *attemptStats
+	once    sync.Once
 }
 
 // Read reads from the underlying connection and, when bw is set, credits the
@@ -508,6 +516,9 @@ func (self *trackedConn) Read(b []byte) (n int, err error) {
 	n, err = self.Conn.Read(b)
 	if n > 0 && self.bw != nil {
 		self.bw.TotalRx.Add(uint64(n))
+	}
+	if n > 0 && self.attempt != nil {
+		self.attempt.rx.Add(int64(n))
 	}
 	return
 }
@@ -518,6 +529,9 @@ func (self *trackedConn) Write(b []byte) (n int, err error) {
 	n, err = self.Conn.Write(b)
 	if n > 0 && self.bw != nil {
 		self.bw.TotalTx.Add(uint64(n))
+	}
+	if n > 0 && self.attempt != nil {
+		self.attempt.tx.Add(int64(n))
 	}
 	return
 }

@@ -141,6 +141,9 @@ func newFlapTestTransport(t *testing.T, ctx context.Context, serverUrl string, s
 	strategySettings := DefaultClientStrategySettings()
 	strategySettings.MinNextConnectDelay = 0
 	strategySettings.MaxNextConnectDelay = 0
+	// a failed dial otherwise holds its attempt open for the full 15s request
+	// timeout; a local server answers in microseconds
+	strategySettings.RequestTimeout = 500 * time.Millisecond
 	strategy := NewClientStrategy(ctx, strategySettings)
 	routeManager := NewRouteManager(ctx, "test-flap")
 	auth := &ClientAuth{
@@ -217,6 +220,77 @@ func TestRunH1_StableSessionReconnectsPromptly(t *testing.T) {
 		gap := at[i].Sub(at[i-1])
 		if gap > 300*time.Millisecond+60*time.Millisecond {
 			t.Fatalf("gap %d between connects was %s, stable sessions must reconnect promptly", i, gap)
+		}
+	}
+}
+
+// The loop feeds the process-wide governor: every attempt is classified, and a
+// connect whose session dies young is recorded as an early death.
+func TestRunH1_FeedsTheGovernor(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var accepts atomic.Int64
+	var stamps flapStamps
+	server := flapServer(0, &accepts, &stamps)
+	defer server.Close()
+
+	before := connectGov.snapshot()
+
+	settings := DefaultPlatformTransportSettings()
+	settings.ReconnectTimeout = 20 * time.Millisecond
+	settings.FlapStableAfter = 10 * time.Second
+
+	transport := newFlapTestTransport(t, ctx, server.URL, settings)
+	defer transport.Close()
+
+	time.Sleep(1500 * time.Millisecond)
+
+	after := connectGov.snapshot()
+	connects := accepts.Load()
+	if connects < 3 {
+		t.Fatalf("only %d connects, test setup is not exercising the loop", connects)
+	}
+	if got := after.OK - before.OK; got < connects-1 {
+		t.Fatalf("governor saw %d connected attempts for %d server accepts", got, connects)
+	}
+	if got := after.Early - before.Early; got < connects-2 {
+		t.Fatalf("governor saw %d early deaths for %d young sessions", got, connects)
+	}
+}
+
+// An attempt that fails is classified, not silently dropped.
+func TestRunH1_FailedAttemptsReachTheGovernor(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var accepts atomic.Int64
+	var stamps flapStamps
+	server := flapServer(0, &accepts, &stamps)
+	url := server.URL
+	server.Close() // nothing listens any more: every dial is refused
+
+	before := connectGov.snapshot()
+
+	settings := DefaultPlatformTransportSettings()
+	settings.ReconnectTimeout = 20 * time.Millisecond
+
+	transport := newFlapTestTransport(t, ctx, url, settings)
+	defer transport.Close()
+
+	deadline := time.After(10 * time.Second)
+	for {
+		after := connectGov.snapshot()
+		if 2 <= after.Attempts-before.Attempts {
+			if after.OK != before.OK {
+				t.Fatal("refused dials must not count as connected")
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("governor saw %d attempts from a refusing server", after.Attempts-before.Attempts)
+		case <-time.After(20 * time.Millisecond):
 		}
 	}
 }
