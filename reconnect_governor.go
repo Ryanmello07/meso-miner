@@ -229,11 +229,20 @@ func (self *connectGovernor) recordEarlyDeath() {
 }
 
 func (self *connectGovernor) snapshot() govSnapshot {
+	return self.snapshotWindow(govWindow)
+}
+
+// snapshotWindow is the governor's view of the last `window` (at most govWindow,
+// the ring's length). The verdict uses the full window; the attempt budget uses
+// a short one so it reacts to recovery in seconds, not after a minute of
+// failures has aged out.
+func (self *connectGovernor) snapshotWindow(window time.Duration) govSnapshot {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
 	var s govSnapshot
-	cutoff := self.now().Unix() - int64(len(self.ring))
+	seconds := min(int64(window/time.Second), int64(len(self.ring)))
+	cutoff := self.now().Unix() - seconds
 	for i := range self.ring {
 		b := &self.ring[i]
 		if b.sec <= cutoff {

@@ -873,6 +873,15 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 			}
 		}
 
+		// while the backend is failing, a disconnected proxy waits its turn
+		// under the shared attempt budget; the direct path never waits
+		{
+			proxyIndex, proxied := self.proxyIndex()
+			if !admitConnect(self.ctx, !proxied || proxyIndex == 0) {
+				return
+			}
+		}
+
 		var ws *websocket.Conn
 		var err error
 		if self.log.V(2).Enabled() {

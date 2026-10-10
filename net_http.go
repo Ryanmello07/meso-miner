@@ -531,14 +531,21 @@ func (self *evalResult) Close() {
 }
 
 func (self *ClientStrategy) parallelEval(ctx context.Context, eval func(ctx context.Context, dialer *clientDialer) *evalResult) *evalResult {
-	result, _ := self.parallelEvalErr(ctx, eval)
+	result, _ := self.parallelEvalErr(ctx, eval, false)
 	return result
 }
 
 // parallelEvalErr is parallelEval that also says why it returned no result: a
 // *dialTimeoutError carrying the real dial errors, or a wrapped context error
 // for local teardown.
-func (self *ClientStrategy) parallelEvalErr(ctx context.Context, eval func(ctx context.Context, dialer *clientDialer) *evalResult) (*evalResult, error) {
+//
+// singleRound lets the call give up after one pass over the dialers while the
+// backend is failing (see singleRoundWhenDegraded). Otherwise it keeps retrying
+// every dialer, round after round, until the request deadline: one failed
+// attempt then costs many dials, which is what multiplies a backend outage into
+// a flood. Only the platform transport dial opts in; API requests keep their
+// retries.
+func (self *ClientStrategy) parallelEvalErr(ctx context.Context, eval func(ctx context.Context, dialer *clientDialer) *evalResult, singleRound bool) (*evalResult, error) {
 	// in this order:
 	// 1. try all dialers that previously worked sequentially
 	// 2. try dialers that previously failed in parallel blocks
@@ -742,6 +749,9 @@ func (self *ClientStrategy) parallelEvalErr(ctx context.Context, eval func(ctx c
 		self.mutex.Lock()
 		self.failureCount += 1
 		self.mutex.Unlock()
+		if singleRound && singleRoundCheck() {
+			return nil, finish()
+		}
 		select {
 		case <-handleCtx.Done():
 			return nil, finish()
@@ -893,7 +903,7 @@ func (self *ClientStrategy) HttpParallel(request *http.Request) (*httpResult, er
 		return newEvalResultFromHttpResponse(response, err)
 	}
 
-	result, evalErr := self.parallelEvalErr(request.Context(), eval)
+	result, evalErr := self.parallelEvalErr(request.Context(), eval, false)
 	if result == nil {
 		return nil, evalErr
 	}
@@ -1004,7 +1014,7 @@ func (self *ClientStrategy) WsDialContext(ctx context.Context, url string, reque
 		}
 	}
 
-	result, evalErr := self.parallelEvalErr(ctx, eval)
+	result, evalErr := self.parallelEvalErr(ctx, eval, true)
 	if result == nil {
 		return nil, nil, evalErr
 	}
