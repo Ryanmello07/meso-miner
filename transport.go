@@ -1325,20 +1325,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 		// streak, so without this wait a slow backend that accepts the websocket
 		// and then drops it makes every proxy reconnect again immediately
 		lived := time.Since(sessionStart)
-		// a session cut short by our own teardown (a reload, the reaper, shutdown)
-		// says nothing about the backend
-		if flaps.isYoung(lived) && self.ctx.Err() == nil && self.clientLimitCloseCount.Load() == limitClosesBefore {
-			// (a client-limit close is the platform enforcing a rule, not failing)
-			if flaps.everStable {
-				connectGov.recordProvenEarlyDeath()
-			} else {
-				connectGov.recordEarlyDeath()
-			}
-		}
-		if flapWait := flaps.sessionEnded(lived); 0 < flapWait {
-			if ok, suppressed := flapErrThrottle.Allow(time.Now()); ok {
-				self.log.Infof("[t]flap %s session lived %s, holding reconnect %s (%d suppressed)\n", clientId, lived.Round(time.Millisecond), flapWait.Round(time.Millisecond), suppressed)
-			}
+		if flapWait := sessionEndWait(self.ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, true); 0 < flapWait {
 			select {
 			case <-self.ctx.Done():
 				return
@@ -1376,6 +1363,31 @@ func (self *h3ConnStream) close() {
 	self.packetConn.Close()
 }
 
+// sessionEndWait applies the end-of-session rules shared by the H1 and H3 loops
+// and returns the extra wait before the next connect, 0 for none.
+//
+// A session that dies young is evidence about the platform, but only if it was not
+// cut short by our own teardown (a reload, the reaper, shutdown) and was not the
+// platform enforcing the client limit. countsAsHealth is false for an auxiliary
+// transport beside H1, which is never a health signal; it is still held back so it
+// cannot redial in a tight loop.
+func sessionEndWait(ctx context.Context, flaps *flapGuard, lived time.Duration, clientLimitClosed bool, clientId string, log Logger, countsAsHealth bool) time.Duration {
+	if countsAsHealth && flaps.isYoung(lived) && ctx.Err() == nil && !clientLimitClosed {
+		if flaps.everStable {
+			connectGov.recordProvenEarlyDeath()
+		} else {
+			connectGov.recordEarlyDeath()
+		}
+	}
+	flapWait := flaps.sessionEnded(lived)
+	if 0 < flapWait && ctx.Err() == nil {
+		if ok, suppressed := flapErrThrottle.Allow(time.Now()); ok {
+			log.Infof("[t]flap %s session lived %s, holding reconnect %s (%d suppressed)\n", clientId, lived.Round(time.Millisecond), flapWait.Round(time.Millisecond), suppressed)
+		}
+	}
+	return flapWait
+}
+
 func (self *PlatformTransport) runH3(ptMode TransportMode, initialTimeout time.Duration, slowMultiple int) {
 	// connect and update route manager for this transport
 	defer self.cancel()
@@ -1400,6 +1412,9 @@ func (self *PlatformTransport) runH3(ptMode TransportMode, initialTimeout time.D
 
 	var authErrBackoff time.Duration
 	h3UnavailableLogged := false
+	// the same flap guard the H1 loop has: a platform that accepts the connection and
+	// then drops it must not make this transport redial the moment it ends
+	flaps := newFlapGuard(self.settings.FlapStableAfter, self.settings.ReconnectTimeout)
 
 	for {
 		// an eligible identity with the runtime gate off opens no socket and
@@ -1634,6 +1649,12 @@ func (self *PlatformTransport) runH3(ptMode TransportMode, initialTimeout time.D
 			connStream, err = TraceWithReturnError(fmt.Sprintf("[t]connect %s", clientId), connect)
 		} else {
 			connStream, err = connect()
+		}
+		// the governor reads the platform's health from every transport's connects; an
+		// auxiliary H3 beside H1 is never a health signal. (H3 is UDP, so it never
+		// goes through a proxy and the attempt budget would exempt it as direct.)
+		if !self.h3Gated() {
+			connectGov.recordAttempt(classifyConnectError(err, nil), nil)
 		}
 		if err != nil {
 			if isClientLimitCloseError(err) {
@@ -2298,16 +2319,27 @@ func (self *PlatformTransport) runH3(ptMode TransportMode, initialTimeout time.D
 			}
 		}
 		reconnect = NewReconnect(self.settings.ReconnectTimeout)
+		sessionStart := time.Now()
+		limitClosesBefore := self.clientLimitCloseCount.Load()
 		if self.log.V(2).Enabled() {
 			Trace(fmt.Sprintf("[t]connect run %s", clientId), c)
 		} else {
 			c()
 		}
 
-		select {
-		case <-self.ctx.Done():
-			return
-		case <-reconnect.After():
+		lived := time.Since(sessionStart)
+		if flapWait := sessionEndWait(self.ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, !self.h3Gated()); 0 < flapWait {
+			select {
+			case <-self.ctx.Done():
+				return
+			case <-time.After(flapWait):
+			}
+		} else {
+			select {
+			case <-self.ctx.Done():
+				return
+			case <-reconnect.After():
+			}
 		}
 	}
 }

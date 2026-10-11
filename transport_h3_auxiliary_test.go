@@ -776,3 +776,44 @@ func TestNextH3BackoffNeverExceedsTheCeiling(t *testing.T) {
 		t.Fatalf("a ceiling under the floor must hold steady, got %v then %v", a, b)
 	}
 }
+
+// The sole H3 transport feeds the governor with every connect, like H1. An
+// auxiliary H3 beside H1 never does.
+func TestH3ConnectAttemptsFeedTheGovernorOnlyWhenNotAuxiliary(t *testing.T) {
+	run := func(aux bool) int64 {
+		resetBackendDegraded()
+		t.Cleanup(resetBackendDegraded)
+		ResetProxyHealthForTesting()
+		t.Cleanup(ResetProxyHealthForTesting)
+		if aux {
+			RegisterProxy(0, "direct", "direct")
+		}
+		mode := TransportModeH3
+		transport, cancel := newClosedPortTransport(t, mode, aux)
+		if aux {
+			mode = TransportModeAuto
+			transport.targetMode = TransportModeAuto
+		}
+		transport.settings.QuicConnectTimeout = 50 * time.Millisecond
+		transport.settings.QuicHandshakeTimeout = 50 * time.Millisecond
+		transport.settings.ReconnectTimeout = 10 * time.Second
+		switchH3Gate(t, true)
+		before := connectGov.snapshot().Attempts
+		beforeStats := TransportModeStats().H3ConnectFailures
+		done := make(chan struct{})
+		go func() { defer close(done); transport.runH3(TransportModeH3, 0, 1) }()
+		deadline := time.Now().Add(3 * time.Second)
+		for TransportModeStats().H3ConnectFailures == beforeStats && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		cancel()
+		<-done
+		return connectGov.snapshot().Attempts - before
+	}
+	if got := run(false); got < 1 {
+		t.Fatal("a sole H3 connect failure was not seen by the governor")
+	}
+	if got := run(true); got != 0 {
+		t.Fatalf("an auxiliary H3 connect was fed to the governor (%d attempts)", got)
+	}
+}
