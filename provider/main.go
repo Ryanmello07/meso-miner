@@ -5091,6 +5091,12 @@ func renewClientJWT(ctx context.Context, apiUrl, byJwt string, clientId connect.
 // carry no verdict. The status is read from the "<code> <text>: <body>" prefix
 // that httpErrorFromResponse puts on every non-200 answer.
 func renewalHTTPRefusal(err error) bool {
+	// During an outage a 4xx cannot be trusted: a degraded backend or the gateway
+	// in front of it says no to good tokens, and minting a fresh identity off that
+	// answer loses the old one.
+	if renewalBackendDegraded() {
+		return false
+	}
 	msg := err.Error()
 	if len(msg) < 4 || msg[3] != ' ' {
 		return false
@@ -5099,8 +5105,13 @@ func renewalHTTPRefusal(err error) bool {
 	if convErr != nil {
 		return false
 	}
-	return 400 <= code && code < 500 && code != http.StatusRequestTimeout && code != http.StatusTooManyRequests
+	// 499 is a load balancer's "client closed request", not an answer about the token
+	return 400 <= code && code < 500 && code != http.StatusRequestTimeout && code != http.StatusTooManyRequests && code != 499
 }
+
+// renewalBackendDegraded reports whether the backend is failing right now. A
+// variable so tests can force either answer.
+var renewalBackendDegraded = connect.BackendDegraded
 
 // renewClientJWTFn is the injectable renewal entry point. It defaults to the
 // real network-backed renewClientJWT but can be overridden in tests to exercise
@@ -5361,6 +5372,18 @@ const revokedIdentityAuthFailureThreshold = 5
 // so tests need not wait minutes.
 var revocationCheckInterval = 2 * time.Minute
 
+// identityEvictionEnabled reports whether the revocation watcher may delete a
+// saved client identity at all. Off unless an operator sets
+// URNETWORK_EVICT_REVOKED_IDENTITIES=1: deleting an identity loses its history
+// and mints a new one, and the platform answers a revoked token by closing the
+// socket after the upgrade rather than with a 401, so the only 401s and 403s the
+// watcher can see are from gateways and WAFs. A proxy whose identity is truly
+// dead just keeps retrying under the backoff, which is far cheaper than losing a
+// good identity. A variable so tests can force either answer.
+var identityEvictionEnabled = func() bool {
+	return os.Getenv("URNETWORK_EVICT_REVOKED_IDENTITIES") == "1"
+}
+
 // identityEvictionBlocked reports whether evicting a saved client identity must
 // wait because the backend is failing. A variable so tests can force either answer.
 var identityEvictionBlocked = connect.BackendDegraded
@@ -5396,6 +5419,11 @@ func watchReusedIdentityForRevocation(ctx context.Context, identityKey string, p
 		// treating it as one deletes a good identity (and its earnings history) the
 		// moment the backend has a bad hour. Never decide this during an outage.
 		if connect.ProxyAuthRejectionCount(proxyIndex) >= revokedIdentityAuthFailureThreshold && !identityEvictionBlocked() {
+			if !identityEvictionEnabled() {
+				tlog("⚠️ [jwt-store] identity for %s was refused %d times; NOT evicting it (automatic eviction is off, set URNETWORK_EVICT_REVOKED_IDENTITIES=1 to enable)\n",
+					identityKey, revokedIdentityAuthFailureThreshold)
+				return
+			}
 			// Re-check the renewal signal AFTER the failure-count check: the
 			// renewal watcher may have closed revocationDone while this
 			// goroutine was between its select and this eviction decision
