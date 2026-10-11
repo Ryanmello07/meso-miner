@@ -140,6 +140,13 @@ func classifyConnectError(err error, stats *attemptStats) connectClass {
 		return connectUpgradeFail
 	case strings.Contains(msg, "tls:"), strings.Contains(msg, "x509"), strings.Contains(msg, "certificate"):
 		return connectTlsFail
+	case strings.Contains(msg, "socks connect"), strings.Contains(msg, "proxy") && strings.Contains(msg, "unreachable"):
+		// A SOCKS handshake that failed, even by timing out, is the proxy's
+		// failure. This must precede the timeout case: the attempt's byte count
+		// sums every dial it made, so earlier dials can carry it past the
+		// "platform answered" threshold, and a healthy backend then reads as
+		// degraded just because the proxy list is poor.
+		return connectSocksFail
 	case strings.Contains(msg, "timeout"), isTimeoutError(err):
 		if stats != nil && platformReachedBytes <= stats.rx.Load() {
 			return connectTimeoutPlatform

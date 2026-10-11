@@ -357,3 +357,26 @@ func TestGovernor_HardFailuresAreTimeoutsAfterTheAnswerAndRejectedUpgrades(t *te
 		t.Fatalf("hard failures = %d, want 3 (silent timeouts and socks failures are not hard)", got)
 	}
 }
+
+// A SOCKS handshake that timed out is the proxy's failure, however many bytes the
+// attempt's earlier dials moved. These are the real lines from a 1,100-proxy host
+// whose backend was healthy: the "last:" cause of every flagged timeout.
+func TestClassify_SocksHandshakeTimeoutsAreProxyFailuresNotPlatformOnes(t *testing.T) {
+	stats := &attemptStats{}
+	stats.rx.Store(6000) // earlier dials in the same attempt moved plenty
+	for _, msg := range []string{
+		"socks connect tcp 45.74.31.41:10062->65.49.70.70:443: read tcp 66.187.7.83:4806->45.74.31.41:10062: i/o timeout",
+		"socks connect tcp 156.225.20.83:1080->65.49.70.70:443: read tcp 66.187.7.83:4806->156.225.20.83:1080: i/o timeout",
+		"read tcp 66.187.7.83:4806->156.225.20.83:1080: i/o timeout (proxy 156.225.20.83:1080 unreachable)",
+	} {
+		err := &dialTimeoutError{failures: 2, rounds: 1, last: errors.New(msg)}
+		if got := classifyConnectError(err, stats); got != connectSocksFail {
+			t.Errorf("%q classified %v, want socks", msg, got)
+		}
+	}
+	// a timeout waiting on the platform itself, through an established tunnel, still counts
+	err := &dialTimeoutError{failures: 1, rounds: 1, last: errors.New("read tcp 66.187.7.83:4806->45.74.31.41:10062: i/o timeout")}
+	if got := classifyConnectError(err, stats); got != connectTimeoutPlatform {
+		t.Errorf("a post-handshake timeout classified %v, want timeout_platform", got)
+	}
+}
