@@ -1318,7 +1318,9 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 		// streak, so without this wait a slow backend that accepts the websocket
 		// and then drops it makes every proxy reconnect again immediately
 		lived := time.Since(sessionStart)
-		if flaps.isYoung(lived) {
+		// a session cut short by our own teardown (a reload, the reaper, shutdown)
+		// says nothing about the backend
+		if flaps.isYoung(lived) && self.ctx.Err() == nil {
 			connectGov.recordEarlyDeath()
 		}
 		if flapWait := flaps.sessionEnded(lived); 0 < flapWait {

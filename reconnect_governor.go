@@ -31,6 +31,13 @@ const govWindow = 60 * time.Second
 // produce a degraded verdict, so a handful of failures is never an outage.
 const govMinAttempts = 20
 
+// govMinHardFailures is how many attempts in the window must have been visibly
+// failed BY THE PLATFORM (a timeout after it answered, a rejected upgrade) for a
+// degraded verdict. Sessions that die young with no such failure beside them are
+// as likely to be proxies resetting connections as a struggling backend, and the
+// verdict throttles every reconnect on the host.
+const govMinHardFailures = 3
+
 // govDegradedRatio: below this share of good platform attempts the window is
 // degraded. A connect that dies young is not good.
 const govDegradedRatio = 0.2
@@ -169,9 +176,12 @@ type govSnapshot struct {
 	FailedBytes      int64
 	PlatformAttempts int64
 	PlatformGood     int64
-	Ratio            float64
-	Degraded         bool
-	WouldHold        int64
+	// HardFailures counts attempts the platform visibly failed: timeouts after it
+	// answered and rejected upgrades.
+	HardFailures int64
+	Ratio        float64
+	Degraded     bool
+	WouldHold    int64
 }
 
 type connectGovernor struct {
@@ -268,10 +278,11 @@ func (self *connectGovernor) snapshotWindow(window time.Duration) govSnapshot {
 	// governor would throttle the live proxies.
 	s.PlatformAttempts = s.OK + s.Classes[connectTimeoutPlatform] + s.Classes[connectUpgradeFail]
 	s.PlatformGood = max(0, s.OK-s.Early)
+	s.HardFailures = s.Classes[connectTimeoutPlatform] + s.Classes[connectUpgradeFail]
 	if 0 < s.PlatformAttempts {
 		s.Ratio = float64(s.PlatformGood) / float64(s.PlatformAttempts)
 	}
-	s.Degraded = govMinAttempts <= s.PlatformAttempts && s.Ratio < govDegradedRatio
+	s.Degraded = govMinAttempts <= s.PlatformAttempts && s.Ratio < govDegradedRatio && govMinHardFailures <= s.HardFailures
 	if s.Degraded {
 		s.WouldHold = max(0, s.Attempts-govShadowBudgetPerSecond*int64(govWindow/time.Second))
 	}

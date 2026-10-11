@@ -65,6 +65,14 @@ const (
 	// are not counted, so a healthy startup is never throttled by it.
 	budgetFailedBytesCeilingPerSec = 256 << 10
 
+	// the byte breaker only acts when at least this many attempts failed in the
+	// window and they are at least this share of all attempts
+	budgetMinByteBreakerFailures = 20
+	budgetByteBreakerShare       = 0.5
+	// the rate is cut for failing attempts only when the platform visibly failed
+	// at least this many in the recent window
+	budgetMinHardFailures = 2
+
 	// outageMarkerMaxAge is how recent the previous run's outage marker must be
 	// for a restart to start throttled.
 	outageMarkerMaxAge = 10 * time.Minute
@@ -159,6 +167,9 @@ type reconnectBudget struct {
 	// a restart in the middle of an outage starts throttled instead of stampeding
 	markerPath      string
 	lastMarkerWrite time.Time
+	// ioProbe, when set, is called at the start of every marker file operation.
+	// For tests that check no lock is held across file I/O.
+	ioProbe func()
 
 	// pick chooses the random slot's waiter; replaceable so tests are exact
 	pick func(n int) int
@@ -354,16 +365,30 @@ func (self *reconnectBudget) nextLocked() int {
 // of failure, open fast on evidence of success, hold in between.
 func (self *reconnectBudget) control() {
 	recent := self.gov.snapshotWindow(budgetRecentWindow)
+	// the marker's file operation runs after the lock is released
+	if after := self.adjust(recent); after != nil {
+		after()
+	}
+}
 
+// adjust applies one control decision under the lock and returns the marker file
+// operation to run once it is released, or nil.
+func (self *reconnectBudget) adjust(recent govSnapshot) func() {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
 	failedBytesPerSec := float64(recent.FailedBytes) / budgetRecentWindow.Seconds()
+	failedAttempts := recent.Attempts - recent.OK
+	mostlyFailing := budgetMinByteBreakerFailures <= failedAttempts && budgetByteBreakerShare*float64(recent.Attempts) <= float64(failedAttempts)
 	switch {
-	case failedBytesPerSec > budgetFailedBytesCeilingPerSec:
-		// whatever the verdict says, failed attempts are burning the pipe
+	case failedBytesPerSec > budgetFailedBytesCeilingPerSec && mostlyFailing:
+		// whatever the verdict says, failed attempts are burning the pipe. It needs
+		// most attempts to be failing: a healthy startup in which a minority of
+		// proxies fail after the TLS handshake spends real bytes on them and is not
+		// a flood.
 		self.rate = max(budgetFloorRate, self.rate/budgetDecreaseFactor)
-	case budgetMinDecreaseAttempts <= recent.PlatformAttempts && recent.Ratio < govDegradedRatio:
+	case budgetMinDecreaseAttempts <= recent.PlatformAttempts && recent.Ratio < govDegradedRatio &&
+		budgetMinHardFailures <= recent.HardFailures:
 		self.rate = max(budgetFloorRate, self.rate/budgetDecreaseFactor)
 	case self.rate < budgetCeilingRate &&
 		(budgetMinIncreaseAttempts <= recent.PlatformAttempts && budgetOpenRatio <= recent.Ratio):
@@ -379,33 +404,47 @@ func (self *reconnectBudget) control() {
 	if self.rate < budgetCeilingRate {
 		self.lastOutage.Store(self.now().UnixNano())
 	}
-	self.syncOutageMarkerLocked()
+	return self.planOutageMarkerLocked()
 }
 
 // writeOutageMarker leaves the marker file. Errors are ignored: the marker is a
 // courtesy to the next run, never a reason to fail.
 func (self *reconnectBudget) writeOutageMarker(path string) {
+	if self.ioProbe != nil {
+		self.ioProbe()
+	}
 	_ = os.MkdirAll(filepath.Dir(path), 0o700)
 	_ = os.WriteFile(path, []byte(self.now().UTC().Format(time.RFC3339)+"\n"), 0o600)
 }
 
-// syncOutageMarkerLocked keeps the marker true to the budget: present (and fresh)
-// while throttled, gone once it has reopened. Caller holds mu.
-func (self *reconnectBudget) syncOutageMarkerLocked() {
-	if self.markerPath == "" {
-		return
+func (self *reconnectBudget) removeOutageMarker(path string) {
+	if self.ioProbe != nil {
+		self.ioProbe()
 	}
+	_ = os.Remove(path)
+}
+
+// planOutageMarkerLocked keeps the marker true to the budget: present (and fresh)
+// while throttled, gone once it has reopened. It only DECIDES under the lock and
+// returns the file operation to run after the lock is released, so a slow disk
+// never stalls anything waiting on the budget. Caller holds mu.
+func (self *reconnectBudget) planOutageMarkerLocked() func() {
+	if self.markerPath == "" {
+		return nil
+	}
+	path := self.markerPath
 	if self.rate < budgetCeilingRate || 0 < len(self.queue) {
 		if outageMarkerWriteEvery <= self.now().Sub(self.lastMarkerWrite) {
 			self.lastMarkerWrite = self.now()
-			self.writeOutageMarker(self.markerPath)
+			return func() { self.writeOutageMarker(path) }
 		}
-		return
+		return nil
 	}
 	if !self.lastMarkerWrite.IsZero() {
 		self.lastMarkerWrite = time.Time{}
-		_ = os.Remove(self.markerPath)
+		return func() { self.removeOutageMarker(path) }
 	}
+	return nil
 }
 
 // restoreOutageMarker reads the previous run's marker. A recent one means the

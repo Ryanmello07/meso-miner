@@ -91,9 +91,11 @@ func TestGovernor_ConnectsThatDieYoungCountAsFailures(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		g.recordEarlyDeath()
 	}
+	// the backend also visibly failed some attempts, as it did in the incident
+	record(g, connectUpgradeFail, govMinHardFailures)
 	s := g.snapshot()
 	if !s.Degraded {
-		t.Fatalf("100 connects that all died young must read as degraded: %+v", s)
+		t.Fatalf("100 connects that all died young, beside visible platform failures, must read as degraded: %+v", s)
 	}
 	if s.Early != 100 {
 		t.Fatalf("early deaths = %d, want 100", s.Early)
@@ -326,5 +328,32 @@ func TestGovernorStatusNow_ReportsModeRateAndWaiting(t *testing.T) {
 	defer restore()
 	if got := GovernorStatusNow().Mode; got != "off" {
 		t.Fatalf("mode = %q, want off", got)
+	}
+}
+
+// Sessions that die young with NO visible platform failure beside them are as
+// likely to be proxies resetting connections (rotating residential IPs, a flaky
+// list) as a struggling backend. The flap guard already slows such proxies one by
+// one; the fleet-wide verdict, which throttles every reconnect, needs the
+// platform itself to have visibly failed some attempts.
+func TestGovernor_FlappingProxiesAloneAreNotABackendOutage(t *testing.T) {
+	g, _ := newTestGovernor()
+	record(g, connectOK, 200)
+	for i := 0; i < 200; i++ {
+		g.recordEarlyDeath()
+	}
+	if g.snapshot().Degraded {
+		t.Fatal("proxy-side flapping with no platform failure must not throttle the fleet")
+	}
+}
+
+func TestGovernor_HardFailuresAreTimeoutsAfterTheAnswerAndRejectedUpgrades(t *testing.T) {
+	g, _ := newTestGovernor()
+	record(g, connectTimeoutPlatform, 2)
+	record(g, connectUpgradeFail, 1)
+	record(g, connectTimeoutNoReply, 50)
+	record(g, connectSocksFail, 50)
+	if got := g.snapshot().HardFailures; got != 3 {
+		t.Fatalf("hard failures = %d, want 3 (silent timeouts and socks failures are not hard)", got)
 	}
 }

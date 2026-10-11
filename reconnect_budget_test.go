@@ -793,3 +793,73 @@ func TestParseGovernMode_DefaultsToEnforce(t *testing.T) {
 		}
 	}
 }
+
+// The budget reacts only to failures the platform visibly produced, for the same
+// reason the verdict does.
+func TestBudget_FlappingWithoutPlatformFailuresDoesNotCutTheRate(t *testing.T) {
+	h := newBudgetHarness()
+	h.attempts(connectOK, 100)
+	for i := 0; i < 100; i++ {
+		h.gov.recordEarlyDeath()
+	}
+	h.budget.control()
+	if h.budget.currentRate() != budgetCeilingRate {
+		t.Fatal("proxy-side flapping must not throttle reconnects")
+	}
+}
+
+// A healthy startup in which a minority of proxies fail after the TLS handshake
+// spends real bytes on those failures. That is not a flood and must not throttle
+// the other proxies.
+func TestBudget_ByteBreakerNeedsMostAttemptsToBeFailing(t *testing.T) {
+	h := newBudgetHarness()
+	h.failedBytes(connectOK, 850, 20_000)
+	h.failedBytes(connectTimeoutNoReply, 150, 20_000) // 3 MB of failures in the window, 15% of attempts
+	h.budget.control()
+	if h.budget.currentRate() != budgetCeilingRate {
+		t.Fatal("a minority of failing proxies must not trip the byte breaker")
+	}
+	// but when most attempts fail the bytes are a flood
+	storm := newBudgetHarness()
+	storm.failedBytes(connectOK, 100, 20_000)
+	storm.failedBytes(connectTimeoutNoReply, 400, 20_000)
+	storm.budget.control()
+	if storm.budget.currentRate() != budgetCeilingRate/budgetDecreaseFactor {
+		t.Fatal("when most attempts fail and burn the bytes the breaker must cut")
+	}
+}
+
+// The marker is a file. File I/O on a slow or stalled disk must never happen
+// while the budget lock is held: that lock is also taken (through the backend
+// verdict) under the proxy health lock, so a stalled write would stall every
+// proxy's health bookkeeping.
+func TestGovernState_MarkerIOHappensWithoutTheBudgetLock(t *testing.T) {
+	path := t.TempDir() + "/govern_outage"
+	h := newBudgetHarness()
+	h.budget.markerPath = path
+
+	lockFreeDuringIO := 0
+	ioCalls := 0
+	h.budget.ioProbe = func() {
+		ioCalls++
+		if h.budget.mu.TryLock() {
+			lockFreeDuringIO++
+			h.budget.mu.Unlock()
+		}
+	}
+
+	h.attempts(connectTimeoutPlatform, 200)
+	h.attempts(connectUpgradeFail, 5)
+	h.budget.control() // throttles and writes the marker
+	for i := 0; i < 20 && h.budget.throttled(); i++ {
+		h.advance(budgetControlInterval)
+		h.attempts(connectOK, 20)
+		h.budget.control() // eventually reopens and removes the marker
+	}
+	if ioCalls < 2 {
+		t.Fatalf("setup: expected a write and a remove, saw %d file operations", ioCalls)
+	}
+	if lockFreeDuringIO != ioCalls {
+		t.Fatalf("the budget lock was held during %d of %d file operations", ioCalls-lockFreeDuringIO, ioCalls)
+	}
+}

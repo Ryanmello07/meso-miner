@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// dialDeadlineNoise is how close to the request deadline a dial error must land
+// to be treated as the deadline's own doing rather than a cause.
+const dialDeadlineNoise = 25 * time.Millisecond
+
 // dialTimeoutError is what a dial returns when no dialer connected before the
 // request deadline. It used to be a bare "Timeout." whatever had gone wrong, so
 // a refused connection, a dead SOCKS proxy, a rejected upgrade and a platform

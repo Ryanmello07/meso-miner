@@ -470,6 +470,9 @@ func TestRevocationWatcher_StillEvictsAnIdentityThePlatformRejects(t *testing.T)
 	prev := identityEvictionBlocked
 	identityEvictionBlocked = func() bool { return false }
 	defer func() { identityEvictionBlocked = prev }()
+	prevOn := identityEvictionEnabled
+	identityEvictionEnabled = func() bool { return true } // the operator opted in
+	defer func() { identityEvictionEnabled = prevOn }()
 
 	store := withTestClientJWTStore(t)
 	connect.ResetProxyHealthForTesting()
@@ -499,6 +502,9 @@ func TestRevocationWatcher_NeverEvictsWhileTheBackendIsDegraded(t *testing.T) {
 	shortRevocationCheck(t)
 	var degraded atomic.Bool
 	degraded.Store(true)
+	prevOn := identityEvictionEnabled
+	identityEvictionEnabled = func() bool { return true }
+	defer func() { identityEvictionEnabled = prevOn }()
 	prev := identityEvictionBlocked
 	identityEvictionBlocked = func() bool { return degraded.Load() }
 	defer func() { identityEvictionBlocked = prev }()
@@ -529,5 +535,79 @@ func TestRevocationWatcher_NeverEvictsWhileTheBackendIsDegraded(t *testing.T) {
 	}
 	if _, ok := store.Get("deg.example:1080"); ok {
 		t.Fatal("after the outage a persistent explicit rejection should still evict")
+	}
+}
+
+// Deleting a saved identity loses its history and mints a new one, and the cases
+// where the platform really refuses a revoked token cannot be told apart from a
+// WAF or a gateway saying no. So eviction is something an operator turns on, not
+// something a bad hour does to them.
+func TestRevocationWatcher_NeverEvictsByDefault(t *testing.T) {
+	shortRevocationCheck(t)
+	prev := identityEvictionBlocked
+	identityEvictionBlocked = func() bool { return false }
+	defer func() { identityEvictionBlocked = prev }()
+
+	store := withTestClientJWTStore(t)
+	connect.ResetProxyHealthForTesting()
+	connect.RegisterProxy(704, "dflt.example:1080", "dflt.example:1080")
+	seedIdentity(t, store, "dflt.example:1080")
+	for i := 0; i < 50; i++ {
+		connect.RecordProxyAuthFailure(704, rejectedAuthError{})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := runRevocationWatcher(ctx, "dflt.example:1080", 704)
+	time.Sleep(250 * time.Millisecond)
+	cancel()
+	<-done
+
+	if _, ok := store.Get("dflt.example:1080"); !ok {
+		t.Fatal("an identity was deleted although automatic eviction is off by default")
+	}
+}
+
+func TestIdentityEvictionEnabled_IsAnExplicitOptIn(t *testing.T) {
+	t.Setenv("URNETWORK_EVICT_REVOKED_IDENTITIES", "")
+	if identityEvictionEnabled() {
+		t.Fatal("eviction must be off unless asked for")
+	}
+	t.Setenv("URNETWORK_EVICT_REVOKED_IDENTITIES", "1")
+	if !identityEvictionEnabled() {
+		t.Fatal("URNETWORK_EVICT_REVOKED_IDENTITIES=1 turns it on")
+	}
+}
+
+func TestRenewalHTTPRefusal_OverloadAndGatewaysAreNotARefusal(t *testing.T) {
+	prev := renewalBackendDegraded
+	renewalBackendDegraded = func() bool { return false }
+	defer func() { renewalBackendDegraded = prev }()
+
+	cases := []struct {
+		msg  string
+		want bool
+	}{
+		{"401 Unauthorized: bad token", true},
+		{"403 Forbidden: nope", true},
+		{"404 Not Found: x", true},
+		{"408 Request Timeout: slow", false},
+		{"429 Too Many Requests: slow down", false},
+		{"499 Client Closed Request: load balancer", false}, // an nginx gateway, not an answer about the token
+		{"500 Internal Server Error: boom", false},
+		{"503 Service Unavailable: db", false},
+	}
+	for _, c := range cases {
+		if got := renewalHTTPRefusal(errors.New(c.msg)); got != c.want {
+			t.Errorf("%q: refusal=%v, want %v", c.msg, got, c.want)
+		}
+	}
+
+	// during an outage even a 401 or 403 is not trusted: minting a fresh identity
+	// off a refusal the degraded backend (or its gateway) produced loses the old one
+	renewalBackendDegraded = func() bool { return true }
+	for _, msg := range []string{"401 Unauthorized: x", "403 Forbidden: x", "404 Not Found: x"} {
+		if renewalHTTPRefusal(errors.New(msg)) {
+			t.Errorf("%q counted as a refusal while the backend is degraded", msg)
+		}
 	}
 }

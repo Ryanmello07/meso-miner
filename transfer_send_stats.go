@@ -53,8 +53,6 @@ func TransferSendStatsNow() TransferSendStats {
 func recordTransferFirstSend(byteCount int) {
 	transferSendCounters.firstFrames.Add(1)
 	transferSendCounters.firstBytes.Add(int64(byteCount))
-	// first sends are what pays for resends
-	transferResendBudget.earn(byteCount)
 }
 
 func recordTransferResendDeferred(byteCount int) {

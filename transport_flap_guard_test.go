@@ -294,3 +294,38 @@ func TestRunH1_FailedAttemptsReachTheGovernor(t *testing.T) {
 		}
 	}
 }
+
+// A session cut short by our own teardown (a reload, the reaper, shutdown) says
+// nothing about the backend and must not count as one that died young.
+func TestRunH1_LocalTeardownIsNotAnEarlyDeath(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var accepts atomic.Int64
+	var stamps flapStamps
+	server := flapServer(time.Hour, &accepts, &stamps) // holds the session open
+	defer server.Close()
+
+	settings := DefaultPlatformTransportSettings()
+	settings.ReconnectTimeout = 20 * time.Millisecond
+	settings.FlapStableAfter = time.Hour // any session counts as young
+
+	before := connectGov.snapshot()
+	transport := newFlapTestTransport(t, ctx, server.URL, settings)
+
+	deadline := time.After(10 * time.Second)
+	for accepts.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("the transport never connected")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	transport.Close() // local teardown of a live session
+	time.Sleep(500 * time.Millisecond)
+
+	if got := connectGov.snapshot().Early - before.Early; got != 0 {
+		t.Fatalf("a locally cancelled session was counted as dying young (%d)", got)
+	}
+}

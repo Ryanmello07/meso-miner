@@ -97,3 +97,12 @@ func retryAllowed(byteCount int) bool {
 	}
 	return transferResendBudget.allow(byteCount)
 }
+
+// resendIsFree reports whether the next send of an item is exempt from the budget.
+// sendCount is how many times the item has been sent so far. The second send is
+// free for every frame, and the frame at the head of the sequence is free through
+// its fifth send.
+func resendIsFree(sendCount int, isHead bool) bool {
+	next := sendCount + 1
+	return next <= 2 || (isHead && next <= 5)
+}
