@@ -283,18 +283,64 @@ func (self *connectGovernor) snapshotWindow(window time.Duration) govSnapshot {
 type govReporter struct {
 	degraded bool
 	quiet    int
+
+	// mode, rate and waiting describe the budget in the line. All optional: a
+	// zero reporter reads as shadow mode with no budget fields.
+	mode    func() governMode
+	rate    func() float64
+	waiting func() int
+}
+
+func (self *govReporter) currentMode() governMode {
+	if self.mode == nil {
+		return governShadow
+	}
+	return self.mode()
+}
+
+// degradedLabel says what the governor is actually doing about the verdict.
+func (self *govReporter) degradedLabel() string {
+	switch self.currentMode() {
+	case governEnforce:
+		return "DEGRADED (enforcing: connects run under a shared attempt budget)"
+	case governOff:
+		return "DEGRADED (governor off: not acting)"
+	}
+	return "DEGRADED (shadow: observing only)"
+}
+
+// budgetFields is the tail of every line: mode, and the budget when it is known.
+func (self *govReporter) budgetFields() string {
+	out := " mode=" + govModeName(self.currentMode())
+	if self.rate != nil {
+		out += fmt.Sprintf(" rate=%.1f/s", self.rate())
+	}
+	if self.waiting != nil {
+		out += fmt.Sprintf(" waiting=%d", self.waiting())
+	}
+	return out
+}
+
+func govModeName(mode governMode) string {
+	switch mode {
+	case governOff:
+		return "off"
+	case governEnforce:
+		return "enforce"
+	}
+	return "shadow"
 }
 
 func (self *govReporter) next(s govSnapshot) (string, bool) {
 	if s.Degraded {
 		self.degraded = true
 		self.quiet = 0
-		return govLine("DEGRADED (shadow: observing only)", s), true
+		return govLine(self.degradedLabel(), s) + self.budgetFields(), true
 	}
 	if self.degraded {
 		self.degraded = false
 		self.quiet = 0
-		return govLine("recovered", s), true
+		return govLine("recovered", s) + self.budgetFields(), true
 	}
 	if s.Attempts == 0 {
 		return "", false
@@ -302,7 +348,7 @@ func (self *govReporter) next(s govSnapshot) (string, bool) {
 	self.quiet += 1
 	if govHeartbeatTicks <= self.quiet {
 		self.quiet = 0
-		return govLine("ok", s), true
+		return govLine("ok", s) + self.budgetFields(), true
 	}
 	return "", false
 }
@@ -334,7 +380,11 @@ var govLoopOnce sync.Once
 func startGovernorLoop() {
 	govLoopOnce.Do(func() {
 		go func() {
-			reporter := &govReporter{}
+			reporter := &govReporter{
+				mode:    currentGovernMode,
+				rate:    connectBudget.currentRate,
+				waiting: connectBudget.queued,
+			}
 			ticker := time.NewTicker(time.Minute)
 			defer ticker.Stop()
 			for range ticker.C {
@@ -348,20 +398,38 @@ func startGovernorLoop() {
 
 // GovernorStatus is the exported view of the governor for the health heartbeat.
 type GovernorStatus struct {
-	Degraded  bool
-	Attempts  int64
-	Connected int64
-	DiedYoung int64
-	WouldHold int64
+	// Mode is "off", "shadow" or "enforce"
+	Mode string
+	// Verdict is "ok" or "degraded"
+	Verdict  string
+	Degraded bool
+	// BudgetRate is the attempts per second connects are admitted under
+	BudgetRate float64
+	// Waiting is how many proxies are waiting their turn under the budget
+	Waiting      int
+	Attempts     int64
+	Connected    int64
+	DiedYoung    int64
+	WouldHold    int64
+	FlapBackoffs int64
 }
 
 func GovernorStatusNow() GovernorStatus {
 	s := connectGov.snapshot()
+	verdict := "ok"
+	if s.Degraded {
+		verdict = "degraded"
+	}
 	return GovernorStatus{
-		Degraded:  s.Degraded,
-		Attempts:  s.Attempts,
-		Connected: s.OK,
-		DiedYoung: s.Early,
-		WouldHold: s.WouldHold,
+		Mode:         govModeName(currentGovernMode()),
+		Verdict:      verdict,
+		Degraded:     s.Degraded,
+		BudgetRate:   connectBudget.currentRate(),
+		Waiting:      connectBudget.queued(),
+		Attempts:     s.Attempts,
+		Connected:    s.OK,
+		DiedYoung:    s.Early,
+		WouldHold:    s.WouldHold,
+		FlapBackoffs: TransportFlapBackoffs(),
 	}
 }

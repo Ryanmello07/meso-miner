@@ -281,3 +281,50 @@ func TestGovernor_PoorProxyListOnAHealthyBackendIsHealthy(t *testing.T) {
 		t.Fatalf("a mostly dead proxy list must not look like an outage: %+v", g.snapshot())
 	}
 }
+
+// The label must say what the governor is actually doing. In enforce mode the
+// line used to claim "observing only", which sent an operator looking for a
+// shadow-mode setting that was not on.
+func TestGovernorReport_NamesTheModeHonestly(t *testing.T) {
+	g, _ := newTestGovernor()
+	record(g, connectTimeoutPlatform, 100)
+
+	enforcing := &govReporter{mode: func() governMode { return governEnforce }, rate: func() float64 { return 8 }, waiting: func() int { return 321 }}
+	line, ok := enforcing.next(g.snapshot())
+	if !ok || !strings.Contains(line, "enforcing") || strings.Contains(line, "observing only") {
+		t.Fatalf("enforce mode must say it is enforcing, got %q", line)
+	}
+	for _, want := range []string{"mode=enforce", "rate=8.0/s", "waiting=321"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("missing %q in %q", want, line)
+		}
+	}
+
+	shadow := &govReporter{mode: func() governMode { return governShadow }}
+	line, _ = shadow.next(g.snapshot())
+	if !strings.Contains(line, "observing only") || !strings.Contains(line, "mode=shadow") {
+		t.Fatalf("shadow mode must say it only observes, got %q", line)
+	}
+}
+
+func TestGovernorStatusNow_ReportsModeRateAndWaiting(t *testing.T) {
+	defer setGovernModeForTest(governEnforce)()
+	connectBudget.setRate(25)
+	defer connectBudget.setRate(budgetCeilingRate)
+
+	s := GovernorStatusNow()
+	if s.Mode != "enforce" {
+		t.Fatalf("mode = %q, want enforce", s.Mode)
+	}
+	if s.BudgetRate != 25 {
+		t.Fatalf("budget rate = %v, want 25", s.BudgetRate)
+	}
+	if s.Verdict != "ok" && s.Verdict != "degraded" {
+		t.Fatalf("verdict = %q", s.Verdict)
+	}
+	restore := setGovernModeForTest(governOff)
+	defer restore()
+	if got := GovernorStatusNow().Mode; got != "off" {
+		t.Fatalf("mode = %q, want off", got)
+	}
+}
