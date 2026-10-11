@@ -5,6 +5,7 @@ import (
 	"math"
 	mathrand "math/rand"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -55,6 +56,20 @@ const (
 	budgetMinIncreaseAttempts = 3
 	// share of good attempts at which the budget starts opening
 	budgetOpenRatio = 0.5
+
+	// budgetFailedBytesCeilingPerSec bounds what failed connect attempts may burn
+	// per second (about 2 Mbit/s). The classifier can be wrong about why attempts
+	// fail; the bytes they spend are not an opinion. Failed attempts in ordinary
+	// operation cost a few tens of KB/s, and dead proxies refuse in a few hundred
+	// bytes, so this only trips on a real storm. Bytes of attempts that connected
+	// are not counted, so a healthy startup is never throttled by it.
+	budgetFailedBytesCeilingPerSec = 256 << 10
+
+	// outageMarkerMaxAge is how recent the previous run's outage marker must be
+	// for a restart to start throttled.
+	outageMarkerMaxAge = 10 * time.Minute
+	// outageMarkerWriteEvery bounds how often a throttled budget touches the marker.
+	outageMarkerWriteEvery = 30 * time.Second
 )
 
 // A waiter that finds the dispatcher has not ticked for budgetStallGrace is let
@@ -134,6 +149,11 @@ type reconnectBudget struct {
 	// lastOutage is the unix nanos of the last control tick that found the
 	// budget throttled
 	lastOutage atomic.Int64
+
+	// markerPath, when set, is a file that exists while the budget is throttled so
+	// a restart in the middle of an outage starts throttled instead of stampeding
+	markerPath      string
+	lastMarkerWrite time.Time
 
 	// pick chooses the random slot's waiter; replaceable so tests are exact
 	pick func(n int) int
@@ -333,7 +353,11 @@ func (self *reconnectBudget) control() {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
+	failedBytesPerSec := float64(recent.FailedBytes) / budgetRecentWindow.Seconds()
 	switch {
+	case failedBytesPerSec > budgetFailedBytesCeilingPerSec:
+		// whatever the verdict says, failed attempts are burning the pipe
+		self.rate = max(budgetFloorRate, self.rate/budgetDecreaseFactor)
 	case budgetMinDecreaseAttempts <= recent.PlatformAttempts && recent.Ratio < govDegradedRatio:
 		self.rate = max(budgetFloorRate, self.rate/budgetDecreaseFactor)
 	case self.rate < budgetCeilingRate &&
@@ -350,6 +374,50 @@ func (self *reconnectBudget) control() {
 	if self.rate < budgetCeilingRate {
 		self.lastOutage.Store(self.now().UnixNano())
 	}
+	self.syncOutageMarkerLocked()
+}
+
+// writeOutageMarker leaves the marker file. Errors are ignored: the marker is a
+// courtesy to the next run, never a reason to fail.
+func (self *reconnectBudget) writeOutageMarker(path string) {
+	_ = os.MkdirAll(filepath.Dir(path), 0o700)
+	_ = os.WriteFile(path, []byte(self.now().UTC().Format(time.RFC3339)+"\n"), 0o600)
+}
+
+// syncOutageMarkerLocked keeps the marker true to the budget: present (and fresh)
+// while throttled, gone once it has reopened. Caller holds mu.
+func (self *reconnectBudget) syncOutageMarkerLocked() {
+	if self.markerPath == "" {
+		return
+	}
+	if self.rate < budgetCeilingRate || 0 < len(self.queue) {
+		if outageMarkerWriteEvery <= self.now().Sub(self.lastMarkerWrite) {
+			self.lastMarkerWrite = self.now()
+			self.writeOutageMarker(self.markerPath)
+		}
+		return
+	}
+	if !self.lastMarkerWrite.IsZero() {
+		self.lastMarkerWrite = time.Time{}
+		_ = os.Remove(self.markerPath)
+	}
+}
+
+// restoreOutageMarker reads the previous run's marker. A recent one means the
+// backend was failing when that run ended, so this one starts at the floor and
+// earns its way up on evidence; an absent or old one starts open, so a healthy
+// restart or hot swap pays nothing.
+func (self *reconnectBudget) restoreOutageMarker(path string, now time.Time) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+	self.markerPath = path
+	info, err := os.Stat(path)
+	if err != nil || outageMarkerMaxAge <= now.Sub(info.ModTime()) {
+		return
+	}
+	self.rate = budgetFloorRate
+	self.lastOutage.Store(info.ModTime().UnixNano())
+	self.lastMarkerWrite = now
 }
 
 // outageRecent reports whether the budget is throttled now or was within d. A
@@ -447,3 +515,13 @@ var backendDegradedNow = func() bool {
 // first. Unlike OutageRecent it also works in shadow mode, because it only
 // reads what the governor observed.
 func BackendDegraded() bool { return backendDegradedNow() }
+
+// InitGovernState tells the governor where to keep its outage marker and reads
+// the previous run's. Call once at startup. It does nothing unless the governor
+// is enforcing.
+func InitGovernState(markerPath string) {
+	if currentGovernMode() != governEnforce {
+		return
+	}
+	connectBudget.restoreOutageMarker(markerPath, time.Now())
+}

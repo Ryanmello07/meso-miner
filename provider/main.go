@@ -2901,6 +2901,10 @@ func runDegradedProxyReaper(ctx context.Context, proxyCancelMap map[string]conte
 func provide(opts docopt.Opts) {
 	connect.CritLogger = critLog
 	installScoutScorer()
+	if home, err := os.UserHomeDir(); err == nil {
+		// a restart in the middle of a backend outage starts throttled
+		connect.InitGovernState(filepath.Join(home, ".urnetwork", "govern_outage"))
+	}
 
 	port, _ := opts.Int("--port")
 

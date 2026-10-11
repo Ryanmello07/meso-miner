@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -655,5 +656,111 @@ func TestBudget_LowScoresStillComeBackAtTheRamp(t *testing.T) {
 	}
 	if count != parked || h.now.Sub(start) > 90*time.Second {
 		t.Fatalf("released %d of %d in %s", count, parked, h.now.Sub(start))
+	}
+}
+
+func (h *budgetHarness) failedBytes(class connectClass, n int, bytesEach int64) {
+	for i := 0; i < n; i++ {
+		st := &attemptStats{}
+		st.tx.Store(bytesEach)
+		h.gov.recordAttempt(class, st)
+	}
+}
+
+// The classifier can be wrong about WHY attempts fail. The bytes they burn are
+// not an opinion: a flood of failed attempts that the verdict calls ambiguous
+// still has to be cut.
+func TestBudget_FailedAttemptBytesCutTheRateEvenWhenTheVerdictIsUnsure(t *testing.T) {
+	h := newBudgetHarness()
+	h.failedBytes(connectTimeoutNoReply, 400, 20_000) // 8 MB of failures in the window
+	if h.gov.snapshotWindow(budgetRecentWindow).Degraded {
+		t.Fatal("setup: silent timeouts alone must not produce a verdict")
+	}
+	h.budget.control()
+	if got := h.budget.currentRate(); got != budgetCeilingRate/budgetDecreaseFactor {
+		t.Fatalf("failed attempts burned %d bytes but the rate is %v", 400*20_000, got)
+	}
+}
+
+func TestBudget_SuccessfulConnectsNeverTripTheByteBreaker(t *testing.T) {
+	h := newBudgetHarness()
+	h.failedBytes(connectOK, 2000, 20_000) // a big healthy startup: 40 MB of handshakes
+	h.budget.control()
+	if h.budget.currentRate() != budgetCeilingRate {
+		t.Fatal("a healthy startup spends bytes on connects that succeed and must not be throttled")
+	}
+}
+
+func TestBudget_CheapFailuresDoNotTripTheByteBreaker(t *testing.T) {
+	h := newBudgetHarness()
+	h.failedBytes(connectSocksFail, 2000, 300) // dead proxies refuse in a few hundred bytes
+	h.budget.control()
+	if h.budget.currentRate() != budgetCeilingRate {
+		t.Fatal("dead proxies are cheap and must not throttle the fleet")
+	}
+}
+
+// A restart in the middle of an outage must not stampede: the previous run left
+// a marker, and the new one starts throttled and ramps on evidence.
+func TestGovernState_RestartDuringAnOutageStartsThrottled(t *testing.T) {
+	path := t.TempDir() + "/govern_outage"
+	h := newBudgetHarness()
+	h.attempts(connectTimeoutPlatform, 200)
+	h.budget.control()
+	h.budget.writeOutageMarker(path)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("a throttled budget must leave a marker: %v", err)
+	}
+
+	next := newBudgetHarness()
+	next.budget.restoreOutageMarker(path, *next.now)
+	if got := next.budget.currentRate(); got != budgetFloorRate {
+		t.Fatalf("a restart during an outage must start at the floor, got %v", got)
+	}
+	if !next.budget.outageRecent(time.Minute) {
+		t.Fatal("the restarted process must know an outage was in progress")
+	}
+}
+
+// A healthy restart or hot swap pays nothing.
+func TestGovernState_HealthyRestartStartsOpen(t *testing.T) {
+	dir := t.TempDir()
+	h := newBudgetHarness()
+	h.budget.restoreOutageMarker(dir+"/missing", *h.now)
+	if h.budget.currentRate() != budgetCeilingRate || h.budget.throttled() {
+		t.Fatal("with no marker the budget starts open")
+	}
+
+	stale := dir + "/stale"
+	if err := os.WriteFile(stale, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := h.now.Add(-2 * outageMarkerMaxAge)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	h.budget.restoreOutageMarker(stale, *h.now)
+	if h.budget.currentRate() != budgetCeilingRate {
+		t.Fatal("a marker from a long time ago is not an outage in progress")
+	}
+}
+
+func TestGovernState_MarkerClearsWhenTheBudgetReopens(t *testing.T) {
+	path := t.TempDir() + "/govern_outage"
+	h := newBudgetHarness()
+	h.budget.setRate(budgetFloorRate)
+	h.budget.markerPath = path
+	h.budget.writeOutageMarker(path)
+
+	for i := 0; i < 20 && h.budget.throttled(); i++ {
+		h.advance(budgetControlInterval)
+		h.attempts(connectOK, 20)
+		h.budget.control()
+	}
+	if h.budget.throttled() {
+		t.Fatal("setup: should have reopened")
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("the marker must be removed once the budget is open again")
 	}
 }
