@@ -31,6 +31,7 @@ var (
 	authErrThrottle   = newLogThrottle(time.Minute)
 	selectErrThrottle = newLogThrottle(time.Minute)
 	writeErrThrottle  = newLogThrottle(time.Minute)
+	flapErrThrottle   = newLogThrottle(time.Minute)
 )
 
 // backendFailState is the backend health signal: a count of consecutive
@@ -275,6 +276,12 @@ type PlatformTransportSettings struct {
 	PingTimeout          time.Duration
 	WriteTimeout         time.Duration
 	ReadTimeout          time.Duration
+
+	// FlapStableAfter is how long a platform session must live before the next
+	// reconnect is treated as ordinary. Sessions that die sooner extend the wait
+	// before the next connect (see flapGuard). Zero uses the default, negative
+	// disables the guard.
+	FlapStableAfter      time.Duration
 	TransportGenerator   func() (sendTransport Transport, receiveTransport Transport)
 	TransportBufferSize  int
 	InactiveDrainTimeout time.Duration
@@ -763,6 +770,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 	}
 
 	var authErrBackoff time.Duration
+	flaps := newFlapGuard(self.settings.FlapStableAfter, self.settings.ReconnectTimeout)
 
 	for {
 		// stand down while a strictly better mode is active
@@ -1279,16 +1287,33 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 		}
 
 		reconnect = NewReconnect(self.settings.ReconnectTimeout)
+		sessionStart := time.Now()
 		if self.log.V(2).Enabled() {
 			Trace(fmt.Sprintf("[t]connect run %s", clientId), c)
 		} else {
 			c()
 		}
 
-		select {
-		case <-self.ctx.Done():
-			return
-		case <-reconnect.After():
+		// a session that dies young is not a success: the connect that began it
+		// already reset the failed-connect backoff and the shared failure
+		// streak, so without this wait a slow backend that accepts the websocket
+		// and then drops it makes every proxy reconnect again immediately
+		lived := time.Since(sessionStart)
+		if flapWait := flaps.sessionEnded(lived); 0 < flapWait {
+			if ok, suppressed := flapErrThrottle.Allow(time.Now()); ok {
+				self.log.Infof("[t]flap %s session lived %s, holding reconnect %s (%d suppressed)\n", clientId, lived.Round(time.Millisecond), flapWait.Round(time.Millisecond), suppressed)
+			}
+			select {
+			case <-self.ctx.Done():
+				return
+			case <-time.After(flapWait):
+			}
+		} else {
+			select {
+			case <-self.ctx.Done():
+				return
+			case <-reconnect.After():
+			}
 		}
 	}
 }
