@@ -764,3 +764,32 @@ func TestGovernState_MarkerClearsWhenTheBudgetReopens(t *testing.T) {
 		t.Fatal("the marker must be removed once the budget is open again")
 	}
 }
+
+// The protection is on for everyone unless an operator explicitly turns it
+// down. Off and shadow exist as an emergency override, not as the default.
+func TestParseGovernMode_DefaultsToEnforce(t *testing.T) {
+	cases := []struct {
+		raw  string
+		want governMode
+	}{
+		{"", governEnforce},
+		{"   ", governEnforce},
+		{"enforce", governEnforce},
+		{"ENFORCE", governEnforce},
+		{"on", governEnforce},
+		{"1", governEnforce},
+		{"true", governEnforce},
+		{"shadow", governShadow},
+		{" Shadow ", governShadow},
+		{"off", governOff},
+		{"0", governOff},
+		{"false", governOff},
+		{"no", governOff},
+		{"enfroce", governEnforce}, // a typo must not silently disable the protection
+	}
+	for _, c := range cases {
+		if got := parseGovernMode(c.raw); got != c.want {
+			t.Errorf("parseGovernMode(%q) = %v, want %v", c.raw, got, c.want)
+		}
+	}
+}
