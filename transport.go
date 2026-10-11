@@ -926,6 +926,11 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 			case <-time.After(authErrBackoff):
 				continue
 			case <-Pulse():
+				// every backing-off transport hears the pulse at the same instant;
+				// spread the retries so the hour does not begin with a herd
+				if !waitPulseJitter(self.ctx) {
+					return
+				}
 				authErrBackoff = 0
 				self.clientStrategy.ResetHealth()
 				continue
@@ -1688,6 +1693,9 @@ func (self *PlatformTransport) runH3(ptMode TransportMode, initialTimeout time.D
 				authErrBackoff = 0
 				continue
 			case <-pulse:
+				if !waitPulseJitter(self.ctx) {
+					return
+				}
 				authErrBackoff = 0
 				self.clientStrategy.ResetHealth()
 				continue
