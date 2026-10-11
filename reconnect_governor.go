@@ -73,6 +73,9 @@ const (
 	connectOtherFail
 	// connectCanceled: local teardown, not an attempt outcome
 	connectCanceled
+	// connectRefused: the platform enforcing a rule (an explicit 401/403, a
+	// client-limit close), not the backend failing; carries no weight either way
+	connectRefused
 
 	connectClassCount
 )
@@ -95,6 +98,8 @@ func (self connectClass) String() string {
 		return "other"
 	case connectCanceled:
 		return "canceled"
+	case connectRefused:
+		return "refused"
 	}
 	return fmt.Sprintf("class(%d)", uint8(self))
 }
@@ -130,6 +135,11 @@ func classifyConnectError(err error, stats *attemptStats) connectClass {
 	}
 	// a dial that gave up carries the real dial error; classify that, not the
 	// timeout it ended as
+	// the platform enforcing a rule says nothing about whether the backend works;
+	// this is structural on purpose (see explicitRejection)
+	if explicitRejection(err) || isClientLimitCloseError(err) {
+		return connectRefused
+	}
 	var dialErr *dialTimeoutError
 	if errors.As(err, &dialErr) && dialErr.last != nil {
 		// a dial that got past the proxy is the evidence about the platform, even
@@ -171,6 +181,7 @@ type govBucket struct {
 	attempts    int64
 	ok          int64
 	early       int64
+	earlyProven int64
 	classes     [connectClassCount]int64
 	dials       int64
 	bytes       int64
@@ -179,9 +190,11 @@ type govBucket struct {
 
 // govSnapshot is the governor's view of the last govWindow.
 type govSnapshot struct {
-	Attempts         int64
-	OK               int64
-	Early            int64
+	Attempts int64
+	OK       int64
+	Early    int64
+	// EarlyProven counts early deaths of proxies that had held a stable session
+	EarlyProven      int64
 	Classes          [connectClassCount]int64
 	Dials            int64
 	Bytes            int64
@@ -193,6 +206,8 @@ type govSnapshot struct {
 	HardFailures int64
 	// Threshold is the good ratio below which this host's window reads as degraded
 	Threshold float64
+	// Baseline is the share of platform attempts this host usually sees go well, 0 until learned
+	Baseline  float64
 	Ratio     float64
 	Degraded  bool
 	WouldHold int64
@@ -253,6 +268,20 @@ func (self *connectGovernor) recordEarlyDeath() {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 	self.bucket().early += 1
+}
+
+// recordProvenEarlyDeath is recordEarlyDeath for a proxy that has held a stable
+// session before in this process. A proxy that never lived long may simply be a
+// poor one, so its early death is ambiguous. One that did and now dies young is
+// strong evidence that the platform is dropping connections it used to keep, and
+// that is the incident's own shape (the platform accepts the websocket, then
+// drops it), so it counts as a hard failure.
+func (self *connectGovernor) recordProvenEarlyDeath() {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+	b := self.bucket()
+	b.early += 1
+	b.earlyProven += 1
 }
 
 // govBaselineFraction: a window is degraded when its good ratio falls below this
@@ -326,6 +355,7 @@ func (self *connectGovernor) snapshotWindow(window time.Duration) govSnapshot {
 		s.Attempts += b.attempts
 		s.OK += b.ok
 		s.Early += b.early
+		s.EarlyProven += b.earlyProven
 		for c := range b.classes {
 			s.Classes[c] += b.classes[c]
 		}
@@ -343,7 +373,9 @@ func (self *connectGovernor) snapshotWindow(window time.Duration) govSnapshot {
 	// governor would throttle the live proxies.
 	s.PlatformAttempts = s.OK + s.Classes[connectTimeoutPlatform] + s.Classes[connectUpgradeFail]
 	s.PlatformGood = max(0, s.OK-s.Early)
-	s.HardFailures = s.Classes[connectTimeoutPlatform] + s.Classes[connectUpgradeFail]
+	// a connect whose session died young is as hard a failure as any: it is the
+	// incident's own shape (the platform accepts the websocket, then drops it)
+	s.HardFailures = s.Classes[connectTimeoutPlatform] + s.Classes[connectUpgradeFail] + s.EarlyProven
 	if 0 < s.PlatformAttempts {
 		s.Ratio = float64(s.PlatformGood) / float64(s.PlatformAttempts)
 	}
@@ -355,6 +387,7 @@ func (self *connectGovernor) snapshotWindow(window time.Duration) govSnapshot {
 		threshold = max(govMinThreshold, min(threshold, govBaselineFraction*self.baseline))
 	}
 	s.Threshold = threshold
+	s.Baseline = self.baseline
 	s.Degraded = govMinAttempts <= s.PlatformAttempts && s.Ratio < threshold && govMinHardFailures <= s.HardFailures
 	if s.Degraded {
 		s.WouldHold = max(0, s.Attempts-govShadowBudgetPerSecond*int64(govWindow/time.Second))
@@ -444,11 +477,11 @@ func govLine(state string, s govSnapshot) string {
 		perAttemptKB = float64(s.Bytes) / float64(s.Attempts) / 1024
 	}
 	return fmt.Sprintf(
-		"[govern] %s window=%ds attempts=%d (%.1f/s) connected=%d died_young=%d good=%.0f%% socks=%d tls=%d upgrade=%d timeout_platform=%d timeout_silent=%d other=%d dials/attempt=%.1f KB/attempt=%.1f failed_KB=%d would_hold=%d",
+		"[govern] %s window=%ds attempts=%d (%.1f/s) connected=%d died_young=%d good=%.0f%% socks=%d tls=%d upgrade=%d timeout_platform=%d timeout_silent=%d other=%d refused=%d dials/attempt=%.1f KB/attempt=%.1f failed_KB=%d would_hold=%d",
 		state, int(govWindow/time.Second), s.Attempts, float64(s.Attempts)/govWindow.Seconds(),
 		s.OK, s.Early, 100*s.Ratio,
 		s.Classes[connectSocksFail], s.Classes[connectTlsFail], s.Classes[connectUpgradeFail],
-		s.Classes[connectTimeoutPlatform], s.Classes[connectTimeoutNoReply], s.Classes[connectOtherFail],
+		s.Classes[connectTimeoutPlatform], s.Classes[connectTimeoutNoReply], s.Classes[connectOtherFail], s.Classes[connectRefused],
 		perAttemptDials, perAttemptKB, s.FailedBytes/1024, s.WouldHold,
 	)
 }

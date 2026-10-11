@@ -329,3 +329,47 @@ func TestRunH1_LocalTeardownIsNotAnEarlyDeath(t *testing.T) {
 		t.Fatalf("a locally cancelled session was counted as dying young (%d)", got)
 	}
 }
+
+// A session the platform closes for the client limit is the platform enforcing a
+// rule, not the backend dropping connections; it must not count as dying young.
+func TestRunH1_ClientLimitCloseIsNotAnEarlyDeath(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var accepts atomic.Int64
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accepts.Add(1)
+		ws, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.Close()
+		time.Sleep(100 * time.Millisecond)
+		_ = ws.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(ClientLimitCloseCode, "client limit"), time.Now().Add(time.Second))
+		time.Sleep(200 * time.Millisecond)
+	}))
+	defer server.Close()
+
+	settings := DefaultPlatformTransportSettings()
+	settings.ReconnectTimeout = 20 * time.Millisecond
+	settings.FlapStableAfter = time.Hour // every session is young
+
+	before := connectGov.snapshot()
+	transport := newFlapTestTransport(t, ctx, server.URL, settings)
+	defer transport.Close()
+
+	deadline := time.After(10 * time.Second)
+	for accepts.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("the transport never connected")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	time.Sleep(700 * time.Millisecond)
+	if got := connectGov.snapshot().Early - before.Early; got != 0 {
+		t.Fatalf("a client-limit close was counted as dying young (%d)", got)
+	}
+}

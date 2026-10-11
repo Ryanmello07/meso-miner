@@ -54,6 +54,9 @@ type flapGuard struct {
 	jitter func(time.Duration) time.Duration
 
 	streak time.Duration
+	// everStable is set once a session has lived stableAfter or longer: from then
+	// on this proxy's early deaths are evidence about the platform, not about it
+	everStable bool
 }
 
 // newFlapGuard returns a guard that treats sessions shorter than stableAfter as
@@ -86,6 +89,7 @@ func (self *flapGuard) sessionEnded(lived time.Duration) time.Duration {
 	}
 	if self.stableAfter <= lived {
 		self.streak = 0
+		self.everStable = true
 		return 0
 	}
 	if self.streak == 0 {

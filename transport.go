@@ -393,6 +393,9 @@ type PlatformTransport struct {
 	mode *MonitorValue[TransportMode]
 
 	clientLimitBackoff *ClientLimitBackoff
+	// clientLimitCloseCount counts closes the platform made for the client limit,
+	// so a session that ended that way is not taken for the backend failing
+	clientLimitCloseCount atomic.Int64
 }
 
 func NewPlatformTransportWithDefaults(
@@ -1310,6 +1313,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 
 		reconnect = NewReconnect(self.settings.ReconnectTimeout)
 		sessionStart := time.Now()
+		limitClosesBefore := self.clientLimitCloseCount.Load()
 		if self.log.V(2).Enabled() {
 			Trace(fmt.Sprintf("[t]connect run %s", clientId), c)
 		} else {
@@ -1323,8 +1327,13 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 		lived := time.Since(sessionStart)
 		// a session cut short by our own teardown (a reload, the reaper, shutdown)
 		// says nothing about the backend
-		if flaps.isYoung(lived) && self.ctx.Err() == nil {
-			connectGov.recordEarlyDeath()
+		if flaps.isYoung(lived) && self.ctx.Err() == nil && self.clientLimitCloseCount.Load() == limitClosesBefore {
+			// (a client-limit close is the platform enforcing a rule, not failing)
+			if flaps.everStable {
+				connectGov.recordProvenEarlyDeath()
+			} else {
+				connectGov.recordEarlyDeath()
+			}
 		}
 		if flapWait := flaps.sessionEnded(lived); 0 < flapWait {
 			if ok, suppressed := flapErrThrottle.Allow(time.Now()); ok {

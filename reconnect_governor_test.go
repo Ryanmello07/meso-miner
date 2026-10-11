@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/gorilla/websocket"
 	"net"
 	"strings"
 	"testing"
@@ -547,5 +548,108 @@ func TestGovernor_AFleetWideReconnectBurstDoesNotRaiseTheBaseline(t *testing.T) 
 	record(g, connectTimeoutPlatform, 38) // 14% good: this host's bad minute
 	if g.snapshot().Degraded {
 		t.Fatalf("an ordinary bad minute read as degraded after a reconnect burst: %+v", g.snapshot())
+	}
+}
+
+// A server-side client-limit close or an explicit 401/403 is the platform
+// enforcing a rule, not the backend failing. Counting it as a hard failure lets a
+// token or limit change throttle a whole host whose backend is perfectly healthy.
+func TestClassify_RefusalsAndClientLimitAreNotPlatformEvidence(t *testing.T) {
+	stats := &attemptStats{}
+	stats.rx.Store(6000)
+	refused := []error{
+		&wsStatusError{status: 401, err: errors.New("websocket: bad handshake")},
+		&wsStatusError{status: 403, err: errors.New("websocket: bad handshake")},
+		&websocket.CloseError{Code: ClientLimitCloseCode, Text: "client limit"},
+		&dialTimeoutError{failures: 1, rounds: 1, rejected: true, last: errors.New("i/o timeout")},
+	}
+	for _, err := range refused {
+		if got := classifyConnectError(err, stats); got != connectRefused {
+			t.Errorf("%v classified %v, want refused", err, got)
+		}
+	}
+	// overload is still the platform failing
+	for _, status := range []int{429, 500, 502, 503, 499} {
+		err := &wsStatusError{status: status, err: errors.New("websocket: bad handshake")}
+		if got := classifyConnectError(err, stats); got != connectUpgradeFail {
+			t.Errorf("http %d classified %v, want upgrade", status, got)
+		}
+	}
+	g, _ := newTestGovernor()
+	record(g, connectRefused, 200)
+	if s := g.snapshot(); s.Degraded || s.PlatformAttempts != 0 {
+		t.Fatalf("refusals must carry no weight in the verdict: %+v", s)
+	}
+}
+
+// The incident's own shape: the platform accepts the websocket and then drops it,
+// so every connect "succeeds" and the session dies within seconds. No attempt
+// fails, so only the early deaths can say so.
+func TestGovernor_AcceptThenDropIsDegraded(t *testing.T) {
+	g, _ := newTestGovernor()
+	record(g, connectOK, 100)
+	for i := 0; i < 95; i++ {
+		g.recordProvenEarlyDeath() // proxies that had held a stable session before
+	}
+	s := g.snapshot()
+	if !s.Degraded {
+		t.Fatalf("100 connects of which 95 died young must read as degraded: %+v", s)
+	}
+	if s.HardFailures < 95 {
+		t.Fatalf("early deaths are hard failures: %+v", s)
+	}
+}
+
+// A host whose proxies always drop young (a poor residential list) learns that as
+// its normal, and is not degraded by it.
+func TestGovernor_ChronicEarlyDeathsAreLearnedNotFlagged(t *testing.T) {
+	g, now := newTestGovernor()
+	for i := 0; i < 10; i++ {
+		record(g, connectOK, 20)
+		for j := 0; j < 14; j++ {
+			g.recordProvenEarlyDeath() // 30% of connects live
+		}
+		g.learnBaseline()
+		*now = now.Add(61 * time.Second)
+	}
+	record(g, connectOK, 20)
+	for j := 0; j < 15; j++ {
+		g.recordProvenEarlyDeath()
+	}
+	if g.snapshot().Degraded {
+		t.Fatalf("this host's usual early deaths read as an outage: %+v", g.snapshot())
+	}
+}
+
+// Early deaths of proxies that never lived long are ambiguous (a poor proxy dies
+// young whatever the backend does), so they alone cannot make a verdict.
+func TestGovernor_UnprovenEarlyDeathsAreNotHardEvidence(t *testing.T) {
+	g, _ := newTestGovernor()
+	record(g, connectOK, 100)
+	for i := 0; i < 95; i++ {
+		g.recordEarlyDeath()
+	}
+	if g.snapshot().Degraded {
+		t.Fatalf("unproven early deaths alone must not read as an outage: %+v", g.snapshot())
+	}
+}
+
+func TestFlapGuard_ProvenOnceASessionHasLivedLongEnough(t *testing.T) {
+	f := newFlapGuard(time.Minute, time.Second)
+	f.jitter = func(d time.Duration) time.Duration { return d }
+	if f.everStable {
+		t.Fatal("a new guard has seen no stable session")
+	}
+	f.sessionEnded(5 * time.Second)
+	if f.everStable {
+		t.Fatal("a young session does not prove a proxy")
+	}
+	f.sessionEnded(2 * time.Minute)
+	if !f.everStable {
+		t.Fatal("a stable session proves the proxy")
+	}
+	f.sessionEnded(3 * time.Second)
+	if !f.everStable {
+		t.Fatal("once proven, a later young session does not unprove it")
 	}
 }

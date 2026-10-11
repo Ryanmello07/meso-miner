@@ -249,7 +249,10 @@ func (self *reconnectBudget) queued() int {
 func (self *reconnectBudget) throttled() bool {
 	self.mu.Lock()
 	defer self.mu.Unlock()
-	return self.rate < budgetCeilingRate || 0 < len(self.queue)
+	// The backend verdict's rate only. A queue held back by memory pressure is a
+	// host problem and must not read as a backend outage (it would freeze the
+	// reaper, ignore real renewal refusals and write the restart marker).
+	return self.rate < budgetCeilingRate
 }
 
 // admit blocks until a connect may start. It returns false only when ctx ends
@@ -434,7 +437,7 @@ func (self *reconnectBudget) adjust(recent govSnapshot) func() {
 		budgetMinHardFailures <= recent.HardFailures:
 		self.rate = max(budgetFloorRate, self.rate/budgetDecreaseFactor)
 	case self.rate < budgetCeilingRate &&
-		(budgetMinIncreaseAttempts <= recent.PlatformAttempts && budgetOpenRatio <= recent.Ratio):
+		(budgetMinIncreaseAttempts <= recent.PlatformAttempts && openRatio(recent) <= recent.Ratio):
 		self.rate = min(budgetCeilingRate, self.rate*budgetIncreaseFactor)
 	case self.rate < budgetCeilingRate && recent.PlatformAttempts < budgetMinIncreaseAttempts:
 		// Too few attempts reached the platform to say anything. Either nothing
@@ -476,7 +479,7 @@ func (self *reconnectBudget) planOutageMarkerLocked() func() {
 		return nil
 	}
 	path := self.markerPath
-	if self.rate < budgetCeilingRate || 0 < len(self.queue) {
+	if self.rate < budgetCeilingRate {
 		if outageMarkerWriteEvery <= self.now().Sub(self.lastMarkerWrite) {
 			self.lastMarkerWrite = self.now()
 			return func() { self.writeOutageMarker(path) }
@@ -611,4 +614,16 @@ func InitGovernState(markerPath string) {
 		return
 	}
 	connectBudget.restoreOutageMarker(markerPath, time.Now())
+}
+
+// openRatio is the share of good platform attempts at which a throttled budget
+// opens. With nothing learned it is the fixed budgetOpenRatio. Otherwise it is
+// relative to what this host normally sees, never below the degraded threshold:
+// a host whose normal is 30% good would otherwise sit at the floor for ever after
+// one outage, because the open bar would be more than it ever achieves.
+func openRatio(recent govSnapshot) float64 {
+	if recent.Baseline <= 0 {
+		return budgetOpenRatio
+	}
+	return max(recent.Threshold, min(budgetOpenRatio, 0.8*recent.Baseline))
 }
