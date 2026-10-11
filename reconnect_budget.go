@@ -181,24 +181,7 @@ func (self *reconnectBudget) admitParked(ctx context.Context, direct bool, onPar
 		self.mu.Unlock()
 		return true
 	}
-	self.mu.Unlock()
-
-	// Scored only now that we know we must wait, so the healthy path never pays
-	// for it, and BEFORE joining the queue: the dispatcher reads the score under
-	// the lock, so it must never be written after the waiter is visible. The
-	// scorer takes its own locks, so it cannot run under ours.
-	var waiterScore uint64
-	if score != nil {
-		waiterScore = score()
-	}
-
-	self.mu.Lock()
-	if self.rate >= budgetCeilingRate && len(self.queue) == 0 {
-		// the budget reopened while we were scoring
-		self.mu.Unlock()
-		return true
-	}
-	w := &admitWaiter{ch: make(chan struct{}), score: waiterScore}
+	w := &admitWaiter{ch: make(chan struct{})}
 	self.queue = append(self.queue, w)
 	self.mu.Unlock()
 
