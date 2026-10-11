@@ -38,6 +38,7 @@ func writeGovernMetrics(b *strings.Builder) {
 	xs := connect.TransferSendStatsNow()
 	fmt.Fprintf(b, "# HELP urnet_transfer_send_frames_total Transfer-layer frames written, split into first sends and resends.\n# TYPE urnet_transfer_send_frames_total counter\nurnet_transfer_send_frames_total{kind=\"first\"} %d\nurnet_transfer_send_frames_total{kind=\"resend\"} %d\n", xs.FirstFrames, xs.ResendFrames)
 	fmt.Fprintf(b, "# HELP urnet_transfer_send_bytes_total Transfer-layer frame bytes written, split into first sends and resends.\n# TYPE urnet_transfer_send_bytes_total counter\nurnet_transfer_send_bytes_total{kind=\"first\"} %d\nurnet_transfer_send_bytes_total{kind=\"resend\"} %d\n", xs.FirstBytes, xs.ResendBytes)
+	fmt.Fprintf(b, "# HELP urnet_transfer_resend_deferred_total Resends the retry budget held back instead of sending.\n# TYPE urnet_transfer_resend_deferred_total counter\nurnet_transfer_resend_deferred_total{unit=\"frames\"} %d\nurnet_transfer_resend_deferred_total{unit=\"bytes\"} %d\n", xs.ResendDeferredFrames, xs.ResendDeferredBytes)
 	fmt.Fprintf(b, "# HELP urnet_transfer_resend_depth_total Resends by how many times the item had already been sent.\n# TYPE urnet_transfer_resend_depth_total counter\n")
 	for i, label := range []string{"2", "3-4", "5-8", "9+"} {
 		fmt.Fprintf(b, "urnet_transfer_resend_depth_total{send=\"%s\"} %d\n", label, xs.ResendDepth[i])

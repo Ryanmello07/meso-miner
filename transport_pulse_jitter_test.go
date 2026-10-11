@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -52,41 +53,61 @@ func TestRunH1_PulseWakesATransportAfterAJitter(t *testing.T) {
 	pulseJitter = func(max time.Duration) time.Duration { return 800 * time.Millisecond }
 	defer func() { pulseSpread, pulseJitter = prevS, prevJ }()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	url := server.URL
-	server.Close() // refuses every dial
+	// a server that refuses every upgrade and records when it was asked
+	var mu sync.Mutex
+	var hits []time.Time
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits = append(hits, time.Now())
+		mu.Unlock()
+		http.Error(w, "no", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	lastHit := func() (time.Time, int) {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(hits) == 0 {
+			return time.Time{}, 0
+		}
+		return hits[len(hits)-1], len(hits)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	settings := DefaultPlatformTransportSettings()
 	settings.ReconnectTimeout = 30 * time.Second // a long backoff, so only the pulse can wake it
-	transport := newFlapTestTransport(t, ctx, url, settings)
+	transport := newFlapTestTransport(t, ctx, server.URL, settings)
 	defer transport.Close()
 
-	// wait for the first attempt to fail and the transport to start its backoff
-	first := connectGov.snapshot().Attempts
+	// wait until the first attempt has finished: the server goes quiet
 	deadline := time.After(10 * time.Second)
-	for connectGov.snapshot().Attempts == first {
+	for {
+		at, n := lastHit()
+		if 0 < n && 700*time.Millisecond < time.Since(at) {
+			break
+		}
 		select {
 		case <-deadline:
 			t.Fatal("the first attempt never finished")
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	time.Sleep(200 * time.Millisecond) // into the backoff select
-	after := connectGov.snapshot().Attempts
+	_, quiet := lastHit()
 
 	pulsedAt := time.Now()
 	TriggerPulse()
-	for connectGov.snapshot().Attempts == after {
+	for {
+		if _, n := lastHit(); quiet < n {
+			break
+		}
 		select {
 		case <-time.After(5 * time.Second):
 			t.Fatal("the pulse never woke the transport")
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	// 800ms jitter plus the 500ms failed dial that finally records the attempt
-	if d := time.Since(pulsedAt); d < 900*time.Millisecond {
-		t.Fatalf("retried %s after the pulse; the jitter was skipped", d)
+	at, _ := lastHit()
+	if d := at.Sub(pulsedAt); d < 700*time.Millisecond {
+		t.Fatalf("redialed %s after the pulse; the jitter was skipped", d)
 	}
 }

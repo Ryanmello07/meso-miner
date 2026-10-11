@@ -2927,6 +2927,25 @@ func (self *SendSequence) Run() {
 					reliableOnlyResend = self.observeUnreliableResendTimeout(item, flightPolicy)
 				}
 
+				// Pay for the resend out of what first sends earned. A resend the
+				// budget refuses is rescheduled, not sent and not counted as a send,
+				// so a slow far end cannot make us send many times what we deliver.
+				if !retryAllowed(len(transferFrameBytes)) {
+					recordTransferResendDeferred(len(transferFrameBytes))
+					deferredTimeout := resendBackoff(
+						self.rttWindow.ScaledRtt(),
+						item.sendCount+1,
+						self.sendBufferSettings.MaxResendInterval,
+					)
+					if !item.retainAfterAckTimeout && itemAckTimeout <= deferredTimeout {
+						item.resendTime = sendTime.Add(itemAckTimeout)
+					} else {
+						item.resendTime = sendTime.Add(deferredTimeout)
+					}
+					self.resendQueue.Add(item)
+					continue
+				}
+
 				// resend uses the same path the item was originally sent on
 				resendPath := self.destination.AddSource(self.client.ClientId())
 				resendBytes := transferFrameBytes
