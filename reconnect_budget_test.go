@@ -928,3 +928,26 @@ func TestMemoryPressureFrom_ThresholdsAndSources(t *testing.T) {
 		}
 	}
 }
+
+// The budget cut uses the host's own baseline too, or a poor proxy list would
+// throttle reconnects on a healthy backend even though the verdict stays ok.
+func TestBudget_ChronicallyPoorHostIsNotCutAtItsUsualRatio(t *testing.T) {
+	h := newBudgetHarness()
+	for i := 0; i < 8; i++ {
+		h.attempts(connectOK, 9)
+		h.attempts(connectTimeoutPlatform, 21)
+		h.gov.learnBaseline()
+		h.advance(61 * time.Second)
+	}
+	h.attempts(connectOK, 5)
+	h.attempts(connectTimeoutPlatform, 25)
+	h.budget.control()
+	if h.budget.currentRate() != budgetCeilingRate {
+		t.Fatal("17% good on a host that normally sees 30% must not cut the rate")
+	}
+	h.attempts(connectTimeoutPlatform, 40) // now a collapse
+	h.budget.control()
+	if h.budget.currentRate() == budgetCeilingRate {
+		t.Fatal("a real collapse must still cut the rate")
+	}
+}

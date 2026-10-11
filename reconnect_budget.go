@@ -398,7 +398,7 @@ func (self *reconnectBudget) adjust(recent govSnapshot) func() {
 		// proxies fail after the TLS handshake spends real bytes on them and is not
 		// a flood.
 		self.rate = max(budgetFloorRate, self.rate/budgetDecreaseFactor)
-	case budgetMinDecreaseAttempts <= recent.PlatformAttempts && recent.Ratio < govDegradedRatio &&
+	case budgetMinDecreaseAttempts <= recent.PlatformAttempts && recent.Ratio < recent.Threshold &&
 		budgetMinHardFailures <= recent.HardFailures:
 		self.rate = max(budgetFloorRate, self.rate/budgetDecreaseFactor)
 	case self.rate < budgetCeilingRate &&

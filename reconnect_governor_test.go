@@ -380,3 +380,75 @@ func TestClassify_SocksHandshakeTimeoutsAreProxyFailuresNotPlatformOnes(t *testi
 		t.Errorf("a post-handshake timeout classified %v, want timeout_platform", got)
 	}
 }
+
+// A host whose proxy list is chronically poor (about 30% of platform attempts
+// good) is not in an outage at 17%. The verdict compares each window with what
+// this host normally sees, so a poor list on a healthy backend does not read as a
+// failing backend, while a real collapse still does.
+func windowWith(g *connectGovernor, now *time.Time, good, bad int) {
+	record(g, connectOK, good)
+	record(g, connectTimeoutPlatform, bad)
+	g.learnBaseline()
+	*now = now.Add(61 * time.Second) // age the window out
+}
+
+func TestGovernor_ChronicallyPoorHostIsNotDegradedByItsUsualRatio(t *testing.T) {
+	g, now := newTestGovernor()
+	for i := 0; i < 8; i++ {
+		windowWith(g, now, 9, 21) // 30% good, every minute
+	}
+	record(g, connectOK, 5)
+	record(g, connectTimeoutPlatform, 25) // 17%: below the plain 20% line
+	if g.snapshot().Degraded {
+		t.Fatalf("17%% good on a host that normally sees 30%% is noise: %+v", g.snapshot())
+	}
+}
+
+func TestGovernor_ChronicallyPoorHostStillSeesARealCollapse(t *testing.T) {
+	g, now := newTestGovernor()
+	for i := 0; i < 8; i++ {
+		windowWith(g, now, 9, 21)
+	}
+	record(g, connectOK, 1)
+	record(g, connectTimeoutPlatform, 29) // 3% good
+	if !g.snapshot().Degraded {
+		t.Fatalf("a collapse from 30%% to 3%% must read as degraded: %+v", g.snapshot())
+	}
+}
+
+func TestGovernor_HealthyHostKeepsThePlainThreshold(t *testing.T) {
+	g, now := newTestGovernor()
+	for i := 0; i < 8; i++ {
+		windowWith(g, now, 28, 2) // 93% good
+	}
+	record(g, connectOK, 4)
+	record(g, connectTimeoutPlatform, 26) // 13%
+	if !g.snapshot().Degraded {
+		t.Fatalf("a healthy host dropping to 13%% good must read as degraded: %+v", g.snapshot())
+	}
+}
+
+func TestGovernor_NoBaselineMeansThePlainThreshold(t *testing.T) {
+	g, _ := newTestGovernor()
+	record(g, connectOK, 5)
+	record(g, connectTimeoutPlatform, 25)
+	if !g.snapshot().Degraded {
+		t.Fatal("with nothing learned yet the plain 20% line applies (a start in the middle of an outage)")
+	}
+}
+
+// A slow decline must not teach the baseline that an outage is normal.
+func TestGovernor_BaselineDoesNotFollowACollapseDown(t *testing.T) {
+	g, now := newTestGovernor()
+	for i := 0; i < 8; i++ {
+		windowWith(g, now, 28, 2) // 93%
+	}
+	for i := 0; i < 30; i++ {
+		windowWith(g, now, 1, 29) // 3%, a long outage
+	}
+	record(g, connectOK, 1)
+	record(g, connectTimeoutPlatform, 29)
+	if !g.snapshot().Degraded {
+		t.Fatal("thirty minutes of collapse must not become the new normal")
+	}
+}

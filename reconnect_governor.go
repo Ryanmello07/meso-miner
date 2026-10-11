@@ -186,15 +186,20 @@ type govSnapshot struct {
 	// HardFailures counts attempts the platform visibly failed: timeouts after it
 	// answered and rejected upgrades.
 	HardFailures int64
+	// Threshold is the good ratio below which this host's window reads as degraded
+	Threshold float64
 	Ratio        float64
 	Degraded     bool
 	WouldHold    int64
 }
 
 type connectGovernor struct {
-	mu   sync.Mutex
-	now  func() time.Time
-	ring [int(govWindow / time.Second)]govBucket
+	// baseline is the share of platform attempts this host usually sees go well,
+	// learned from windows the verdict called healthy; 0 until learned
+	baseline float64
+	mu       sync.Mutex
+	now      func() time.Time
+	ring     [int(govWindow / time.Second)]govBucket
 }
 
 func newConnectGovernor(now func() time.Time) *connectGovernor {
@@ -245,6 +250,32 @@ func (self *connectGovernor) recordEarlyDeath() {
 	self.bucket().early += 1
 }
 
+// govBaselineFraction: a window is degraded when its good ratio falls below this
+// fraction of the host's learned baseline (and below the plain threshold).
+const govBaselineFraction = 0.4
+
+// govBaselineAlpha is the weight of each new healthy window in the baseline.
+const govBaselineAlpha = 0.1
+
+// learnBaseline folds the current window into the baseline if it was a healthy
+// one. Call once a minute. The first healthy window sets it; later ones move it
+// only when they are not a collapse (at least half the baseline), so a slow
+// decline cannot teach the governor that an outage is normal.
+func (self *connectGovernor) learnBaseline() {
+	s := self.snapshot()
+	if s.Degraded || s.PlatformAttempts < govMinAttempts {
+		return
+	}
+	self.mu.Lock()
+	defer self.mu.Unlock()
+	switch {
+	case self.baseline == 0:
+		self.baseline = s.Ratio
+	case 0.5*self.baseline <= s.Ratio:
+		self.baseline = (1-govBaselineAlpha)*self.baseline + govBaselineAlpha*s.Ratio
+	}
+}
+
 func (self *connectGovernor) snapshot() govSnapshot {
 	return self.snapshotWindow(govWindow)
 }
@@ -289,7 +320,15 @@ func (self *connectGovernor) snapshotWindow(window time.Duration) govSnapshot {
 	if 0 < s.PlatformAttempts {
 		s.Ratio = float64(s.PlatformGood) / float64(s.PlatformAttempts)
 	}
-	s.Degraded = govMinAttempts <= s.PlatformAttempts && s.Ratio < govDegradedRatio && govMinHardFailures <= s.HardFailures
+	// What counts as too low is relative to what this host normally sees: a poor
+	// proxy list on a healthy backend sits at a low ratio all day, and an outage
+	// is a collapse from that, not the level itself.
+	threshold := govDegradedRatio
+	if 0 < self.baseline {
+		threshold = min(threshold, govBaselineFraction*self.baseline)
+	}
+	s.Threshold = threshold
+	s.Degraded = govMinAttempts <= s.PlatformAttempts && s.Ratio < threshold && govMinHardFailures <= s.HardFailures
 	if s.Degraded {
 		s.WouldHold = max(0, s.Attempts-govShadowBudgetPerSecond*int64(govWindow/time.Second))
 	}
@@ -406,6 +445,7 @@ func startGovernorLoop() {
 			ticker := time.NewTicker(time.Minute)
 			defer ticker.Stop()
 			for range ticker.C {
+				connectGov.learnBaseline()
 				if line, ok := reporter.next(connectGov.snapshot()); ok {
 					DefaultLogger().Infof("%s\n", line)
 				}
