@@ -45,6 +45,6 @@ func writeGovernMetrics(b *strings.Builder) {
 	}
 	ss := connect.SpeedEchoStatsNow()
 	fmt.Fprintf(b, "# HELP urnet_speedtest_total Platform speed tests started on a transport (every connect gets one).\n# TYPE urnet_speedtest_total counter\nurnet_speedtest_total %d\n", ss.Tests)
-	fmt.Fprintf(b, "# HELP urnet_speedtest_echo_bytes_total Speed test bytes echoed back to the platform, or dropped over the echo budget.\n# TYPE urnet_speedtest_echo_bytes_total counter\nurnet_speedtest_echo_bytes_total{result=\"echoed\"} %d\nurnet_speedtest_echo_bytes_total{result=\"dropped\"} %d\n", ss.EchoedBytes, ss.DroppedBytes)
+	fmt.Fprintf(b, "# HELP urnet_speedtest_echo_bytes_total Speed test bytes echoed back to the platform, or dropped over the echo budget.\n# TYPE urnet_speedtest_echo_bytes_total counter\nurnet_speedtest_echo_bytes_total{result=\"echoed\"} %d\nurnet_speedtest_echo_bytes_total{result=\"dropped\"} %d\nurnet_speedtest_echo_bytes_total{result=\"over_budget\"} %d\n", ss.EchoedBytes, ss.DroppedBytes, ss.OverBudgetBytes)
 	fmt.Fprintf(b, "# HELP urnet_govern_flap_backoffs_total Reconnects held back because the previous session died young.\n# TYPE urnet_govern_flap_backoffs_total counter\nurnet_govern_flap_backoffs_total %d\n", s.FlapBackoffs)
 }

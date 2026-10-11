@@ -126,10 +126,11 @@ func TestSpeedEcho_DuringAnOutageTheGlobalRateDrops(t *testing.T) {
 	}
 }
 
-func TestSpeedEcho_OnlyEnforceModeDrops(t *testing.T) {
+func TestSpeedEcho_OnlyEnforceModeInAnOutageDrops(t *testing.T) {
 	for _, mode := range []governMode{governOff, governShadow} {
 		restore := setGovernModeForTest(mode)
 		h := newSpeedEchoHarness()
+		h.b.degraded = func() bool { return true }
 		s := h.b.newSession()
 		for i := 0; i < 1000; i++ {
 			if !s.allowInMode(64 << 10) {
@@ -141,9 +142,37 @@ func TestSpeedEcho_OnlyEnforceModeDrops(t *testing.T) {
 	}
 }
 
+// The speed score feeds provider ranking, so a healthy provider echoes every test
+// in full no matter how many connect at once.
+func TestSpeedEcho_AHealthyBackendNeverDrops(t *testing.T) {
+	restore := setGovernModeForTest(governEnforce)
+	defer restore()
+	h := newSpeedEchoHarness()
+	sessions := make([]*speedEchoSession, 700)
+	for i := range sessions {
+		sessions[i] = h.b.newSession()
+	}
+	before := SpeedEchoStatsNow()
+	for _, s := range sessions {
+		for f := 0; f < 8; f++ {
+			if !s.allowInMode(64 << 10) {
+				t.Fatal("a healthy provider dropped a speed test echo")
+			}
+		}
+	}
+	after := SpeedEchoStatsNow()
+	if after.DroppedBytes != before.DroppedBytes {
+		t.Fatal("nothing should be counted dropped while healthy")
+	}
+	if after.OverBudgetBytes == before.OverBudgetBytes {
+		t.Fatal("what the budget would have refused must still be counted")
+	}
+}
+
 func TestSpeedEcho_CountersSplitEchoedFromDropped(t *testing.T) {
 	before := SpeedEchoStatsNow()
 	h := newSpeedEchoHarness()
+	h.b.degraded = func() bool { return true }
 	s := h.b.newSession()
 	restore := setGovernModeForTest(governEnforce)
 	defer restore()
@@ -165,6 +194,9 @@ func TestSpeedEcho_CountersSplitEchoedFromDropped(t *testing.T) {
 func TestRunH1_SpeedTestFloodIsEchoedOnlyUpToTheCap(t *testing.T) {
 	restore := setGovernModeForTest(governEnforce)
 	defer restore()
+	prevDegraded := speedEcho.degraded
+	speedEcho.degraded = func() bool { return true } // only an outage rations the echo
+	defer func() { speedEcho.degraded = prevDegraded }()
 	speedEcho.mu.Lock()
 	speedEcho.tokens = speedEchoBurst
 	speedEcho.last = time.Now()

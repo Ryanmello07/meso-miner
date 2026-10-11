@@ -23,8 +23,8 @@ import (
 //   - the shared rate drops while the backend is degraded, when reconnect storms
 //     are what is generating the tests.
 //
-// A refused echo is dropped. The tester then sees a slower link on this one
-// connection, which is the truth about a connection that is being rationed.
+// But the speed score feeds provider ranking, so none of this drops anything
+// unless the backend is degraded (see allowInMode).
 const (
 	// one test measured on a live host moved about 1 MiB per 12 s each way; this
 	// leaves an order of magnitude of headroom
@@ -39,9 +39,10 @@ const (
 )
 
 var speedEchoCounters struct {
-	tests   atomic.Int64
-	echoed  atomic.Int64
-	dropped atomic.Int64
+	tests      atomic.Int64
+	echoed     atomic.Int64
+	dropped    atomic.Int64
+	overBudget atomic.Int64
 }
 
 // SpeedEchoStats is a snapshot of the process-wide speed test counters.
@@ -49,13 +50,16 @@ type SpeedEchoStats struct {
 	Tests        int64
 	EchoedBytes  int64
 	DroppedBytes int64
+	// OverBudgetBytes is what exceeded the budget, whether or not it was dropped
+	OverBudgetBytes int64
 }
 
 func SpeedEchoStatsNow() SpeedEchoStats {
 	return SpeedEchoStats{
-		Tests:        speedEchoCounters.tests.Load(),
-		EchoedBytes:  speedEchoCounters.echoed.Load(),
-		DroppedBytes: speedEchoCounters.dropped.Load(),
+		Tests:           speedEchoCounters.tests.Load(),
+		EchoedBytes:     speedEchoCounters.echoed.Load(),
+		DroppedBytes:    speedEchoCounters.dropped.Load(),
+		OverBudgetBytes: speedEchoCounters.overBudget.Load(),
 	}
 }
 
@@ -118,16 +122,27 @@ func (self *speedEchoSession) allow(byteCount int) bool {
 	return true
 }
 
-// allowInMode is allow, plus the accounting and the mode: only enforce mode
-// refuses, so shadow and off behave as before while still counting.
+// allowInMode is allow, plus the accounting and the policy. A speed test is how
+// the platform scores a provider's link, and that score feeds provider ranking,
+// so a healthy provider echoes every test in full: rationing it would trade
+// earnings for bandwidth. Only while the backend is degraded, when a reconnect
+// storm is generating the tests and no ranking can be measured anyway, does an
+// over-budget echo get dropped. Off and shadow modes never drop. What would have
+// been dropped is always counted.
 func (self *speedEchoSession) allowInMode(byteCount int) bool {
 	if self.allow(byteCount) {
 		speedEchoCounters.echoed.Add(int64(byteCount))
 		return true
 	}
-	speedEchoCounters.dropped.Add(int64(byteCount))
-	if currentGovernMode() != governEnforce {
+	speedEchoCounters.overBudget.Add(int64(byteCount))
+	if currentGovernMode() != governEnforce || !self.budget.isDegraded() {
+		speedEchoCounters.echoed.Add(int64(byteCount))
 		return true
 	}
+	speedEchoCounters.dropped.Add(int64(byteCount))
 	return false
+}
+
+func (self *speedEchoBudget) isDegraded() bool {
+	return self.degraded != nil && self.degraded()
 }
