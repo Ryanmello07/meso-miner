@@ -111,7 +111,7 @@ func TestSendSequence_ResendsToANonAckingPeerAreBudgeted(t *testing.T) {
 			},
 			sendTime:           time.Now(),
 			resendTime:         time.Now().Add(-time.Second),
-			sendCount:          1,
+			sendCount:          3, // the third send onward is charged; earlier ones are free
 			head:               true,
 			transferFrameBytes: make([]byte, frameBytes),
 			ackCallback:        func(err error) {},
@@ -165,5 +165,129 @@ func TestSendSequence_ResendBudgetIsOnlyEnforcedInEnforceMode(t *testing.T) {
 	defer restore()
 	if retryAllowed(1000) {
 		t.Fatal("enforce mode refuses when the budget is empty")
+	}
+}
+
+// A resend the budget refuses is not a timeout and must not be treated as one:
+// before this was fixed the gate ran after the unreliable-flight bookkeeping, so
+// every deferral halved the flight window and forgot the flight for a send that
+// never happened.
+func TestSendSequence_DeferredResendHasNoFlightSideEffects(t *testing.T) {
+	clientSettings := DefaultClientSettings()
+	clientSettings.EncryptionSettings.Mode = EncryptionModeOff
+	clientSettings.SendBufferSettings.MinResendInterval = 2 * time.Millisecond
+	clientSettings.SendBufferSettings.MaxResendInterval = 4 * time.Millisecond
+	clientSettings.SendBufferSettings.AckTimeout = time.Minute
+	clientSettings.SendBufferSettings.IdleTimeout = time.Hour
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := NewClient(ctx, NewId(), NewNoContractClientOob(), clientSettings)
+	sink := make(chan []byte, 1<<16)
+	client.RouteManager().UpdateTransport(NewSendGatewayTransport(), []Route{sink})
+	sendBuffer := NewSendBuffer(ctx, client, clientSettings.SendBufferSettings)
+	seq := NewSendSequence(ctx, client, sendBuffer, DestinationId(NewId()), MultiHopId{}, false, true, sequenceTlsRoleClient, false, clientSettings.SendBufferSettings)
+	seq.flightController = newSendFlightController(clientSettings.SendBufferSettings)
+
+	items := make([]*sendItem, 0, 50)
+	for i := 0; i < 50; i++ {
+		item := &sendItem{
+			transferItem:            transferItem{messageId: NewId(), sequenceNumber: uint64(i + 1), messageByteCount: 200_000},
+			sendTime:                time.Now(),
+			resendTime:              time.Now().Add(-time.Second),
+			sendCount:               5, // past the head's free window too, so every resend is charged
+			head:                    true,
+			transferFrameBytes:      make([]byte, 200_000),
+			ackCallback:             func(err error) {},
+			unreliableFlightTracked: true,
+		}
+		items = append(items, item)
+		seq.sendItems = append(seq.sendItems, item)
+		seq.resendQueue.Add(item)
+	}
+
+	// the floor refills 64 KiB/s, less than one of these 200 KB frames in the test's
+	// 300 ms, so nothing can be paid for: every charged resend is deferred
+	transferResendBudget.reset(0)
+	timeoutsBefore := client.unreliableFlightTimeoutCount.Load()
+	deferredBefore := TransferSendStatsNow().ResendDeferredFrames
+
+	done := make(chan struct{})
+	go func() { defer close(done); seq.Run() }()
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	<-done
+
+	if TransferSendStatsNow().ResendDeferredFrames == deferredBefore {
+		t.Fatal("setup: expected resends to be deferred")
+	}
+	if got := client.unreliableFlightTimeoutCount.Load() - timeoutsBefore; got != 0 {
+		t.Fatalf("a deferred resend recorded %d unreliable-flight timeouts for sends that never happened", got)
+	}
+	for i, item := range items {
+		if !item.unreliableFlightTracked {
+			t.Fatalf("item %d lost its unreliable flight because a resend was deferred", i)
+		}
+	}
+}
+
+// A frame that was lost once must always be recoverable, whatever the budget
+// says: the first resend is free, and the frame at the head of the sequence, the
+// one every later frame waits behind, gets a head start of further free resends.
+func TestSendSequence_FirstResendIsFreeAndTheHeadGetsAHeadStart(t *testing.T) {
+	clientSettings := DefaultClientSettings()
+	clientSettings.EncryptionSettings.Mode = EncryptionModeOff
+	clientSettings.SendBufferSettings.MinResendInterval = 2 * time.Millisecond
+	clientSettings.SendBufferSettings.MaxResendInterval = 4 * time.Millisecond
+	clientSettings.SendBufferSettings.AckTimeout = time.Minute
+	clientSettings.SendBufferSettings.IdleTimeout = time.Hour
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := NewClient(ctx, NewId(), NewNoContractClientOob(), clientSettings)
+	sink := make(chan []byte, 1<<16)
+	client.RouteManager().UpdateTransport(NewSendGatewayTransport(), []Route{sink})
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-sink:
+			}
+		}
+	}()
+	sendBuffer := NewSendBuffer(ctx, client, clientSettings.SendBufferSettings)
+	seq := NewSendSequence(ctx, client, sendBuffer, DestinationId(NewId()), MultiHopId{}, false, true, sequenceTlsRoleClient, false, clientSettings.SendBufferSettings)
+
+	mk := func(n uint64) *sendItem {
+		return &sendItem{
+			transferItem:       transferItem{messageId: NewId(), sequenceNumber: n, messageByteCount: 200_000},
+			sendTime:           time.Now(),
+			resendTime:         time.Now().Add(-time.Second),
+			sendCount:          1,
+			head:               true,
+			transferFrameBytes: make([]byte, 200_000),
+			ackCallback:        func(err error) {},
+		}
+	}
+	head, other := mk(1), mk(2)
+	for _, item := range []*sendItem{head, other} {
+		seq.sendItems = append(seq.sendItems, item)
+		seq.resendQueue.Add(item)
+	}
+
+	// an exhausted budget; the frames are bigger than the floor can refill in 300 ms
+	transferResendBudget.reset(0)
+	done := make(chan struct{})
+	go func() { defer close(done); seq.Run() }()
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	<-done
+
+	if other.sendCount != 2 {
+		t.Fatalf("a non-head frame gets one free resend and then waits for the budget: sendCount=%d, want 2", other.sendCount)
+	}
+	if head.sendCount != 5 {
+		t.Fatalf("the head frame gets free resends through the 5th send: sendCount=%d, want 5", head.sendCount)
 	}
 }

@@ -2916,21 +2916,22 @@ func (self *SendSequence) Run() {
 					self.resendQueue.RemoveByMessageId(item.messageId)
 				}
 
-				reliableOnlyResend := false
-				flightPolicy := self.transferFlightPolicy()
-				if self.flightController != nil {
-					if self.flightController.applyPolicy(flightPolicy) && self.client != nil {
-						self.client.observeUnreliableFlight(self.flightController)
-					}
-				}
-				if item.unreliableFlightTracked {
-					reliableOnlyResend = self.observeUnreliableResendTimeout(item, flightPolicy)
-				}
-
 				// Pay for the resend out of what first sends earned. A resend the
 				// budget refuses is rescheduled, not sent and not counted as a send,
 				// so a slow far end cannot make us send many times what we deliver.
-				if !retryAllowed(len(transferFrameBytes)) {
+				//
+				// This must come BEFORE the unreliable-flight bookkeeping below: that
+				// bookkeeping treats the resend as a timeout (it halves the flight
+				// window and forgets the item's unreliable flight), which is wrong for
+				// a resend that is not going to happen.
+				//
+				// The first resend of any frame is free, and so are the next few for
+				// the frame at the head of the sequence, the one every later frame
+				// waits behind: a frame lost once must always be recoverable, however
+				// busy the rest of the host is. Only the deep resends, which are where
+				// the amplification lives, are charged.
+				if !resendIsFree(item.sendCount, self.sendItems[0].sequenceNumber == item.sequenceNumber) &&
+					!retryAllowed(len(transferFrameBytes)) {
 					recordTransferResendDeferred(len(transferFrameBytes))
 					deferredTimeout := resendBackoff(
 						self.rttWindow.ScaledRtt(),
@@ -2944,6 +2945,17 @@ func (self *SendSequence) Run() {
 					}
 					self.resendQueue.Add(item)
 					continue
+				}
+
+				reliableOnlyResend := false
+				flightPolicy := self.transferFlightPolicy()
+				if self.flightController != nil {
+					if self.flightController.applyPolicy(flightPolicy) && self.client != nil {
+						self.client.observeUnreliableFlight(self.flightController)
+					}
+				}
+				if item.unreliableFlightTracked {
+					reliableOnlyResend = self.observeUnreliableResendTimeout(item, flightPolicy)
 				}
 
 				// resend uses the same path the item was originally sent on
@@ -3635,6 +3647,8 @@ func (self *SendSequence) sendWithSetContract(
 	}
 	recordTransferFirstSend(len(item.transferFrameBytes))
 	if err == nil {
+		// only a frame that actually went out earns the right to resend later
+		transferResendBudget.earn(len(item.transferFrameBytes))
 		self.observeCarrierWrite(item, disposition)
 	}
 
