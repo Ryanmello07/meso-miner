@@ -147,6 +147,20 @@ func (self *reconnectBudget) setRate(rate float64) {
 	self.rate = min(max(rate, budgetFloorRate), budgetCeilingRate)
 }
 
+// setPick replaces the random slot's chooser and returns a restore func. For
+// tests that need the dispatcher to be deterministic.
+func (self *reconnectBudget) setPick(fn func(n int) int) func() {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+	prev := self.pick
+	self.pick = fn
+	return func() {
+		self.mu.Lock()
+		defer self.mu.Unlock()
+		self.pick = prev
+	}
+}
+
 func (self *reconnectBudget) queued() int {
 	self.mu.Lock()
 	defer self.mu.Unlock()
@@ -379,3 +393,29 @@ var singleRoundCheck = singleRoundWhenDegraded
 func singleRoundWhenDegraded() bool {
 	return currentGovernMode() == governEnforce && connectGov.snapshot().Degraded
 }
+
+// backendOutageGrace is how long after the budget last found itself throttled the
+// backend still counts as degraded for the purposes of destructive decisions.
+const backendOutageGrace = 10 * time.Minute
+
+// backendDegradedFrom is the pure form of BackendDegraded: the verdict is
+// failing now, or the budget was throttled within the grace period.
+func backendDegradedFrom(gov *connectGovernor, budget *reconnectBudget) bool {
+	return gov.snapshot().Degraded || budget.outageRecent(backendOutageGrace)
+}
+
+// backendDegradedNow is replaceable so tests are not at the mercy of the
+// process-wide governor other tests feed.
+var backendDegradedNow = func() bool {
+	if currentGovernMode() == governOff {
+		return false
+	}
+	return backendDegradedFrom(connectGov, connectBudget)
+}
+
+// BackendDegraded reports whether the platform backend is failing right now or
+// was within the last few minutes. Anything destructive that an outage could
+// trigger by mistake, such as evicting a saved client identity, must check it
+// first. Unlike OutageRecent it also works in shadow mode, because it only
+// reads what the governor observed.
+func BackendDegraded() bool { return backendDegradedNow() }

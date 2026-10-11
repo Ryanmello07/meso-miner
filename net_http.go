@@ -1002,9 +1002,17 @@ func (self *ClientStrategy) WsDialContext(ctx context.Context, url string, reque
 			dialer.observeConnect(establishTime)
 		}
 
+		// keep the platform's answer: "bad handshake" alone cannot tell a refused
+		// token from an overloaded backend. The dialer's own health bookkeeping
+		// above saw the original error and is unaffected.
+		resultErr := err
+		if err != nil && response != nil {
+			resultErr = &wsStatusError{status: response.StatusCode, err: err}
+		}
+
 		return &evalResult{
 			wsConn: wsConn,
-			err:    err,
+			err:    resultErr,
 			httpResult: httpResult{
 				// status: response.Status,
 				// statusCode: response.StatusCode,
