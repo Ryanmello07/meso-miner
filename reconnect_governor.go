@@ -266,6 +266,10 @@ const govMinThreshold = 0.08
 // govBaselineAlphaUp and govBaselineAlphaDown are the weights of a healthy window
 // that is better or worse than the baseline. Down is far slower: a backend that
 // degrades over a quarter of an hour must not drag the baseline with it.
+// govBaselineMaxStep caps a window's ratio at this multiple of the current
+// baseline when it is folded in.
+const govBaselineMaxStep = 1.25
+
 const (
 	govBaselineAlphaUp   = 0.1
 	govBaselineAlphaDown = 0.01
@@ -288,7 +292,12 @@ func (self *connectGovernor) learnBaseline() {
 			self.baseline = s.Ratio
 		}
 	case self.baseline <= s.Ratio:
-		self.baseline = (1-govBaselineAlphaUp)*self.baseline + govBaselineAlphaUp*s.Ratio
+		// A single window may not pull the baseline far: a fleet-wide reconnect
+		// burst (hundreds of clean connects in a minute after a platform-side
+		// drop) says nothing about what this host's proxies usually do, and would
+		// otherwise teach it that 90% good is normal.
+		ratio := min(s.Ratio, govBaselineMaxStep*self.baseline)
+		self.baseline = (1-govBaselineAlphaUp)*self.baseline + govBaselineAlphaUp*ratio
 	case 0.5*self.baseline <= s.Ratio:
 		self.baseline = (1-govBaselineAlphaDown)*self.baseline + govBaselineAlphaDown*s.Ratio
 	}
