@@ -3,45 +3,38 @@ package connect
 import (
 	"bufio"
 	"os"
-	"runtime"
-	"runtime/debug"
 	"strconv"
 	"strings"
 )
 
-const (
-	// memoryPressureHostFreeShare: pressure when the kernel reports less than this
-	// share of host memory available.
-	memoryPressureHostFreeShare = 0.07
-	// memoryPressureHeapShare: pressure when the Go heap is this close to the
-	// soft memory limit, after which the runtime starts to thrash on GC.
-	memoryPressureHeapShare = 0.92
-)
+// memoryPressureFreeShare: pressure when less than this share of the memory this
+// process may use is available.
+const memoryPressureFreeShare = 0.07
 
 // memoryPressureFrom decides from raw numbers whether memory is critically
-// short. limit is the Go soft memory limit (0 when none is set); avail and total
-// are the host's available and total memory (0 when unknown).
-func memoryPressureFrom(heapInuse, limit, avail, total uint64) bool {
-	if 0 < total && float64(avail) < memoryPressureHostFreeShare*float64(total) {
-		return true
-	}
-	if 0 < limit && memoryPressureHeapShare*float64(limit) <= float64(heapInuse) {
-		return true
-	}
-	return false
+// short. avail and total are in bytes; zero total means unknown, which is never
+// pressure.
+//
+// The Go heap nearing GOMEMLIMIT is deliberately NOT a signal: turbo runs with
+// GOGC=200 under a limit of 80% of RAM, and a GC-off box grows to the limit, so
+// the heap sits near it as the runtime intends.
+func memoryPressureFrom(avail uint64, total uint64) bool {
+	return 0 < total && float64(avail) < memoryPressureFreeShare*float64(total)
 }
 
-// readMemoryPressure samples the live process and host.
+// readMemoryPressure samples the memory this process can actually use: its
+// cgroup's headroom when it runs under a memory limit (Docker, systemd
+// MemoryMax), the host's MemAvailable otherwise. /proc/meminfo shows the host
+// even inside a container, so reading only it would miss exactly the container
+// that is about to be OOM-killed.
 func readMemoryPressure() bool {
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	limit := debug.SetMemoryLimit(-1)
-	var softLimit uint64
-	if 0 < limit && limit < (1<<62) {
-		softLimit = uint64(limit)
+	if headroom, ok := CgroupMemoryHeadroomBytes(); ok {
+		if ceiling, ok := CgroupMemoryCeiling(); ok && 0 < ceiling && 0 <= headroom {
+			return memoryPressureFrom(uint64(headroom), uint64(ceiling))
+		}
 	}
 	avail, total := hostMemory()
-	return memoryPressureFrom(ms.HeapInuse, softLimit, avail, total)
+	return memoryPressureFrom(avail, total)
 }
 
 // hostMemory reads MemAvailable and MemTotal in bytes; zero when unreadable

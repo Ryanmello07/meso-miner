@@ -31,6 +31,8 @@ func newBudgetHarness() *budgetHarness {
 	}
 	gov := newConnectGovernor(clock)
 	h.gov, h.now, h.budget = gov, &now, newReconnectBudget(gov, clock)
+	// the real probe reads this machine's memory; tests must not depend on it
+	h.budget.memoryPressure = func() bool { return false }
 	return h
 }
 
@@ -866,88 +868,105 @@ func TestGovernState_MarkerIOHappensWithoutTheBudgetLock(t *testing.T) {
 
 // Under real memory pressure every reconnect attempt (TLS state, buffers,
 // goroutines) makes it worse; during the 2026-10 outage one box sat at 20 of
-// 24 GB. The budget sheds reconnects then, even while the backend looks fine,
-// and does not open back up until the pressure is gone.
-func TestBudget_MemoryPressureShedsReconnectsAndHoldsThem(t *testing.T) {
+// 24 GB. The budget holds reconnects down then, even while the backend is
+// fine. This is a host problem, not a backend one: it must never read as an
+// outage (that freezes the reaper, blocks renewal and writes a marker that
+// slows the next start).
+func TestBudget_MemoryPressureShedsReconnectsAsAHostProblemNotAnOutage(t *testing.T) {
 	h := newBudgetHarness()
 	pressured := true
 	h.budget.memoryPressure = func() bool { return pressured }
 	h.attempts(connectOK, 100) // the backend is perfectly healthy
+	path := t.TempDir() + "/govern_outage"
+	h.budget.markerPath = path
 
-	h.budget.control()
-	if got := h.budget.currentRate(); got != budgetCeilingRate/budgetDecreaseFactor {
-		t.Fatalf("pressure must cut the rate: %v", got)
-	}
-	h.budget.control()
-	h.budget.control()
-	cut := h.budget.currentRate()
-	if cut >= budgetCeilingRate/budgetDecreaseFactor {
-		t.Fatalf("sustained pressure keeps cutting: %v", cut)
-	}
-	if !h.budget.throttled() {
-		t.Fatal("a pressure-shed budget reads as throttled (so the marker and reaper freeze see it)")
-	}
-
-	// pressure gone and the backend healthy: it recovers
-	pressured = false
-	for i := 0; i < 40 && h.budget.currentRate() < budgetCeilingRate; i++ {
-		h.attempts(connectOK, 30)
+	for i := 0; i < budgetMemoryConsecutive-1; i++ {
 		h.budget.control()
 	}
+	if h.budget.effectiveRate() != budgetCeilingRate {
+		t.Fatal("one or two pressured samples are noise and must not shed")
+	}
+	h.budget.control()
+	if got := h.budget.effectiveRate(); got != budgetCeilingRate/budgetDecreaseFactor {
+		t.Fatalf("sustained pressure must cut the rate: %v", got)
+	}
+	for i := 0; i < 10; i++ {
+		h.budget.control()
+	}
+	if got := h.budget.effectiveRate(); got != budgetMemoryFloorRate {
+		t.Fatalf("sustained pressure bottoms at the startup-safe floor %v, got %v", budgetMemoryFloorRate, got)
+	}
+
+	// but it is NOT a backend outage
 	if h.budget.currentRate() != budgetCeilingRate {
+		t.Fatal("the backend verdict's rate must be untouched by memory pressure")
+	}
+	if h.budget.outageRecent(time.Hour) {
+		t.Fatal("memory pressure must not read as a backend outage")
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("memory pressure must not write the outage marker (it would throttle the next start)")
+	}
+
+	// pressure gone: it recovers
+	pressured = false
+	for i := 0; i < 40 && h.budget.effectiveRate() < budgetCeilingRate; i++ {
+		h.budget.control()
+	}
+	if h.budget.effectiveRate() != budgetCeilingRate {
 		t.Fatal("must reopen once the pressure is gone")
 	}
 }
 
-func TestBudget_NoPressureProbeMeansNoShedding(t *testing.T) {
+func TestBudget_PressureReleasesRealTokensAtTheShedRate(t *testing.T) {
 	h := newBudgetHarness()
-	h.attempts(connectOK, 100)
-	h.budget.control()
-	if h.budget.currentRate() != budgetCeilingRate {
-		t.Fatal("the default probe on a healthy test host must not shed")
+	h.budget.memoryPressure = func() bool { return true }
+	for i := 0; i < 12; i++ {
+		h.budget.control()
+	}
+	waiters := 200
+	released := make(chan struct{}, waiters)
+	for i := 0; i < waiters; i++ {
+		go func() {
+			if h.budget.admit(context.Background(), false) {
+				released <- struct{}{}
+			}
+		}()
+	}
+	time.Sleep(50 * time.Millisecond)
+	h.step(2 * time.Second)
+	time.Sleep(50 * time.Millisecond)
+	got := len(released)
+	if got < int(budgetMemoryFloorRate)*2-3 || int(budgetMemoryFloorRate)*2+3 < got {
+		t.Fatalf("released %d waiters in 2s under pressure, want about %d", got, int(budgetMemoryFloorRate)*2)
 	}
 }
 
 func TestMemoryPressureFrom_ThresholdsAndSources(t *testing.T) {
 	const gib = 1 << 30
 	cases := []struct {
-		name                      string
-		heap, limit, avail, total uint64
-		want                      bool
+		name         string
+		avail, total uint64
+		want         bool
 	}{
-		{"roomy", 2 * gib, 0, 20 * gib, 24 * gib, false},
-		{"host nearly out of memory", 2 * gib, 0, 1 * gib, 24 * gib, true},
-		{"host tight but not critical", 2 * gib, 0, 3 * gib, 24 * gib, false},
-		{"heap near the soft limit", 19 * gib, 20 * gib, 8 * gib, 24 * gib, true},
-		{"heap well under the soft limit", 10 * gib, 20 * gib, 8 * gib, 24 * gib, false},
-		{"unknown host memory", 2 * gib, 0, 0, 0, false},
+		{"roomy", 20 * gib, 24 * gib, false},
+		{"nearly out of memory", 1 * gib, 24 * gib, true},
+		{"tight but not critical", 3 * gib, 24 * gib, false},
+		{"unknown memory", 0, 0, false},
 	}
 	for _, c := range cases {
-		if got := memoryPressureFrom(c.heap, c.limit, c.avail, c.total); got != c.want {
+		if got := memoryPressureFrom(c.avail, c.total); got != c.want {
 			t.Errorf("%s: pressure=%v, want %v", c.name, got, c.want)
 		}
 	}
 }
 
-// The budget cut uses the host's own baseline too, or a poor proxy list would
-// throttle reconnects on a healthy backend even though the verdict stays ok.
-func TestBudget_ChronicallyPoorHostIsNotCutAtItsUsualRatio(t *testing.T) {
-	h := newBudgetHarness()
-	for i := 0; i < 8; i++ {
-		h.attempts(connectOK, 9)
-		h.attempts(connectTimeoutPlatform, 21)
-		h.gov.learnBaseline()
-		h.advance(61 * time.Second)
-	}
-	h.attempts(connectOK, 5)
-	h.attempts(connectTimeoutPlatform, 25)
-	h.budget.control()
-	if h.budget.currentRate() != budgetCeilingRate {
-		t.Fatal("17% good on a host that normally sees 30% must not cut the rate")
-	}
-	h.attempts(connectTimeoutPlatform, 40) // now a collapse
-	h.budget.control()
-	if h.budget.currentRate() == budgetCeilingRate {
-		t.Fatal("a real collapse must still cut the rate")
+// The Go heap sitting near GOMEMLIMIT is the runtime working as designed (turbo
+// sets GOGC=200 under a limit of 80% of RAM, and GC-off grows to the limit), not
+// a reason to shed reconnects.
+func TestMemoryPressure_HeapNearTheGoLimitIsNotPressure(t *testing.T) {
+	const gib = 1 << 30
+	if memoryPressureFrom(20*gib, 24*gib) {
+		t.Fatal("plenty of host memory available must not read as pressure, whatever the heap does")
 	}
 }

@@ -132,6 +132,11 @@ func classifyConnectError(err error, stats *attemptStats) connectClass {
 	// timeout it ended as
 	var dialErr *dialTimeoutError
 	if errors.As(err, &dialErr) && dialErr.last != nil {
+		// a dial that got past the proxy is the evidence about the platform, even
+		// if a later round's proxy path then failed
+		if dialErr.platform != nil {
+			return classifyConnectError(dialErr.platform, stats)
+		}
 		return classifyConnectError(dialErr.last, stats)
 	}
 	msg := strings.ToLower(err.Error())
@@ -140,7 +145,7 @@ func classifyConnectError(err error, stats *attemptStats) connectClass {
 		return connectUpgradeFail
 	case strings.Contains(msg, "tls:"), strings.Contains(msg, "x509"), strings.Contains(msg, "certificate"):
 		return connectTlsFail
-	case strings.Contains(msg, "socks connect"), strings.Contains(msg, "proxy") && strings.Contains(msg, "unreachable"):
+	case isProxyLevelError(err):
 		// A SOCKS handshake that failed, even by timing out, is the proxy's
 		// failure. This must precede the timeout case: the attempt's byte count
 		// sums every dial it made, so earlier dials can carry it past the
@@ -188,9 +193,9 @@ type govSnapshot struct {
 	HardFailures int64
 	// Threshold is the good ratio below which this host's window reads as degraded
 	Threshold float64
-	Ratio        float64
-	Degraded     bool
-	WouldHold    int64
+	Ratio     float64
+	Degraded  bool
+	WouldHold int64
 }
 
 type connectGovernor struct {
@@ -254,13 +259,22 @@ func (self *connectGovernor) recordEarlyDeath() {
 // fraction of the host's learned baseline (and below the plain threshold).
 const govBaselineFraction = 0.4
 
-// govBaselineAlpha is the weight of each new healthy window in the baseline.
-const govBaselineAlpha = 0.1
+// govMinThreshold: the degraded threshold never falls below this, however low
+// the baseline, so a mislearned baseline cannot make the verdict blind.
+const govMinThreshold = 0.08
+
+// govBaselineAlphaUp and govBaselineAlphaDown are the weights of a healthy window
+// that is better or worse than the baseline. Down is far slower: a backend that
+// degrades over a quarter of an hour must not drag the baseline with it.
+const (
+	govBaselineAlphaUp   = 0.1
+	govBaselineAlphaDown = 0.01
+)
 
 // learnBaseline folds the current window into the baseline if it was a healthy
-// one. Call once a minute. The first healthy window sets it; later ones move it
-// only when they are not a collapse (at least half the baseline), so a slow
-// decline cannot teach the governor that an outage is normal.
+// one. Call once a minute. The first window only seeds it if it is itself above
+// the plain threshold: a host that starts in the middle of an outage must not
+// learn that a collapsed ratio is normal.
 func (self *connectGovernor) learnBaseline() {
 	s := self.snapshot()
 	if s.Degraded || s.PlatformAttempts < govMinAttempts {
@@ -270,9 +284,13 @@ func (self *connectGovernor) learnBaseline() {
 	defer self.mu.Unlock()
 	switch {
 	case self.baseline == 0:
-		self.baseline = s.Ratio
+		if govDegradedRatio <= s.Ratio {
+			self.baseline = s.Ratio
+		}
+	case self.baseline <= s.Ratio:
+		self.baseline = (1-govBaselineAlphaUp)*self.baseline + govBaselineAlphaUp*s.Ratio
 	case 0.5*self.baseline <= s.Ratio:
-		self.baseline = (1-govBaselineAlpha)*self.baseline + govBaselineAlpha*s.Ratio
+		self.baseline = (1-govBaselineAlphaDown)*self.baseline + govBaselineAlphaDown*s.Ratio
 	}
 }
 
@@ -325,7 +343,7 @@ func (self *connectGovernor) snapshotWindow(window time.Duration) govSnapshot {
 	// is a collapse from that, not the level itself.
 	threshold := govDegradedRatio
 	if 0 < self.baseline {
-		threshold = min(threshold, govBaselineFraction*self.baseline)
+		threshold = max(govMinThreshold, min(threshold, govBaselineFraction*self.baseline))
 	}
 	s.Threshold = threshold
 	s.Degraded = govMinAttempts <= s.PlatformAttempts && s.Ratio < threshold && govMinHardFailures <= s.HardFailures
