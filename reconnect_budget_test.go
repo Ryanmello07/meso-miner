@@ -295,6 +295,9 @@ func TestRunH1_ThrottledBudgetHoldsAProxiedConnect(t *testing.T) {
 
 	connectBudget.setRate(budgetFloorRate)
 	defer connectBudget.setRate(budgetCeilingRate)
+	// every third token is random; pin it to the head of the line (a blocker) so
+	// the test does not lose about 5% of the time to its own waiter being drawn
+	defer connectBudget.setPick(func(n int) int { return 0 })()
 
 	// twenty waiters ahead of us at 2/s: our turn is about ten seconds away
 	blockers, releaseBlockers := context.WithCancel(context.Background())

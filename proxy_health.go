@@ -111,6 +111,10 @@ type ProxyFailureCounters struct {
 	AuthFailures    atomic.Int64
 	TimeoutFailures atomic.Int64
 	TransportDrops  atomic.Int64
+	// Rejections counts transport auth failures where the platform explicitly
+	// refused the identity (HTTP 401/403) while the backend was healthy. It is
+	// the only evidence that justifies treating a reused identity as revoked.
+	Rejections atomic.Int64
 }
 
 // proxyHealth tracks one proxy's platform-transport liveness for the
@@ -347,7 +351,15 @@ func RecordProxyAuthFailure(index int, err error) {
 		errStr := ""
 		if err != nil {
 			errStr = err.Error()
-			if isTimeoutError(err) {
+			rejected := explicitRejection(err)
+			// A refusal that arrives while the backend is failing is not trusted:
+			// an overloaded gateway or a half-broken auth path can say no to a
+			// perfectly good token. Only a refusal from a healthy backend counts
+			// toward treating the identity as revoked.
+			if rejected && !backendDegradedNow() {
+				h.failures.Rejections.Add(1)
+			}
+			if isTimeoutError(err) && !rejected {
 				h.failures.TimeoutFailures.Add(1)
 			} else {
 				h.failures.AuthFailures.Add(1)
@@ -378,6 +390,18 @@ func ProxyAuthFailureCount(index int) int64 {
 	defer proxyHealthMu.Unlock()
 	if h, ok := proxyHealthByIndex[index]; ok {
 		return h.failures.AuthFailures.Load()
+	}
+	return 0
+}
+
+// ProxyAuthRejectionCount returns how many times the platform explicitly refused
+// this proxy's identity while the backend was healthy. Timeouts, overload and
+// refusals during an outage do not count.
+func ProxyAuthRejectionCount(index int) int64 {
+	proxyHealthMu.Lock()
+	defer proxyHealthMu.Unlock()
+	if h, ok := proxyHealthByIndex[index]; ok {
+		return h.failures.Rejections.Load()
 	}
 	return 0
 }

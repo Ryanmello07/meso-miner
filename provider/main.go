@@ -5352,6 +5352,14 @@ func provideAuth(ctx context.Context, clientStrategy *connect.ClientStrategy, ap
 // merely unlucky (network blip, transient API error).
 const revokedIdentityAuthFailureThreshold = 5
 
+// revocationCheckInterval is how often the revocation watcher looks. A variable
+// so tests need not wait minutes.
+var revocationCheckInterval = 2 * time.Minute
+
+// identityEvictionBlocked reports whether evicting a saved client identity must
+// wait because the backend is failing. A variable so tests can force either answer.
+var identityEvictionBlocked = connect.BackendDegraded
+
 // watchReusedIdentityForRevocation polls proxyIndex's transport health and
 // evicts identityKey from the client JWT store if the reused identity keeps
 // failing to authenticate and never once comes up. See the call site for
@@ -5363,7 +5371,7 @@ const revokedIdentityAuthFailureThreshold = 5
 // just re-signed it), so this watcher stops before it evicts the fresh entry
 // while the transport is still reconnecting.
 func watchReusedIdentityForRevocation(ctx context.Context, identityKey string, proxyIndex int, revocationDone <-chan struct{}) {
-	ticker := time.NewTicker(2 * time.Minute)
+	ticker := time.NewTicker(revocationCheckInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -5378,7 +5386,11 @@ func watchReusedIdentityForRevocation(ctx context.Context, identityKey string, p
 			// Authenticated successfully at least once — the identity is good.
 			return
 		}
-		if connect.ProxyAuthFailureCount(proxyIndex) >= revokedIdentityAuthFailureThreshold {
+		// Only the platform explicitly refusing this identity counts. A timeout, an
+		// overloaded gateway or a flapping connection is not a revocation, and
+		// treating it as one deletes a good identity (and its earnings history) the
+		// moment the backend has a bad hour. Never decide this during an outage.
+		if connect.ProxyAuthRejectionCount(proxyIndex) >= revokedIdentityAuthFailureThreshold && !identityEvictionBlocked() {
 			// Re-check the renewal signal AFTER the failure-count check: the
 			// renewal watcher may have closed revocationDone while this
 			// goroutine was between its select and this eviction decision

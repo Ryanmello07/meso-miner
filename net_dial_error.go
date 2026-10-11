@@ -1,7 +1,9 @@
 package connect
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 )
@@ -26,7 +28,14 @@ type dialTimeoutError struct {
 	waited time.Duration
 	// last is the most recent real dial error, nil if none
 	last error
+	// rejected is true if any dial in the call was explicitly refused by the
+	// platform (see wsStatusError). It is kept apart from last because a later
+	// timeout in the same call must not hide it.
+	rejected bool
 }
+
+// AuthRejected reports whether the platform explicitly refused this identity.
+func (self *dialTimeoutError) AuthRejected() bool { return self.rejected }
 
 func (self *dialTimeoutError) Error() string {
 	if self.last == nil {
@@ -40,8 +49,12 @@ func (self *dialTimeoutError) Error() string {
 
 func (self *dialTimeoutError) Unwrap() error { return self.last }
 
-// Timeout lets net.Error style checks see this as a timeout.
+// Timeout and Temporary make this a net.Error, so isTimeoutError counts a failed
+// dial under TimeoutFailures rather than AuthFailures. An outage must not look
+// like a run of auth failures to the renewal fast path.
 func (self *dialTimeoutError) Timeout() bool { return true }
+
+func (self *dialTimeoutError) Temporary() bool { return true }
 
 // evalErrorRecorder collects what the dialers of ONE parallelEval call returned
 // while the call was still live. Errors that arrive after the deadline are the
@@ -51,6 +64,7 @@ type evalErrorRecorder struct {
 	failures int
 	rounds   int
 	last     error
+	rejected bool
 }
 
 func (self *evalErrorRecorder) round() {
@@ -67,6 +81,9 @@ func (self *evalErrorRecorder) note(err error) {
 	defer self.mu.Unlock()
 	self.failures += 1
 	self.last = err
+	if explicitRejection(err) {
+		self.rejected = true
+	}
 }
 
 func (self *evalErrorRecorder) timeoutError(waited time.Duration) error {
@@ -77,5 +94,42 @@ func (self *evalErrorRecorder) timeoutError(waited time.Duration) error {
 		rounds:   self.rounds,
 		waited:   waited,
 		last:     self.last,
+		rejected: self.rejected,
 	}
+}
+
+// wsStatusError is a failed websocket upgrade that carries the HTTP status the
+// platform answered with. gorilla reports every non-101 answer as the same
+// "websocket: bad handshake", which hides whether the platform refused the
+// token (401, 403) or was merely overloaded (429, 5xx, a load balancer's 499).
+type wsStatusError struct {
+	status int
+	err    error
+}
+
+func (self *wsStatusError) Error() string { return fmt.Sprintf("%s (http %d)", self.err, self.status) }
+
+func (self *wsStatusError) Unwrap() error { return self.err }
+
+// AuthRejected: only 401 and 403 are the platform saying no to this identity.
+// Overload (429, 5xx, a load balancer's 499) and routing errors say nothing about
+// whether the token is good.
+func (self *wsStatusError) AuthRejected() bool {
+	return self.status == http.StatusUnauthorized || self.status == http.StatusForbidden
+}
+
+type authRejector interface {
+	AuthRejected() bool
+}
+
+// explicitRejection reports whether err, or anything it wraps, is the platform
+// explicitly refusing the identity. It is structural on purpose: the text of an
+// error ("401 Unauthorized") is not evidence, and a timeout is never one.
+func explicitRejection(err error) bool {
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if r, ok := e.(authRejector); ok && r.AuthRejected() {
+			return true
+		}
+	}
+	return false
 }
