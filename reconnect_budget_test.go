@@ -510,3 +510,140 @@ func TestBudget_OutageSignalOutlivesTheThrottle(t *testing.T) {
 		t.Fatal("thirty quiet minutes later the outage is over")
 	}
 }
+
+func scored(score uint64) func() uint64 { return func() uint64 { return score } }
+
+func waiterScored(ctx context.Context, b *reconnectBudget, score uint64) <-chan bool {
+	out := make(chan bool, 1)
+	go func() { out <- b.admitParked(ctx, false, scored(score), nil) }()
+	return out
+}
+
+// When tokens are scarce the proxies with the best record go first: the ones
+// that earned before the outage are the likeliest to work, and they are the ones
+// worth having back soonest.
+func TestBudget_BestHistoryScoutsGoFirst(t *testing.T) {
+	h := newBudgetHarness()
+	h.budget.setRate(budgetFloorRate)
+	h.budget.pick = func(n int) int { return 0 }
+
+	scores := []uint64{5, 1, 9, 3, 7, 2}
+	outs := make([]<-chan bool, len(scores))
+	for i, sc := range scores {
+		outs[i] = waiterScored(context.Background(), h.budget, sc)
+		waitQueued(t, h.budget, i+1)
+	}
+
+	h.step(time.Second) // two tokens
+	time.Sleep(50 * time.Millisecond)
+
+	released := map[uint64]bool{}
+	for i, ch := range outs {
+		select {
+		case <-ch:
+			released[scores[i]] = true
+		default:
+		}
+	}
+	if len(released) != 2 || !released[9] || !released[7] {
+		t.Fatalf("the two best (9 and 7) should have gone first, released %v", released)
+	}
+}
+
+// A third of the slots are random so one stale favourite, or a proxy with no
+// history yet, cannot hold everyone else out.
+func TestBudget_EveryThirdScoutIsRandom(t *testing.T) {
+	h := newBudgetHarness()
+	h.budget.setRate(3) // 3 tokens in a second
+	h.budget.pick = func(n int) int { return 0 }
+
+	scores := []uint64{1, 9, 8, 7, 6}
+	outs := make([]<-chan bool, len(scores))
+	for i, sc := range scores {
+		outs[i] = waiterScored(context.Background(), h.budget, sc)
+		waitQueued(t, h.budget, i+1)
+	}
+
+	h.step(time.Second)
+	time.Sleep(50 * time.Millisecond)
+
+	released := map[uint64]bool{}
+	for i, ch := range outs {
+		select {
+		case <-ch:
+			released[scores[i]] = true
+		default:
+		}
+	}
+	// two best-first (9, 8) then one random slot; the injected pick(0) takes the
+	// head of what is left, which is the lowest-scored arrival (1)
+	if len(released) != 3 || !released[9] || !released[8] || !released[1] {
+		t.Fatalf("expected the two best then a random pick, released %v", released)
+	}
+}
+
+func TestBudget_EqualScoresStayFirstInFirstOut(t *testing.T) {
+	h := newBudgetHarness()
+	h.budget.setRate(budgetFloorRate)
+	outs := make([]<-chan bool, 5)
+	for i := range outs {
+		outs[i] = waiterScored(context.Background(), h.budget, 4)
+		waitQueued(t, h.budget, i+1)
+	}
+	h.step(time.Second)
+	time.Sleep(50 * time.Millisecond)
+	for i, ch := range outs {
+		select {
+		case <-ch:
+			if 2 <= i {
+				t.Fatalf("waiter %d released before earlier equal-score arrivals", i)
+			}
+		default:
+			if i < 2 {
+				t.Fatalf("waiter %d should have been released first", i)
+			}
+		}
+	}
+}
+
+// Priority must never become starvation: with wildly different scores every
+// parked proxy still comes back within the ramp.
+func TestBudget_LowScoresStillComeBackAtTheRamp(t *testing.T) {
+	h := newBudgetHarness()
+	h.budget.setRate(budgetFloorRate)
+
+	const parked = 2000
+	released := make(chan struct{}, parked)
+	for i := 0; i < parked; i++ {
+		score := uint64(i % 97)
+		go func() {
+			if h.budget.admitParked(context.Background(), false, scored(score), nil) {
+				released <- struct{}{}
+			}
+		}()
+	}
+	waitQueued(t, h.budget, parked)
+
+	count := 0
+	start := *h.now
+	for count < parked && h.now.Sub(start) < 5*time.Minute {
+		h.advance(budgetTick)
+		if h.now.Sub(start)%budgetControlInterval == 0 {
+			h.attempts(connectOK, 20)
+			h.budget.control()
+		}
+		h.budget.tick(*h.now)
+		time.Sleep(100 * time.Microsecond)
+		for drained := false; !drained; {
+			select {
+			case <-released:
+				count++
+			default:
+				drained = true
+			}
+		}
+	}
+	if count != parked || h.now.Sub(start) > 90*time.Second {
+		t.Fatalf("released %d of %d in %s", count, parked, h.now.Sub(start))
+	}
+}

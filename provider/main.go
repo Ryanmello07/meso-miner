@@ -2899,6 +2899,7 @@ func runDegradedProxyReaper(ctx context.Context, proxyCancelMap map[string]conte
 
 func provide(opts docopt.Opts) {
 	connect.CritLogger = critLog
+	installScoutScorer()
 
 	port, _ := opts.Int("--port")
 
