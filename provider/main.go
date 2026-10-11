@@ -3730,6 +3730,21 @@ func provide(opts docopt.Opts) {
 						// evict a healthy proxy after enough operational cycles.
 						tlog("[proxy][init] proxy[%d] (%s) cancelled (not a give-up): %v\n",
 							proxySettings.Index, proxySettings.Address, err)
+					} else if !proxyGiveUpMayCount() {
+						// The backend is failing, so this proxy failing to authenticate
+						// is not evidence about the proxy: no give-up accounting and no
+						// eviction, just a backoff and another try.
+						tlog("[proxy][init] proxy[%d] (%s) auth failed while the backend is degraded; not a give-up, requeue with backoff: %v\n",
+							proxySettings.Index, proxySettings.Address, err)
+						delay := proxyURLGiveUpRetryDelay(proxyURLGiveUpEvictAfterCycles - 1)
+						globalProxyFailureHistory.SetBackoffUntil(proxySettings.Key(), time.Now().Add(delay))
+						if reloadPath, pathErr := proxyReloadPath(); pathErr == nil {
+							time.AfterFunc(delay, func() {
+								if err := writeReloadTrigger(reloadPath); err != nil {
+									tlog("[proxy] warn: failed to signal proxy reload after outage backoff (write .reload): %v\n", err)
+								}
+							})
+						}
 					} else if errors.Is(err, errProxyURLSlowCutShort) {
 						// Slow, not broken: the ladder ended on deadline-cut
 						// attempts, not genuine failures. Back off and requeue
