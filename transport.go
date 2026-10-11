@@ -771,6 +771,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 
 	var authErrBackoff time.Duration
 	flaps := newFlapGuard(self.settings.FlapStableAfter, self.settings.ReconnectTimeout)
+	startGovernorLoop()
 
 	for {
 		// stand down while a strictly better mode is active
@@ -795,6 +796,9 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 		clientLimitResetGeneration := self.clientLimitResetGeneration()
 
 		reconnect := NewReconnect(self.settings.ReconnectTimeout)
+		// what this one attempt costs: dials opened and bytes moved
+		attemptStats := &attemptStats{}
+
 		connect := func() (*websocket.Conn, error) {
 			header := http.Header{}
 			if self.settings.V2H1Auth {
@@ -805,7 +809,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 				applyProvideIntentHeader(header, *auth)
 			}
 
-			ws, _, err := self.clientStrategy.WsDialContext(self.ctx, self.platformUrl, header)
+			ws, _, err := self.clientStrategy.WsDialContext(withAttemptStats(self.ctx, attemptStats), self.platformUrl, header)
 			if err != nil {
 				return nil, err
 			}
@@ -876,6 +880,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 		} else {
 			ws, err = connect()
 		}
+		connectGov.recordAttempt(classifyConnectError(err, attemptStats), attemptStats)
 		if err != nil {
 			if isClientLimitCloseError(err) {
 				self.noteClientLimitClose(TransportModeH1, auth.ProvideIntent, clientLimitResetGeneration)
@@ -1299,6 +1304,9 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 		// streak, so without this wait a slow backend that accepts the websocket
 		// and then drops it makes every proxy reconnect again immediately
 		lived := time.Since(sessionStart)
+		if flaps.isYoung(lived) {
+			connectGov.recordEarlyDeath()
+		}
 		if flapWait := flaps.sessionEnded(lived); 0 < flapWait {
 			if ok, suppressed := flapErrThrottle.Allow(time.Now()); ok {
 				self.log.Infof("[t]flap %s session lived %s, holding reconnect %s (%d suppressed)\n", clientId, lived.Round(time.Millisecond), flapWait.Round(time.Millisecond), suppressed)
