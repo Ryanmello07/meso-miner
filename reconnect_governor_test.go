@@ -357,3 +357,174 @@ func TestGovernor_HardFailuresAreTimeoutsAfterTheAnswerAndRejectedUpgrades(t *te
 		t.Fatalf("hard failures = %d, want 3 (silent timeouts and socks failures are not hard)", got)
 	}
 }
+
+// A SOCKS handshake that timed out is the proxy's failure, however many bytes the
+// attempt's earlier dials moved. These are the real lines from a 1,100-proxy host
+// whose backend was healthy: the "last:" cause of every flagged timeout.
+func TestClassify_SocksHandshakeTimeoutsAreProxyFailuresNotPlatformOnes(t *testing.T) {
+	stats := &attemptStats{}
+	stats.rx.Store(6000) // earlier dials in the same attempt moved plenty
+	for _, msg := range []string{
+		"socks connect tcp 45.74.31.41:10062->65.49.70.70:443: read tcp 66.187.7.83:4806->45.74.31.41:10062: i/o timeout",
+		"socks connect tcp 156.225.20.83:1080->65.49.70.70:443: read tcp 66.187.7.83:4806->156.225.20.83:1080: i/o timeout",
+		"read tcp 66.187.7.83:4806->156.225.20.83:1080: i/o timeout (proxy 156.225.20.83:1080 unreachable)",
+	} {
+		err := &dialTimeoutError{failures: 2, rounds: 1, last: errors.New(msg)}
+		if got := classifyConnectError(err, stats); got != connectSocksFail {
+			t.Errorf("%q classified %v, want socks", msg, got)
+		}
+	}
+	// a timeout waiting on the platform itself, through an established tunnel, still counts
+	err := &dialTimeoutError{failures: 1, rounds: 1, last: errors.New("read tcp 66.187.7.83:4806->45.74.31.41:10062: i/o timeout")}
+	if got := classifyConnectError(err, stats); got != connectTimeoutPlatform {
+		t.Errorf("a post-handshake timeout classified %v, want timeout_platform", got)
+	}
+}
+
+// A host whose proxy list is chronically poor (about 30% of platform attempts
+// good) is not in an outage at 17%. The verdict compares each window with what
+// this host normally sees, so a poor list on a healthy backend does not read as a
+// failing backend, while a real collapse still does.
+func windowWith(g *connectGovernor, now *time.Time, good, bad int) {
+	record(g, connectOK, good)
+	record(g, connectTimeoutPlatform, bad)
+	g.learnBaseline()
+	*now = now.Add(61 * time.Second) // age the window out
+}
+
+func TestGovernor_ChronicallyPoorHostIsNotDegradedByItsUsualRatio(t *testing.T) {
+	g, now := newTestGovernor()
+	for i := 0; i < 8; i++ {
+		windowWith(g, now, 9, 21) // 30% good, every minute
+	}
+	record(g, connectOK, 5)
+	record(g, connectTimeoutPlatform, 25) // 17%: below the plain 20% line
+	if g.snapshot().Degraded {
+		t.Fatalf("17%% good on a host that normally sees 30%% is noise: %+v", g.snapshot())
+	}
+}
+
+func TestGovernor_ChronicallyPoorHostStillSeesARealCollapse(t *testing.T) {
+	g, now := newTestGovernor()
+	for i := 0; i < 8; i++ {
+		windowWith(g, now, 9, 21)
+	}
+	record(g, connectOK, 1)
+	record(g, connectTimeoutPlatform, 29) // 3% good
+	if !g.snapshot().Degraded {
+		t.Fatalf("a collapse from 30%% to 3%% must read as degraded: %+v", g.snapshot())
+	}
+}
+
+func TestGovernor_HealthyHostKeepsThePlainThreshold(t *testing.T) {
+	g, now := newTestGovernor()
+	for i := 0; i < 8; i++ {
+		windowWith(g, now, 28, 2) // 93% good
+	}
+	record(g, connectOK, 4)
+	record(g, connectTimeoutPlatform, 26) // 13%
+	if !g.snapshot().Degraded {
+		t.Fatalf("a healthy host dropping to 13%% good must read as degraded: %+v", g.snapshot())
+	}
+}
+
+func TestGovernor_NoBaselineMeansThePlainThreshold(t *testing.T) {
+	g, _ := newTestGovernor()
+	record(g, connectOK, 5)
+	record(g, connectTimeoutPlatform, 25)
+	if !g.snapshot().Degraded {
+		t.Fatal("with nothing learned yet the plain 20% line applies (a start in the middle of an outage)")
+	}
+}
+
+// A slow decline must not teach the baseline that an outage is normal.
+func TestGovernor_BaselineDoesNotFollowACollapseDown(t *testing.T) {
+	g, now := newTestGovernor()
+	for i := 0; i < 8; i++ {
+		windowWith(g, now, 28, 2) // 93%
+	}
+	for i := 0; i < 30; i++ {
+		windowWith(g, now, 1, 29) // 3%, a long outage
+	}
+	record(g, connectOK, 1)
+	record(g, connectTimeoutPlatform, 29)
+	if !g.snapshot().Degraded {
+		t.Fatal("thirty minutes of collapse must not become the new normal")
+	}
+}
+
+// A host that starts in the middle of an accept-then-die-young episode must not
+// learn that 5% good is normal.
+func TestGovernor_BaselineIsNotSeededFromAnOutageWindow(t *testing.T) {
+	g, now := newTestGovernor()
+	for i := 0; i < 5; i++ {
+		record(g, connectOK, 100)
+		for j := 0; j < 95; j++ {
+			g.recordEarlyDeath() // sessions accepted then dropped: 5% good, no hard failures
+		}
+		g.learnBaseline()
+		*now = now.Add(61 * time.Second)
+	}
+	record(g, connectOK, 2)
+	record(g, connectTimeoutPlatform, 40)
+	if !g.snapshot().Degraded {
+		t.Fatalf("a window learned during an outage must not hide a later collapse: %+v", g.snapshot())
+	}
+}
+
+// The threshold never drops below a floor, whatever the baseline.
+func TestGovernor_ThresholdHasAFloor(t *testing.T) {
+	g, now := newTestGovernor()
+	for i := 0; i < 8; i++ {
+		windowWith(g, now, 6, 14) // exactly 30%
+	}
+	g.mu.Lock()
+	g.baseline = 0.1 // as if learned very low
+	g.mu.Unlock()
+	record(g, connectOK, 2)
+	record(g, connectTimeoutPlatform, 38) // 5%
+	if s := g.snapshot(); s.Threshold < govMinThreshold || !s.Degraded {
+		t.Fatalf("threshold %v below the floor %v or 5%% good not degraded: %+v", s.Threshold, govMinThreshold, s)
+	}
+}
+
+// A backend that degrades over a quarter of an hour must not drag the baseline
+// down with it: a window at half the baseline is not degraded, and the baseline
+// follows downward only very slowly.
+func TestGovernor_SlowDeclineDoesNotErodeTheBaseline(t *testing.T) {
+	g, now := newTestGovernor()
+	for i := 0; i < 8; i++ {
+		windowWith(g, now, 28, 2) // 93%
+	}
+	for i := 0; i < 15; i++ {
+		windowWith(g, now, 14, 16) // 47%: half the baseline, not yet degraded
+	}
+	g.mu.Lock()
+	b := g.baseline
+	g.mu.Unlock()
+	if b < 0.75 {
+		t.Fatalf("baseline eroded to %.2f over a fifteen minute decline", b)
+	}
+}
+
+// An overloaded platform that drops SYNs makes a LATER round's SOCKS CONNECT
+// hang. The earlier round that reached the platform and timed out after the TLS
+// handshake is the real evidence, and the last error must not erase it.
+func TestClassify_AnEarlierPlatformFailureSurvivesALaterSocksTimeout(t *testing.T) {
+	stats := &attemptStats{}
+	stats.rx.Store(6000)
+	rec := &evalErrorRecorder{}
+	rec.note(errors.New("read tcp 66.187.7.83:4806->45.74.31.41:10062: i/o timeout")) // through the tunnel
+	rec.note(errors.New("socks connect tcp 45.74.31.41:10062->65.49.70.70:443: read tcp 66.187.7.83:4806->45.74.31.41:10062: i/o timeout"))
+	err := rec.timeoutError(15 * time.Second)
+	if got := classifyConnectError(err, stats); got != connectTimeoutPlatform {
+		t.Fatalf("classified %v, want timeout_platform: a later socks timeout hid an earlier platform failure", got)
+	}
+	// with only proxy-level failures it stays a proxy failure
+	rec2 := &evalErrorRecorder{}
+	rec2.note(errors.New("socks connect tcp a->b: i/o timeout"))
+	rec2.note(errors.New("socks connect tcp c->d: i/o timeout"))
+	if got := classifyConnectError(rec2.timeoutError(time.Second), stats); got != connectSocksFail {
+		t.Fatalf("only proxy-level failures classified %v, want socks", got)
+	}
+}

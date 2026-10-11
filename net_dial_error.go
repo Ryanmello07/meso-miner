@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -32,6 +33,11 @@ type dialTimeoutError struct {
 	waited time.Duration
 	// last is the most recent real dial error, nil if none
 	last error
+	// platform is the most recent error from a dial that got past the proxy (it
+	// reached the platform or the tunnel to it), nil if every failure was the
+	// proxy's. Kept apart from last because the proxy path of a LATER round must
+	// not erase evidence that an earlier one reached the platform.
+	platform error
 	// rejected is true if any dial in the call was explicitly refused by the
 	// platform (see wsStatusError). It is kept apart from last because a later
 	// timeout in the same call must not hide it.
@@ -68,6 +74,7 @@ type evalErrorRecorder struct {
 	failures int
 	rounds   int
 	last     error
+	platform error
 	rejected bool
 }
 
@@ -85,6 +92,9 @@ func (self *evalErrorRecorder) note(err error) {
 	defer self.mu.Unlock()
 	self.failures += 1
 	self.last = err
+	if !isProxyLevelError(err) {
+		self.platform = err
+	}
 	if explicitRejection(err) {
 		self.rejected = true
 	}
@@ -98,6 +108,7 @@ func (self *evalErrorRecorder) timeoutError(waited time.Duration) error {
 		rounds:   self.rounds,
 		waited:   waited,
 		last:     self.last,
+		platform: self.platform,
 		rejected: self.rejected,
 	}
 }
@@ -136,4 +147,12 @@ func explicitRejection(err error) bool {
 		}
 	}
 	return false
+}
+
+// isProxyLevelError reports whether err is a failure of the proxy path itself (a
+// SOCKS handshake that failed or timed out, a proxy that cannot be reached)
+// rather than of the platform behind it.
+func isProxyLevelError(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "socks connect") || (strings.Contains(msg, "proxy") && strings.Contains(msg, "unreachable"))
 }

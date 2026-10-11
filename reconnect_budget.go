@@ -73,6 +73,12 @@ const (
 	// at least this many in the recent window
 	budgetMinHardFailures = 2
 
+	// memory pressure holds reconnects down as a host problem, separately from the
+	// backend verdict's rate: it must take this many consecutive pressured
+	// samples (one every control tick), and never goes below a startup-safe rate
+	budgetMemoryConsecutive = 3
+	budgetMemoryFloorRate   = 20.0
+
 	// outageMarkerMaxAge is how recent the previous run's outage marker must be
 	// for a restart to start throttled.
 	outageMarkerMaxAge = 10 * time.Minute
@@ -178,22 +184,38 @@ type reconnectBudget struct {
 	// of memory; replaceable so tests are exact
 	memoryPressure func() bool
 
-	mu         sync.Mutex
-	rate       float64
-	carry      float64
-	lastTick   time.Time
-	queue      []*admitWaiter
-	dispatched int
+	mu   sync.Mutex
+	rate float64
+	// memRate is the cap memory pressure puts on the dispatch rate; it is kept
+	// apart from rate so that pressure never reads as a backend outage
+	memRate      float64
+	memPressured int
+	carry        float64
+	lastTick     time.Time
+	queue        []*admitWaiter
+	dispatched   int
 }
 
 func newReconnectBudget(gov *connectGovernor, now func() time.Time) *reconnectBudget {
-	return &reconnectBudget{gov: gov, now: now, rate: budgetCeilingRate, lastTick: now(), pick: mathrand.Intn, memoryPressure: readMemoryPressure}
+	return &reconnectBudget{gov: gov, now: now, rate: budgetCeilingRate, memRate: budgetCeilingRate, lastTick: now(), pick: mathrand.Intn, memoryPressure: readMemoryPressure}
 }
 
 func (self *reconnectBudget) currentRate() float64 {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 	return self.rate
+}
+
+// effectiveRate is the rate the dispatcher actually releases at: the backend
+// verdict's rate, held down further if memory is short.
+func (self *reconnectBudget) effectiveRate() float64 {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+	return self.effectiveRateLocked()
+}
+
+func (self *reconnectBudget) effectiveRateLocked() float64 {
+	return min(self.rate, self.memRate)
 }
 
 func (self *reconnectBudget) setRate(rate float64) {
@@ -245,7 +267,7 @@ func (self *reconnectBudget) admitParked(ctx context.Context, direct bool, score
 		return true
 	}
 	self.mu.Lock()
-	if self.rate >= budgetCeilingRate && len(self.queue) == 0 {
+	if self.effectiveRateLocked() >= budgetCeilingRate && len(self.queue) == 0 {
 		self.mu.Unlock()
 		return true
 	}
@@ -261,7 +283,7 @@ func (self *reconnectBudget) admitParked(ctx context.Context, direct bool, score
 	}
 
 	self.mu.Lock()
-	if self.rate >= budgetCeilingRate && len(self.queue) == 0 {
+	if self.effectiveRateLocked() >= budgetCeilingRate && len(self.queue) == 0 {
 		// the budget reopened while we were scoring
 		self.mu.Unlock()
 		return true
@@ -317,7 +339,7 @@ func (self *reconnectBudget) tick(now time.Time) {
 	// burst of tokens
 	dt = min(dt, time.Second)
 
-	self.carry += self.rate * dt.Seconds()
+	self.carry += self.effectiveRateLocked() * dt.Seconds()
 	// the epsilon absorbs float drift: twenty ticks of 0.1 token sum to
 	// 1.9999999999999998, which must still release two
 	n := int(math.Floor(self.carry + 1e-9))
@@ -383,22 +405,32 @@ func (self *reconnectBudget) adjust(recent govSnapshot) func() {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
+	// Every reconnect attempt costs memory, and a box that is out of it dies and
+	// restarts into the same storm. Held down regardless of the backend's health,
+	// but as a host problem: it never touches rate, lastOutage or the marker.
+	if pressured {
+		self.memPressured += 1
+	} else {
+		self.memPressured = 0
+	}
+	switch {
+	case budgetMemoryConsecutive <= self.memPressured:
+		self.memRate = max(budgetMemoryFloorRate, self.memRate/budgetDecreaseFactor)
+	case !pressured:
+		self.memRate = min(budgetCeilingRate, self.memRate*budgetIncreaseFactor)
+	}
+
 	failedBytesPerSec := float64(recent.FailedBytes) / budgetRecentWindow.Seconds()
 	failedAttempts := recent.Attempts - recent.OK
 	mostlyFailing := budgetMinByteBreakerFailures <= failedAttempts && budgetByteBreakerShare*float64(recent.Attempts) <= float64(failedAttempts)
 	switch {
-	case pressured:
-		// Every reconnect attempt costs memory, and a box that is out of it dies and
-		// restarts into the same storm. Shed regardless of the backend's health, and
-		// do not open back up until the pressure is gone.
-		self.rate = max(budgetFloorRate, self.rate/budgetDecreaseFactor)
 	case failedBytesPerSec > budgetFailedBytesCeilingPerSec && mostlyFailing:
 		// whatever the verdict says, failed attempts are burning the pipe. It needs
 		// most attempts to be failing: a healthy startup in which a minority of
 		// proxies fail after the TLS handshake spends real bytes on them and is not
 		// a flood.
 		self.rate = max(budgetFloorRate, self.rate/budgetDecreaseFactor)
-	case budgetMinDecreaseAttempts <= recent.PlatformAttempts && recent.Ratio < govDegradedRatio &&
+	case budgetMinDecreaseAttempts <= recent.PlatformAttempts && recent.Ratio < recent.Threshold &&
 		budgetMinHardFailures <= recent.HardFailures:
 		self.rate = max(budgetFloorRate, self.rate/budgetDecreaseFactor)
 	case self.rate < budgetCeilingRate &&
