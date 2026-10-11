@@ -708,7 +708,7 @@ func (self *ContractManager) HandleControlFrame(contractKey ContractKey, frame *
 						}
 
 						self.contractStatus(contractStatus)
-						self.client.log.Infof("🤝 [contract] acquired size=%s destination=%s\n",
+						self.client.log.Infof("💚 [contract] acquired size=%s destination=%s\n",
 							ByteCountHumanReadable(ByteCount(storedContract.GetTransferByteCount())),
 							contractKey.Destination.DestinationId)
 						atomic.AddUint64(&contractsAcquired, 1)
