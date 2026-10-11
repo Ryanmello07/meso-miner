@@ -76,9 +76,24 @@ const (
 // through: a dead dispatcher must never park proxies forever. Variables so tests
 // can shorten them.
 var (
-	budgetStallCheckInterval = 5 * time.Second
-	budgetStallGrace         = 5 * time.Second
+	budgetStallCheckIntervalNs atomic.Int64
+	budgetStallGraceNs         atomic.Int64
 )
+
+func init() {
+	budgetStallCheckIntervalNs.Store(int64(5 * time.Second))
+	budgetStallGraceNs.Store(int64(5 * time.Second))
+}
+
+// setBudgetStallForTest shortens the stall detector and returns a restore func.
+// Atomic because waiter goroutines read them while a test restores them.
+func setBudgetStallForTest(interval, grace time.Duration) func() {
+	prevI, prevG := budgetStallCheckIntervalNs.Swap(int64(interval)), budgetStallGraceNs.Swap(int64(grace))
+	return func() {
+		budgetStallCheckIntervalNs.Store(prevI)
+		budgetStallGraceNs.Store(prevG)
+	}
+}
 
 type governMode int32
 
@@ -214,20 +229,33 @@ func (self *reconnectBudget) admitParked(ctx context.Context, direct bool, score
 		self.mu.Unlock()
 		return true
 	}
-	w := &admitWaiter{ch: make(chan struct{})}
+	self.mu.Unlock()
+
+	// Scored only now that we know we must wait, so the healthy path never pays
+	// for it, and BEFORE joining the queue: the dispatcher reads the score under
+	// the lock, so it must never be written after the waiter is visible. The
+	// scorer takes its own locks, so it cannot run under ours.
+	var waiterScore uint64
+	if score != nil {
+		waiterScore = score()
+	}
+
+	self.mu.Lock()
+	if self.rate >= budgetCeilingRate && len(self.queue) == 0 {
+		// the budget reopened while we were scoring
+		self.mu.Unlock()
+		return true
+	}
+	w := &admitWaiter{ch: make(chan struct{}), score: waiterScore}
 	self.queue = append(self.queue, w)
 	self.mu.Unlock()
-	// scored after unlocking: the scorer takes its own locks
-	if score != nil {
-		w.score = score()
-	}
 
 	if onPark != nil {
 		onPark(true)
 		defer onPark(false)
 	}
 
-	stall := time.NewTicker(budgetStallCheckInterval)
+	stall := time.NewTicker(time.Duration(budgetStallCheckIntervalNs.Load()))
 	defer stall.Stop()
 	for {
 		select {
@@ -251,7 +279,7 @@ func (self *reconnectBudget) admitParked(ctx context.Context, direct bool, score
 func (self *reconnectBudget) stalled() bool {
 	self.mu.Lock()
 	defer self.mu.Unlock()
-	return budgetStallGrace < self.now().Sub(self.lastTick)
+	return time.Duration(budgetStallGraceNs.Load()) < self.now().Sub(self.lastTick)
 }
 
 // tick releases the waiters the elapsed time has earned, oldest first. A
