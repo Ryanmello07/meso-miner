@@ -559,9 +559,16 @@ func (self *ClientStrategy) parallelEvalErr(ctx context.Context, eval func(ctx c
 	// noteFailed records a dial error unless the call is already over: a dial
 	// cancelled by the deadline is the deadline's doing, not a cause
 	noteFailed := func(result *evalResult) {
-		if result != nil && result.err != nil && handleCtx.Err() == nil {
-			rec.note(result.err)
+		if result == nil || result.err == nil || handleCtx.Err() != nil {
+			return
 		}
+		// a dial's own deadline derives from the request deadline and can fire a
+		// moment before the context reports done; an error landing that close to
+		// the deadline is the deadline's doing, not a cause
+		if deadline, ok := handleCtx.Deadline(); ok && time.Until(deadline) < dialDeadlineNoise {
+			return
+		}
+		rec.note(result.err)
 	}
 	// finish is the error for a call that ends without a result
 	finish := func() error {
