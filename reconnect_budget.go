@@ -98,12 +98,14 @@ func setBudgetStallForTest(interval, grace time.Duration) func() {
 type governMode int32
 
 const (
-	// governOff: the governor and budget do nothing
+	// governOff: the governor and budget do nothing. An emergency override only.
 	governOff governMode = iota
-	// governShadow: observe and report only (the default)
+	// governShadow: observe and report only, never delay a connect. An override
+	// for debugging and rollback, not a default.
 	governShadow
 	// governEnforce: the budget gates connects and a failing backend gets one
-	// dial round per attempt
+	// dial round per attempt. This is the default: the protection is on for
+	// every provider unless an operator turns it down.
 	governEnforce
 )
 
@@ -111,14 +113,17 @@ var governModeValue atomic.Int32
 
 func init() { governModeValue.Store(int32(parseGovernMode(os.Getenv("URNETWORK_GOVERN")))) }
 
+// parseGovernMode reads URNETWORK_GOVERN. Unset, empty and unrecognised values
+// all mean enforce: a typo must never silently disable the protection. Only an
+// explicit off or shadow turns it down.
 func parseGovernMode(raw string) governMode {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "off", "0", "false", "no":
 		return governOff
-	case "enforce", "on", "1", "true", "yes":
-		return governEnforce
+	case "shadow":
+		return governShadow
 	}
-	return governShadow
+	return governEnforce
 }
 
 func currentGovernMode() governMode { return governMode(governModeValue.Load()) }

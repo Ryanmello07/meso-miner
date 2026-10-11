@@ -45,7 +45,7 @@ Quick jump:
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `URNETWORK_PROFILE` | - | Advanced provider profile: `auto`, `lowmem`, `eco`, `turbo-v4`, or `turbo-v8`. For turbo, prefer `TURBO`. On systemd/native, set this with `urnet-tools turbo/eco/lowmode/auto` rather than a drop-in (v31+). |
-| `URNETWORK_GOVERN` | `shadow` | Backend-outage protection for the platform transport: `off` (do nothing), `shadow` (observe and log `[govern]` lines only) or `enforce` (connect attempts run under a shared budget while the backend is failing). See [Backend outage protection](#backend-outage-protection). |
+| `URNETWORK_GOVERN` | `enforce` | Backend-outage protection for the platform transport, **on by default**. Leave it unset. `shadow` observes and logs `[govern]` lines but never delays a connect, and `off` does nothing; both are emergency overrides for rollback or debugging, and an unrecognised value counts as `enforce`. See [Backend outage protection](#backend-outage-protection). |
 | `TURBO` | - | Set to `v4` or `v8` to enable turbo mode. Prefer this variable for Docker turbo mode. |
 | `URNETWORK_RAMLOGS` | `0` | Set to `1` to redirect provider logs to RAM instead of stdout. Cannot be used with Docker `--log-opt`. On systemd/native, set this with `urnet-tools ramlogs on\|off` (v31+). |
 | `URNETWORK_MESSAGE_POOL_SHARD_COUNT` | `16` | Number of internal mutex shards per message-pool size class. Higher values reduce lock contention at high packet rates. Must be a power of two, 1–256. Set to `1` to disable sharding (pre-v24.35 behavior). Sane values: `8` (moderate), `16` (default), `32` (high-pps tier3+). |
@@ -329,4 +329,4 @@ What to look at:
 - `[govern]` lines (also in the important log) every minute while degraded and every 5 minutes as a heartbeat: attempts per second, connected, `died_young`, the failure classes, dials and KB per attempt, `would_hold`, and the mode, budget rate and number of proxies waiting.
 - `[health][govern]` in the heartbeat and the `urnet_govern_*` metrics (`mode`, `degraded`, `budget_rate`, `waiting`, `attempts`, `died_young`, `flap_backoffs_total`).
 
-To turn it off set `URNETWORK_GOVERN=off` in the service environment and restart. `shadow` keeps the logs and metrics but never delays a connect.
+The protection is on by default and needs no setup. As an emergency override only, `URNETWORK_GOVERN=shadow` keeps the logs and metrics but never delays a connect, and `URNETWORK_GOVERN=off` disables it; both need a restart.
