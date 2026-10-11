@@ -35,6 +35,8 @@ func newBudgetHarness() *budgetHarness {
 	gov.started = start.Add(-time.Hour)
 	// the real probe reads this machine's memory; tests must not depend on it
 	h.budget.memoryPressure = func() bool { return false }
+	// nor on how many proxies other tests registered: the attempt cap is off
+	h.budget.attemptCap.proxyCount = func() int { return 0 }
 	return h
 }
 

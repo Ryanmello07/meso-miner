@@ -509,6 +509,8 @@ type govReporter struct {
 	mode    func() governMode
 	rate    func() float64
 	waiting func() int
+	// capRate is the per-host attempt cap, 0 while off; optional
+	capRate func() float64
 }
 
 func (self *govReporter) currentMode() governMode {
@@ -537,6 +539,11 @@ func (self *govReporter) budgetFields() string {
 	}
 	if self.waiting != nil {
 		out += fmt.Sprintf(" waiting=%d", self.waiting())
+	}
+	if self.capRate != nil {
+		if c := self.capRate(); 0 < c {
+			out += fmt.Sprintf(" cap=%.1f/s", c)
+		}
 	}
 	return out
 }
@@ -608,6 +615,7 @@ func startGovernorLoop() {
 				mode:    currentGovernMode,
 				rate:    connectBudget.currentRate,
 				waiting: connectBudget.queued,
+				capRate: connectBudget.currentCap,
 			}
 			ticker := time.NewTicker(time.Minute)
 			defer ticker.Stop()

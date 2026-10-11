@@ -220,10 +220,16 @@ type reconnectBudget struct {
 	// bounded probe step (see budgetProbeHoldoff)
 	lastCut        time.Time
 	probeIntervals int
+
+	// attemptCap holds connects down when almost every attempt fails in classes
+	// the verdict gives no weight (see reconnect_attempt_cap.go)
+	attemptCap attemptCapState
 }
 
 func newReconnectBudget(gov *connectGovernor, now func() time.Time) *reconnectBudget {
-	return &reconnectBudget{gov: gov, now: now, rate: budgetCeilingRate, memRate: budgetCeilingRate, lastTick: now(), pick: mathrand.Intn, memoryPressure: readMemoryPressure, emit: emitGovernLine}
+	b := &reconnectBudget{gov: gov, now: now, rate: budgetCeilingRate, memRate: budgetCeilingRate, lastTick: now(), pick: mathrand.Intn, memoryPressure: readMemoryPressure, emit: emitGovernLine}
+	b.attemptCap.proxyCount = proxiedCount
+	return b
 }
 
 func (self *reconnectBudget) currentRate() float64 {
@@ -241,7 +247,11 @@ func (self *reconnectBudget) effectiveRate() float64 {
 }
 
 func (self *reconnectBudget) effectiveRateLocked() float64 {
-	return min(self.rate, self.memRate)
+	rate := min(self.rate, self.memRate)
+	if 0 < self.attemptCap.rate {
+		rate = min(rate, self.attemptCap.rate)
+	}
+	return rate
 }
 
 func (self *reconnectBudget) setRate(rate float64) {
@@ -424,6 +434,7 @@ func (self *reconnectBudget) control() {
 	if after := self.adjust(recent); after != nil {
 		after()
 	}
+	self.controlCap(recent)
 }
 
 // adjust applies one control decision under the lock and returns the marker file
