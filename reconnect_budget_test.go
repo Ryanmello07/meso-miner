@@ -5,26 +5,37 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
 type budgetHarness struct {
-	gov    *connectGovernor
-	now    *time.Time
-	budget *reconnectBudget
+	gov     *connectGovernor
+	now     *time.Time
+	budget  *reconnectBudget
+	clockMu sync.Mutex
 }
 
 func newBudgetHarness() *budgetHarness {
 	start := time.Unix(2_000_000, 0)
 	now := start
-	clock := func() time.Time { return now }
+	h := &budgetHarness{}
+	// waiter goroutines read the clock while the test advances it
+	clock := func() time.Time {
+		h.clockMu.Lock()
+		defer h.clockMu.Unlock()
+		return now
+	}
 	gov := newConnectGovernor(clock)
-	return &budgetHarness{gov: gov, now: &now, budget: newReconnectBudget(gov, clock)}
+	h.gov, h.now, h.budget = gov, &now, newReconnectBudget(gov, clock)
+	return h
 }
 
 func (h *budgetHarness) advance(d time.Duration) {
+	h.clockMu.Lock()
+	defer h.clockMu.Unlock()
 	*h.now = h.now.Add(d)
 }
 
@@ -410,5 +421,99 @@ func TestWsDialContext_DegradedBackendGetsOneRound(t *testing.T) {
 	_, _, err = strategy.WsDialContext(ctx, url, http.Header{})
 	if long := time.Since(start); long < 700*time.Millisecond {
 		t.Fatalf("a healthy backend keeps retrying for the request timeout, returned after %s (%v)", long, err)
+	}
+}
+
+// Scouts that land on dead proxies tell the controller nothing. A throttle that
+// only ever sees such attempts must not sit at the floor forever.
+func TestBudget_UninformativeAttemptsLiftTheThrottle(t *testing.T) {
+	h := newBudgetHarness()
+	h.budget.setRate(budgetFloorRate)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	waiter(ctx, h.budget, false)
+	waitQueued(t, h.budget, 1)
+
+	h.attempts(connectSocksFail, 30)
+	h.attempts(connectTimeoutNoReply, 30)
+	h.budget.control()
+	if got := h.budget.currentRate(); got != budgetFloorRate*budgetIncreaseFactor {
+		t.Fatalf("rate after an uninformative interval = %v, want %v", got, budgetFloorRate*budgetIncreaseFactor)
+	}
+}
+
+// If the dispatcher dies, waiters must not park forever.
+func TestBudget_FailsOpenWhenTheDispatcherStalls(t *testing.T) {
+	defer setBudgetStallForTest(10*time.Millisecond, 50*time.Millisecond)()
+
+	h := newBudgetHarness()
+	h.budget.setRate(budgetFloorRate)
+
+	out := waiter(context.Background(), h.budget, false)
+	waitQueued(t, h.budget, 1)
+
+	h.advance(time.Minute) // time passes and nothing ticks
+	select {
+	case ok := <-out:
+		if !ok {
+			t.Fatal("a stalled budget must fail open, not refuse")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a waiter stayed parked behind a dead dispatcher")
+	}
+}
+
+func TestBudget_HealthyDispatcherDoesNotFailOpen(t *testing.T) {
+	defer setBudgetStallForTest(10*time.Millisecond, 50*time.Millisecond)()
+
+	h := newBudgetHarness()
+	h.budget.setRate(budgetFloorRate)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := waiter(ctx, h.budget, false)
+	waitQueued(t, h.budget, 1)
+
+	for i := 0; i < 5; i++ {
+		h.advance(10 * time.Millisecond)
+		h.budget.tick(*h.now) // the dispatcher is alive, just slow at 2/s
+		time.Sleep(15 * time.Millisecond)
+	}
+	select {
+	case <-out:
+		t.Fatal("a live dispatcher at its rate must not be bypassed")
+	default:
+	}
+}
+
+// The reaper must stay out of the way for as long as an outage could still be
+// the reason a proxy is down, including after the budget has reopened.
+func TestBudget_OutageSignalOutlivesTheThrottle(t *testing.T) {
+	h := newBudgetHarness()
+	if h.budget.outageRecent(time.Hour) {
+		t.Fatal("a healthy budget has never seen an outage")
+	}
+
+	h.attempts(connectTimeoutPlatform, 200)
+	h.budget.control()
+	if !h.budget.outageRecent(time.Minute) {
+		t.Fatal("a throttled budget is an outage in progress")
+	}
+
+	// the backend heals and the budget ramps back to open
+	for i := 0; i < 20 && h.budget.throttled(); i++ {
+		h.advance(budgetControlInterval)
+		h.attempts(connectOK, 20)
+		h.budget.control()
+	}
+	if h.budget.throttled() {
+		t.Fatal("setup: the budget should have reopened")
+	}
+	if !h.budget.outageRecent(30 * time.Minute) {
+		t.Fatal("a proxy that has been down since the outage may only be dead after a long quiet period")
+	}
+	h.advance(31 * time.Minute)
+	if h.budget.outageRecent(30 * time.Minute) {
+		t.Fatal("thirty quiet minutes later the outage is over")
 	}
 }

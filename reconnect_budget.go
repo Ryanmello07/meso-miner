@@ -56,6 +56,29 @@ const (
 	budgetOpenRatio = 0.5
 )
 
+// A waiter that finds the dispatcher has not ticked for budgetStallGrace is let
+// through: a dead dispatcher must never park proxies forever. Variables so tests
+// can shorten them.
+var (
+	budgetStallCheckIntervalNs atomic.Int64
+	budgetStallGraceNs         atomic.Int64
+)
+
+func init() {
+	budgetStallCheckIntervalNs.Store(int64(5 * time.Second))
+	budgetStallGraceNs.Store(int64(5 * time.Second))
+}
+
+// setBudgetStallForTest shortens the stall detector and returns a restore func.
+// Atomic because waiter goroutines read them while a test restores them.
+func setBudgetStallForTest(interval, grace time.Duration) func() {
+	prevI, prevG := budgetStallCheckIntervalNs.Swap(int64(interval)), budgetStallGraceNs.Swap(int64(grace))
+	return func() {
+		budgetStallCheckIntervalNs.Store(prevI)
+		budgetStallGraceNs.Store(prevG)
+	}
+}
+
 type governMode int32
 
 const (
@@ -99,6 +122,10 @@ type reconnectBudget struct {
 	gov *connectGovernor
 	now func() time.Time
 
+	// lastOutage is the unix nanos of the last control tick that found the
+	// budget throttled
+	lastOutage atomic.Int64
+
 	mu       sync.Mutex
 	rate     float64
 	carry    float64
@@ -139,6 +166,13 @@ func (self *reconnectBudget) throttled() bool {
 // admit blocks until a connect may start. It returns false only when ctx ends
 // first. The direct path never waits.
 func (self *reconnectBudget) admit(ctx context.Context, direct bool) bool {
+	return self.admitParked(ctx, direct, nil)
+}
+
+// admitParked is admit that reports to onPark when the caller starts and stops
+// waiting, so the proxy can be shown as parked rather than broken. onPark may
+// be nil.
+func (self *reconnectBudget) admitParked(ctx context.Context, direct bool, onPark func(parked bool)) bool {
 	if direct {
 		return true
 	}
@@ -151,13 +185,36 @@ func (self *reconnectBudget) admit(ctx context.Context, direct bool) bool {
 	self.queue = append(self.queue, w)
 	self.mu.Unlock()
 
-	select {
-	case <-w.ch:
-		return true
-	case <-ctx.Done():
-		w.canceled.Store(true)
-		return false
+	if onPark != nil {
+		onPark(true)
+		defer onPark(false)
 	}
+
+	stall := time.NewTicker(time.Duration(budgetStallCheckIntervalNs.Load()))
+	defer stall.Stop()
+	for {
+		select {
+		case <-w.ch:
+			return true
+		case <-ctx.Done():
+			w.canceled.Store(true)
+			return false
+		case <-stall.C:
+			if self.stalled() {
+				// the dispatcher is not running: fail open, and drop the
+				// queue entry so it does not take a later token
+				w.canceled.Store(true)
+				return true
+			}
+		}
+	}
+}
+
+// stalled reports whether the dispatcher has missed its ticks.
+func (self *reconnectBudget) stalled() bool {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+	return time.Duration(budgetStallGraceNs.Load()) < self.now().Sub(self.lastTick)
 }
 
 // tick releases the waiters the elapsed time has earned, oldest first. A
@@ -212,10 +269,28 @@ func (self *reconnectBudget) control() {
 	case self.rate < budgetCeilingRate &&
 		(budgetMinIncreaseAttempts <= recent.PlatformAttempts && budgetOpenRatio <= recent.Ratio):
 		self.rate = min(budgetCeilingRate, self.rate*budgetIncreaseFactor)
-	case self.rate < budgetCeilingRate && recent.PlatformAttempts == 0 && len(self.queue) == 0:
-		// nothing is trying: stop holding a reduced rate for no reason
+	case self.rate < budgetCeilingRate && recent.PlatformAttempts < budgetMinIncreaseAttempts:
+		// Too few attempts reached the platform to say anything. Either nothing
+		// is trying, or the scouts the budget released landed on dead proxies.
+		// A reduced rate must not be held on no evidence, so probe harder:
+		// an uninformative attempt is cheap, it never reached the platform.
 		self.rate = min(budgetCeilingRate, self.rate*budgetIncreaseFactor)
 	}
+
+	if self.rate < budgetCeilingRate {
+		self.lastOutage.Store(self.now().UnixNano())
+	}
+}
+
+// outageRecent reports whether the budget is throttled now or was within d. A
+// proxy that has been down since an outage may only be called dead after a
+// quiet period, not on the day the backend comes back.
+func (self *reconnectBudget) outageRecent(d time.Duration) bool {
+	if self.throttled() {
+		return true
+	}
+	last := self.lastOutage.Load()
+	return last != 0 && self.now().Sub(time.Unix(0, last)) < d
 }
 
 func (self *reconnectBudget) run(ctx context.Context) {
@@ -242,12 +317,23 @@ var budgetLoopOnce sync.Once
 
 // admitConnect gates the start of a platform-transport connect. In any mode but
 // enforce it admits immediately.
-func admitConnect(ctx context.Context, direct bool) bool {
+func admitConnect(ctx context.Context, direct bool, proxyIndex int) bool {
 	if currentGovernMode() != governEnforce {
 		return true
 	}
 	budgetLoopOnce.Do(func() { go connectBudget.run(context.Background()) })
-	return connectBudget.admit(ctx, direct)
+	return connectBudget.admitParked(ctx, direct, func(parked bool) { markProxyParked(proxyIndex, parked) })
+}
+
+// OutageRecent reports whether a backend outage is under way or ended within d,
+// as seen by the reconnect attempt budget. The provider's reapers use it to hold
+// off: a proxy that has been down since the outage is not dead until a long
+// quiet period says so. Always false unless the governor is enforcing.
+func OutageRecent(d time.Duration) bool {
+	if currentGovernMode() != governEnforce {
+		return false
+	}
+	return connectBudget.outageRecent(d)
 }
 
 // singleRoundCheck is replaceable so tests can force either answer.

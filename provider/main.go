@@ -2828,10 +2828,56 @@ func reapProxies(toReap []connect.DegradedProxyEntry, proxyCancelMap map[string]
 	return reaped
 }
 
+// degradedReaperFrozen reports whether the reaper must hold off. While a
+// backend outage is under way, or ended within the minimum down time, a proxy
+// that has been down since the outage is down because of it. Culling half the
+// fleet then only forces a relaunch with fresh auth the moment the backend
+// returns. Variable so tests can force either answer.
+var degradedReaperFrozen = func() bool {
+	return connect.OutageRecent(degradedReaperMinDownTime)
+}
+
+// degradedReaperPass is one tick of the degraded-proxy reaper. It returns how
+// many proxies it cancelled and whether it held off because of an outage.
+func degradedReaperPass(
+	degradedProxies func() []connect.DegradedProxyEntry,
+	frozen func() bool,
+	isStillDegraded stillDegradedFunc,
+	proxyCancelMap map[string]context.CancelFunc,
+	proxyCancelMu *sync.Mutex,
+) (int64, bool) {
+	if frozen() {
+		return 0, true
+	}
+
+	degraded := degradedProxies()
+	if len(degraded) <= 1 {
+		return 0, false
+	}
+
+	cancellable := onlyCancellableProxies(degraded, proxyCancelMap, proxyCancelMu)
+	if len(cancellable) <= 1 {
+		return 0, false
+	}
+
+	scored := scoreDegradedProxies(cancellable, liveContractsAcquired)
+	keep := degradedReaperKeepCount(len(scored))
+	toReap := selectProxiesToReap(scored, keep, degradedReaperMinDownTime)
+
+	reaped := reapProxies(toReap, proxyCancelMap, proxyCancelMu, isStillDegraded)
+
+	if 0 < reaped {
+		tlog("[proxy-quality] dropped %d under-performing proxies (kept best %d of %d)\n",
+			reaped, keep, len(scored))
+	}
+	return int64(reaped), false
+}
+
 func runDegradedProxyReaper(ctx context.Context, proxyCancelMap map[string]context.CancelFunc, proxyCancelMu *sync.Mutex) {
 	ticker := time.NewTicker(degradedReaperTicker)
 	defer ticker.Stop()
 
+	held := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -2839,25 +2885,14 @@ func runDegradedProxyReaper(ctx context.Context, proxyCancelMap map[string]conte
 		case <-ticker.C:
 		}
 
-		degraded := connect.DegradedProxies()
-		if len(degraded) <= 1 {
-			continue
-		}
-
-		cancellable := onlyCancellableProxies(degraded, proxyCancelMap, proxyCancelMu)
-		if len(cancellable) <= 1 {
-			continue
-		}
-
-		scored := scoreDegradedProxies(cancellable, liveContractsAcquired)
-		keep := degradedReaperKeepCount(len(scored))
-		toReap := selectProxiesToReap(scored, keep, degradedReaperMinDownTime)
-
-		reaped := reapProxies(toReap, proxyCancelMap, proxyCancelMu, liveIsDegraded)
-
-		if reaped > 0 {
-			tlog("[proxy-quality] dropped %d under-performing proxies (kept best %d of %d)\n",
-				reaped, keep, len(scored))
+		_, frozen := degradedReaperPass(connect.DegradedProxies, degradedReaperFrozen, liveIsDegraded, proxyCancelMap, proxyCancelMu)
+		if frozen != held {
+			held = frozen
+			if frozen {
+				tlog("[proxy-quality] reaper held off: a backend outage is under way or ended within %s, so downed proxies are not culled yet\n", degradedReaperMinDownTime)
+			} else {
+				tlog("[proxy-quality] reaper resumed: no backend outage in the last %s\n", degradedReaperMinDownTime)
+			}
 		}
 	}
 }

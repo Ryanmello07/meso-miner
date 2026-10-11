@@ -877,7 +877,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 		// under the shared attempt budget; the direct path never waits
 		{
 			proxyIndex, proxied := self.proxyIndex()
-			if !admitConnect(self.ctx, !proxied || proxyIndex == 0) {
+			if !admitConnect(self.ctx, !proxied || proxyIndex == 0, proxyIndex) {
 				return
 			}
 		}

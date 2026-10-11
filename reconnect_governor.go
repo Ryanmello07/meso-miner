@@ -259,9 +259,14 @@ func (self *connectGovernor) snapshotWindow(window time.Duration) govSnapshot {
 		s.FailedBytes += b.failedBytes
 	}
 
-	// a dead proxy fails whatever the backend does, so socks failures say
-	// nothing about it; connects that died young are not good
-	s.PlatformAttempts = s.Attempts - s.Classes[connectSocksFail]
+	// Only evidence that the PLATFORM answered counts against it: a timeout
+	// after it replied, a rejected upgrade, and a connect whose session died
+	// young. A proxy that hangs, refuses, or tampers with TLS fails the same way
+	// whatever the backend does, so socks, silent-timeout, tls and unclassified
+	// failures are ambiguous and carry no weight either way. Without that, a
+	// poor proxy list on a healthy backend would read as an outage and the
+	// governor would throttle the live proxies.
+	s.PlatformAttempts = s.OK + s.Classes[connectTimeoutPlatform] + s.Classes[connectUpgradeFail]
 	s.PlatformGood = max(0, s.OK-s.Early)
 	if 0 < s.PlatformAttempts {
 		s.Ratio = float64(s.PlatformGood) / float64(s.PlatformAttempts)
