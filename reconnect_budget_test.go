@@ -970,3 +970,64 @@ func TestMemoryPressure_HeapNearTheGoLimitIsNotPressure(t *testing.T) {
 		t.Fatal("plenty of host memory available must not read as pressure, whatever the heap does")
 	}
 }
+
+// The rate opens when the host is doing about as well as it usually does, not only
+// when 50% of attempts succeed. A host whose normal is 30% good would otherwise sit
+// at the floor for ever after one outage: the cut needs a collapse and the open
+// needs more than the host ever achieves, and a held budget freezes the reaper and
+// ignores real renewal refusals.
+func TestBudget_ChronicallyPoorHostReopensAtItsOwnNormal(t *testing.T) {
+	h := newBudgetHarness()
+	for i := 0; i < 10; i++ {
+		h.attempts(connectOK, 9)
+		h.attempts(connectTimeoutPlatform, 21) // 30% good
+		h.gov.learnBaseline()
+		h.advance(61 * time.Second)
+	}
+	h.attempts(connectTimeoutPlatform, 60) // an outage
+	h.budget.control()
+	if h.budget.currentRate() == budgetCeilingRate {
+		t.Fatal("setup: the collapse must cut the rate")
+	}
+	h.advance(61 * time.Second)
+
+	for i := 0; i < 30 && h.budget.currentRate() < budgetCeilingRate; i++ {
+		h.attempts(connectOK, 4)
+		h.attempts(connectTimeoutPlatform, 8) // 33% good: its normal
+		h.budget.control()
+		h.advance(budgetControlInterval)
+	}
+	if h.budget.currentRate() != budgetCeilingRate {
+		t.Fatalf("the budget stayed at %v although the host is doing as well as ever", h.budget.currentRate())
+	}
+}
+
+// Holding reconnects back for memory is a host problem. It must never read as a
+// backend outage, or a memory-pressured box freezes its reaper, ignores real
+// renewal refusals, and writes a marker that makes its OOM restart start at the
+// backend floor instead of the memory floor.
+func TestBudget_AMemoryQueueIsNotAnOutage(t *testing.T) {
+	h := newBudgetHarness()
+	path := t.TempDir() + "/govern_outage"
+	h.budget.markerPath = path
+	h.budget.memoryPressure = func() bool { return true }
+	for i := 0; i < 8; i++ {
+		h.budget.control()
+	}
+	// a proxy waits behind the memory cap
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.budget.admit(ctx, false)
+	time.Sleep(50 * time.Millisecond)
+	h.budget.control()
+
+	if h.budget.throttled() {
+		t.Fatal("a memory-held queue read as a throttled (outage) budget")
+	}
+	if h.budget.outageRecent(time.Hour) {
+		t.Fatal("a memory-held queue read as a recent outage")
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("a memory-held queue wrote the outage marker")
+	}
+}

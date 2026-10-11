@@ -329,3 +329,100 @@ func TestRunH1_LocalTeardownIsNotAnEarlyDeath(t *testing.T) {
 		t.Fatalf("a locally cancelled session was counted as dying young (%d)", got)
 	}
 }
+
+// A session the platform closes for the client limit is the platform enforcing a
+// rule, not the backend dropping connections; it must not count as dying young.
+func TestRunH1_ClientLimitCloseIsNotAnEarlyDeath(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var accepts atomic.Int64
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accepts.Add(1)
+		ws, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer ws.Close()
+		time.Sleep(100 * time.Millisecond)
+		_ = ws.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(ClientLimitCloseCode, "client limit"), time.Now().Add(time.Second))
+		time.Sleep(200 * time.Millisecond)
+	}))
+	defer server.Close()
+
+	settings := DefaultPlatformTransportSettings()
+	settings.ReconnectTimeout = 20 * time.Millisecond
+	settings.FlapStableAfter = time.Hour // every session is young
+
+	before := connectGov.snapshot()
+	transport := newFlapTestTransport(t, ctx, server.URL, settings)
+	defer transport.Close()
+
+	deadline := time.After(10 * time.Second)
+	for accepts.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("the transport never connected")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	time.Sleep(700 * time.Millisecond)
+	if got := connectGov.snapshot().Early - before.Early; got != 0 {
+		t.Fatalf("a client-limit close was counted as dying young (%d)", got)
+	}
+}
+
+// The end-of-session rules are shared by the H1 and H3 loops through one helper,
+// so that the two cannot drift apart.
+func TestSessionEnd_YoungSessionIsHeldAndCountedOnce(t *testing.T) {
+	flaps := newFlapGuard(time.Minute, time.Second)
+	flaps.jitter = func(d time.Duration) time.Duration { return d }
+	ctx := context.Background()
+	before := connectGov.snapshot()
+	wait := sessionEndWait(ctx, flaps, 3*time.Second, false, "c", loggerOrDefault(nil), true)
+	if wait != time.Second {
+		t.Fatalf("first young session wait = %v, want the base", wait)
+	}
+	if got := connectGov.snapshot().Early - before.Early; got != 1 {
+		t.Fatalf("early deaths counted = %d, want 1", got)
+	}
+}
+
+func TestSessionEnd_StableSessionHasNoWaitAndNoEarlyDeath(t *testing.T) {
+	flaps := newFlapGuard(time.Minute, time.Second)
+	before := connectGov.snapshot()
+	if wait := sessionEndWait(context.Background(), flaps, 5*time.Minute, false, "c", loggerOrDefault(nil), true); wait != 0 {
+		t.Fatalf("stable session wait = %v, want 0", wait)
+	}
+	if got := connectGov.snapshot().Early - before.Early; got != 0 {
+		t.Fatalf("a stable session counted as an early death (%d)", got)
+	}
+}
+
+func TestSessionEnd_LocalTeardownAndAuxiliaryAreNotEarlyDeaths(t *testing.T) {
+	flaps := newFlapGuard(time.Minute, time.Second)
+	flaps.jitter = func(d time.Duration) time.Duration { return d }
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	before := connectGov.snapshot()
+	sessionEndWait(cancelled, flaps, time.Second, false, "c", loggerOrDefault(nil), true)
+	// an auxiliary H3 beside H1 is never a health signal, but is still held back
+	if wait := sessionEndWait(context.Background(), flaps, time.Second, false, "c", loggerOrDefault(nil), false); wait == 0 {
+		t.Fatal("an auxiliary transport still must not redial in a tight loop")
+	}
+	if got := connectGov.snapshot().Early - before.Early; got != 0 {
+		t.Fatalf("teardown or an auxiliary transport counted as an early death (%d)", got)
+	}
+}
+
+func TestSessionEnd_ClientLimitCloseIsNotAnEarlyDeath(t *testing.T) {
+	flaps := newFlapGuard(time.Minute, time.Second)
+	flaps.jitter = func(d time.Duration) time.Duration { return d }
+	before := connectGov.snapshot()
+	sessionEndWait(context.Background(), flaps, time.Second, true, "c", loggerOrDefault(nil), true)
+	if got := connectGov.snapshot().Early - before.Early; got != 0 {
+		t.Fatalf("a client-limit close counted as an early death (%d)", got)
+	}
+}
