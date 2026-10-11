@@ -446,7 +446,11 @@ func (self *reconnectBudget) adjust(recent govSnapshot) func() {
 	reason := ""
 	failedAttempts := recent.Attempts - recent.OK
 	mostlyFailing := budgetMinByteBreakerFailures <= failedAttempts && budgetByteBreakerShare*float64(recent.Attempts) <= float64(failedAttempts)
+	// inside the startup grace nothing is cut: a start is a stampede whose failures
+	// are the host's own congestion, not the backend (see govStartupGrace)
+	grace := recent.StartupGrace && self.rate >= budgetCeilingRate
 	switch {
+	case grace:
 	case failedBytesPerSec > budgetFailedBytesCeilingPerSec && mostlyFailing:
 		reason = "bytes"
 		// whatever the verdict says, failed attempts are burning the pipe. It needs
