@@ -1182,7 +1182,6 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 				}()
 
 				speedTest := false
-				var speedEchoSession *speedEchoSession
 
 				for {
 					select {
@@ -1221,7 +1220,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 								switch message[0] {
 								case TransportControlSpeedStart:
 									speedTest = true
-									speedEchoSession = speedEcho.newSession()
+									recordSpeedTestStart()
 									// echo
 									select {
 									case <-self.ctx.Done():
@@ -1259,12 +1258,9 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 							continue
 						}
 						if speedTest {
-							// speed test echo, within the budget: a mass reconnect must not
-							// become a bandwidth storm on the proxies
-							if speedEchoSession != nil && !speedEchoSession.allowInMode(len(message)) {
-								MessagePoolReturn(message)
-								continue
-							}
+							// Always echo in full: a test that never comes back is retried by
+							// the server, many times over (see transport_speed_echo.go).
+							recordSpeedEchoBytes(len(message))
 							select {
 							case <-self.ctx.Done():
 								MessagePoolReturn(message)

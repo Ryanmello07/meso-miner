@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,201 +11,16 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-type speedEchoHarness struct {
-	mu  sync.Mutex
-	now time.Time
-	b   *speedEchoBudget
-}
-
-func newSpeedEchoHarness() *speedEchoHarness {
-	h := &speedEchoHarness{now: time.Unix(3_000_000, 0)}
-	h.b = newSpeedEchoBudget(func() time.Time {
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		return h.now
-	})
-	h.b.degraded = func() bool { return false }
-	return h
-}
-
-func (h *speedEchoHarness) advance(d time.Duration) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.now = h.now.Add(d)
-}
-
-// The platform runs a speed test on a fresh connection: it floods the websocket
-// and the provider echoes every byte back. That is real bandwidth on the paid
-// proxy for zero billable payload, and after a mass reconnect every connection
-// does it at once (2.4 GiB in five minutes on one host). A single test must fit,
-// the aggregate must not.
-func TestSpeedEcho_OneNormalTestIsNeverCut(t *testing.T) {
-	h := newSpeedEchoHarness()
-	s := h.b.newSession()
-	var sent int
-	for sent < 6<<20 { // 6 MiB in 64 KiB frames, spread over 10 seconds
-		if !s.allow(64 << 10) {
-			t.Fatalf("a single speed test was cut after %d bytes", sent)
-		}
-		sent += 64 << 10
-		h.advance(10 * time.Second / 96)
-	}
-}
-
-func TestSpeedEcho_AStuckTestEndsAtThePerSessionCap(t *testing.T) {
-	h := newSpeedEchoHarness()
-	s := h.b.newSession()
-	var echoed int
-	for i := 0; i < 1000; i++ {
-		if s.allow(64 << 10) {
-			echoed += 64 << 10
-		}
-		h.advance(time.Second) // slowly enough that the global bucket never binds
-	}
-	if echoed != speedEchoSessionMaxBytes {
-		t.Fatalf("a never-ending test echoed %d bytes, want exactly the cap %d", echoed, speedEchoSessionMaxBytes)
-	}
-}
-
-func TestSpeedEcho_ManyConcurrentTestsShareTheGlobalRate(t *testing.T) {
-	h := newSpeedEchoHarness()
-	sessions := make([]*speedEchoSession, 700)
-	for i := range sessions {
-		sessions[i] = h.b.newSession()
-	}
-	var echoed int
-	// 30 seconds in which every one of 700 connections tries to echo 90 KB/s
-	for sec := 0; sec < 30; sec++ {
-		for _, s := range sessions {
-			for f := 0; f < 2; f++ {
-				if s.allow(45 << 10) {
-					echoed += 45 << 10
-				}
-			}
-		}
-		h.advance(time.Second)
-	}
-	offered := 700 * 30 * 90 << 10
-	ceiling := int(speedEchoRate*30) + speedEchoBurst
-	if ceiling < echoed {
-		t.Fatalf("echoed %d bytes in 30s, above the global ceiling %d", echoed, ceiling)
-	}
-	if offered/4 < echoed {
-		t.Fatalf("echoed %d of %d offered: the storm was not cut enough", echoed, offered)
-	}
-}
-
-func TestSpeedEcho_DuringAnOutageTheGlobalRateDrops(t *testing.T) {
-	h := newSpeedEchoHarness()
-	sessions := make([]*speedEchoSession, 200)
-	for i := range sessions {
-		sessions[i] = h.b.newSession()
-	}
-	run := func() int {
-		echoed := 0
-		for sec := 0; sec < 30; sec++ {
-			for _, s := range sessions {
-				if s.allow(64 << 10) {
-					echoed += 64 << 10
-				}
-			}
-			h.advance(time.Second)
-		}
-		return echoed
-	}
-	healthy := run()
-	h.b.degraded = func() bool { return true }
-	for i := range sessions {
-		sessions[i] = h.b.newSession()
-	}
-	h.advance(time.Minute) // refill; the burst is the same, the sustained rate is what changes
-	outage := run()
-	if outage*3 > healthy {
-		t.Fatalf("outage echo %d should be well under healthy echo %d", outage, healthy)
-	}
-}
-
-func TestSpeedEcho_OnlyEnforceModeInAnOutageDrops(t *testing.T) {
-	for _, mode := range []governMode{governOff, governShadow} {
-		restore := setGovernModeForTest(mode)
-		h := newSpeedEchoHarness()
-		h.b.degraded = func() bool { return true }
-		s := h.b.newSession()
-		for i := 0; i < 1000; i++ {
-			if !s.allowInMode(64 << 10) {
-				restore()
-				t.Fatalf("mode %v dropped an echo", mode)
-			}
-		}
-		restore()
-	}
-}
-
-// The speed score feeds provider ranking, so a healthy provider echoes every test
-// in full no matter how many connect at once.
-func TestSpeedEcho_AHealthyBackendNeverDrops(t *testing.T) {
-	restore := setGovernModeForTest(governEnforce)
-	defer restore()
-	h := newSpeedEchoHarness()
-	sessions := make([]*speedEchoSession, 700)
-	for i := range sessions {
-		sessions[i] = h.b.newSession()
-	}
-	before := SpeedEchoStatsNow()
-	for _, s := range sessions {
-		for f := 0; f < 8; f++ {
-			if !s.allowInMode(64 << 10) {
-				t.Fatal("a healthy provider dropped a speed test echo")
-			}
-		}
-	}
-	after := SpeedEchoStatsNow()
-	if after.DroppedBytes != before.DroppedBytes {
-		t.Fatal("nothing should be counted dropped while healthy")
-	}
-	if after.OverBudgetBytes == before.OverBudgetBytes {
-		t.Fatal("what the budget would have refused must still be counted")
-	}
-}
-
-func TestSpeedEcho_CountersSplitEchoedFromDropped(t *testing.T) {
-	before := SpeedEchoStatsNow()
-	h := newSpeedEchoHarness()
-	h.b.degraded = func() bool { return true }
-	s := h.b.newSession()
-	restore := setGovernModeForTest(governEnforce)
-	defer restore()
-	for i := 0; i < 400; i++ {
-		s.allowInMode(64 << 10)
-	}
-	after := SpeedEchoStatsNow()
-	if after.EchoedBytes-before.EchoedBytes != speedEchoSessionMaxBytes {
-		t.Fatalf("echoed = %d, want the session cap", after.EchoedBytes-before.EchoedBytes)
-	}
-	if after.DroppedBytes-before.DroppedBytes != int64(400*(64<<10)-speedEchoSessionMaxBytes) {
-		t.Fatalf("dropped = %d", after.DroppedBytes-before.DroppedBytes)
-	}
-}
-
-// End to end: the platform starts a speed test and floods the websocket; a
-// provider that echoed it all would send back everything. Only the session cap
-// comes back.
-func TestRunH1_SpeedTestFloodIsEchoedOnlyUpToTheCap(t *testing.T) {
-	restore := setGovernModeForTest(governEnforce)
-	defer restore()
-	prevDegraded := speedEcho.degraded
-	speedEcho.degraded = func() bool { return true } // only an outage rations the echo
-	defer func() { speedEcho.degraded = prevDegraded }()
-	speedEcho.mu.Lock()
-	speedEcho.tokens = speedEchoBurst
-	speedEcho.last = time.Now()
-	speedEcho.mu.Unlock()
-
+// The platform floods a fresh connection with a speed test and the provider echoes
+// every byte back. It must echo ALL of it: a test that never comes back is retried
+// by the server (a provider that dropped echoes got ten times the tests and ten
+// times the inbound bytes), and the score feeds provider ranking.
+func TestRunH1_SpeedTestIsEchoedInFullAndCounted(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	const frame = 64 << 10
-	const flood = 24 << 20 // three times the cap
+	const flood = 4 << 20
 	var echoedBack atomic.Int64
 	done := make(chan struct{})
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
@@ -239,8 +53,8 @@ func TestRunH1_SpeedTestFloodIsEchoedOnlyUpToTheCap(t *testing.T) {
 	}))
 	defer server.Close()
 
-	settings := DefaultPlatformTransportSettings()
-	transport := newFlapTestTransport(t, ctx, server.URL, settings)
+	before := SpeedEchoStatsNow()
+	transport := newFlapTestTransport(t, ctx, server.URL, DefaultPlatformTransportSettings())
 	defer transport.Close()
 
 	select {
@@ -248,11 +62,14 @@ func TestRunH1_SpeedTestFloodIsEchoedOnlyUpToTheCap(t *testing.T) {
 	case <-time.After(20 * time.Second):
 		t.Fatal("the flood never finished")
 	}
-	got := echoedBack.Load()
-	if got == 0 {
-		t.Fatal("setup: nothing was echoed at all")
+	if got := echoedBack.Load(); got != flood {
+		t.Fatalf("echoed %d of %d bytes", got, flood)
 	}
-	if speedEchoSessionMaxBytes < got {
-		t.Fatalf("echoed %d bytes of a %d byte flood; the cap is %d", got, flood, speedEchoSessionMaxBytes)
+	after := SpeedEchoStatsNow()
+	if after.Tests-before.Tests != 1 {
+		t.Fatalf("tests counted = %d, want 1", after.Tests-before.Tests)
+	}
+	if after.EchoedBytes-before.EchoedBytes != flood {
+		t.Fatalf("echoed bytes counted = %d, want %d", after.EchoedBytes-before.EchoedBytes, flood)
 	}
 }
