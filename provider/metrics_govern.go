@@ -35,5 +35,12 @@ func writeGovernMetrics(b *strings.Builder) {
 	gauge("urnet_govern_waiting", "Proxies waiting their turn under the connect budget.", s.Waiting)
 	gauge("urnet_govern_attempts", "Platform connect attempts in the last 60s.", s.Attempts)
 	gauge("urnet_govern_died_young", "Connects in the last 60s whose session died within a minute.", s.DiedYoung)
+	xs := connect.TransferSendStatsNow()
+	fmt.Fprintf(b, "# HELP urnet_transfer_send_frames_total Transfer-layer frames written, split into first sends and resends.\n# TYPE urnet_transfer_send_frames_total counter\nurnet_transfer_send_frames_total{kind=\"first\"} %d\nurnet_transfer_send_frames_total{kind=\"resend\"} %d\n", xs.FirstFrames, xs.ResendFrames)
+	fmt.Fprintf(b, "# HELP urnet_transfer_send_bytes_total Transfer-layer frame bytes written, split into first sends and resends.\n# TYPE urnet_transfer_send_bytes_total counter\nurnet_transfer_send_bytes_total{kind=\"first\"} %d\nurnet_transfer_send_bytes_total{kind=\"resend\"} %d\n", xs.FirstBytes, xs.ResendBytes)
+	fmt.Fprintf(b, "# HELP urnet_transfer_resend_depth_total Resends by how many times the item had already been sent.\n# TYPE urnet_transfer_resend_depth_total counter\n")
+	for i, label := range []string{"2", "3-4", "5-8", "9+"} {
+		fmt.Fprintf(b, "urnet_transfer_resend_depth_total{send=\"%s\"} %d\n", label, xs.ResendDepth[i])
+	}
 	fmt.Fprintf(b, "# HELP urnet_govern_flap_backoffs_total Reconnects held back because the previous session died young.\n# TYPE urnet_govern_flap_backoffs_total counter\nurnet_govern_flap_backoffs_total %d\n", s.FlapBackoffs)
 }
