@@ -477,9 +477,9 @@ func govLine(state string, s govSnapshot) string {
 		perAttemptKB = float64(s.Bytes) / float64(s.Attempts) / 1024
 	}
 	return fmt.Sprintf(
-		"[govern] %s window=%ds attempts=%d (%.1f/s) connected=%d died_young=%d good=%.0f%% socks=%d tls=%d upgrade=%d timeout_platform=%d timeout_silent=%d other=%d refused=%d dials/attempt=%.1f KB/attempt=%.1f failed_KB=%d would_hold=%d",
+		"[govern] %s window=%ds attempts=%d (%.1f/s) connected=%d died_young=%d good=%.0f%% baseline=%.0f%% threshold=%.0f%% socks=%d tls=%d upgrade=%d timeout_platform=%d timeout_silent=%d other=%d refused=%d dials/attempt=%.1f KB/attempt=%.1f failed_KB=%d would_hold=%d",
 		state, int(govWindow/time.Second), s.Attempts, float64(s.Attempts)/govWindow.Seconds(),
-		s.OK, s.Early, 100*s.Ratio,
+		s.OK, s.Early, 100*s.Ratio, 100*s.Baseline, 100*s.Threshold,
 		s.Classes[connectSocksFail], s.Classes[connectTlsFail], s.Classes[connectUpgradeFail],
 		s.Classes[connectTimeoutPlatform], s.Classes[connectTimeoutNoReply], s.Classes[connectOtherFail], s.Classes[connectRefused],
 		perAttemptDials, perAttemptKB, s.FailedBytes/1024, s.WouldHold,

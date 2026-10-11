@@ -11,9 +11,11 @@ import (
 // [health][proxies]: whether the backend reads as degraded, what the shared
 // connect budget is doing about it, and how many connects died young.
 func governHealthLine(s connect.GovernorStatus) string {
+	ss := connect.SpeedEchoStatsNow()
 	return fmt.Sprintf(
-		"❤️ [health][govern] mode=%s verdict=%s rate=%.1f/s waiting=%d attempts=%d connected=%d died_young=%d would_hold=%d flap_backoffs=%d",
+		"❤️ [health][govern] mode=%s verdict=%s rate=%.1f/s waiting=%d attempts=%d connected=%d died_young=%d would_hold=%d flap_backoffs=%d speedtests=%d echoed_MB=%d",
 		s.Mode, s.Verdict, s.BudgetRate, s.Waiting, s.Attempts, s.Connected, s.DiedYoung, s.WouldHold, s.FlapBackoffs,
+		ss.Tests, ss.EchoedBytes>>20,
 	)
 }
 

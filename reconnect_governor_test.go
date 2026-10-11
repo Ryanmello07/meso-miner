@@ -653,3 +653,17 @@ func TestFlapGuard_ProvenOnceASessionHasLivedLongEnough(t *testing.T) {
 		t.Fatal("once proven, a later young session does not unprove it")
 	}
 }
+
+func TestGovLine_CarriesTheBaselineAndThreshold(t *testing.T) {
+	g, now := newTestGovernor()
+	for i := 0; i < 8; i++ {
+		windowWith(g, now, 9, 21)
+	}
+	record(g, connectOK, 5)
+	line := govLine("ok", g.snapshot())
+	for _, want := range []string{"baseline=30%", "threshold=12%", "refused=0"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("missing %q in %q", want, line)
+		}
+	}
+}

@@ -427,6 +427,50 @@ Monitors backend connectivity. It is designed to be conservative to avoid false 
 
 ---
 
+## 🛡️ Backend Outage Protection (`[govern]`, `[t]flap`, `[proxy][outage]`)
+
+On by default (`URNETWORK_GOVERN`, see [Configuration](docs/Configuration.md#backend-outage-protection)). Every line starting with `[govern]` is also in the important log.
+
+```
+[govern] ok window=60s attempts=732 (12.2/s) connected=673 died_young=9 good=97% baseline=91% threshold=20% socks=9 tls=0 upgrade=0 timeout_platform=9 timeout_silent=3 other=0 refused=0 dials/attempt=3.3 KB/attempt=4.8 failed_KB=71 would_hold=0 mode=enforce rate=200.0/s waiting=0
+[govern] DEGRADED (enforcing: connects run under a shared attempt budget) window=60s attempts=312 ...
+[govern] recovered window=60s attempts=41 ...
+[govern] budget cut from 200.0/s to 50.0/s reason=verdict good=3% threshold=20% hard_failures=41 platform_attempts=44 failed_KB/s=18
+[govern] budget reopened to 200.0/s after being throttled for 4m10s
+[govern] memory pressure: holding reconnects to at most 50.0/s until memory frees up (this is the host, not the backend)
+[govern] memory pressure over: reconnects back to full speed
+[govern] restart marker found (the last run ended 2m0s into an outage): starting at 2.0/s and ramping on evidence
+[t]flap 01a02cf8-... session lived 3.2s, holding reconnect 8.1s (14 suppressed)
+[proxy][outage] url reaper (212 probe results ignored) held off: the backend is degraded, so proxy failures are not evidence; no proxy will be removed or blacklisted until it heals
+❤️ [health][govern] mode=enforce verdict=ok rate=200.0/s waiting=0 attempts=40 connected=17 died_young=8 would_hold=0 flap_backoffs=168 speedtests=2368 echoed_MB=1190
+```
+
+**The `[govern]` window line** is printed every minute while the verdict is degraded and every 5 minutes as a heartbeat when healthy.
+
+| Field | Meaning |
+|---|---|
+| `attempts` / `(x/s)` | Platform connect attempts in the last 60 s, across every transport. |
+| `connected` | Attempts that connected and authenticated. |
+| `died_young` | Of those, sessions that ended within 60 s. A connect that dies young is a failure in all but name. |
+| `good` | Share of platform-class attempts that went well (connected and lived). Only attempts that reached the platform count: a timeout after it answered, a rejected upgrade, a connect that died young. Proxy failures (`socks`, `tls`, `timeout_silent`, `other`) and `refused` carry no weight. |
+| `baseline` | What `good` usually is on this host, learned from healthy windows (0% until learned). A poor proxy list on a healthy backend sits low all day; an outage is a collapse from it. |
+| `threshold` | The `good` ratio below which this host's window reads as degraded: 20%, or 40% of `baseline` if lower (never under 8%). |
+| `socks` / `tls` / `upgrade` / `timeout_platform` / `timeout_silent` / `other` | Why the failed attempts failed. `upgrade` is the platform answering the websocket upgrade with a failure; `timeout_platform` is giving up after the platform answered; `timeout_silent` is giving up without hearing it. |
+| `refused` | The platform enforcing a rule (an explicit 401/403, a client-limit close). Not the backend failing. |
+| `dials/attempt`, `KB/attempt`, `failed_KB` | What an attempt costs: proxy dials and bytes, and bytes spent on attempts that failed. |
+| `would_hold` | In `shadow` mode, how many connects the budget would have delayed. |
+| `rate`, `waiting` | The attempt budget (200/s is open) and how many proxies are waiting their turn. |
+
+**Budget lines.** `budget cut` says what pulled the rate down: `reason=verdict` (the window was degraded) or `reason=bytes` (failed attempts burned more than 256 KiB/s with most attempts failing). `budget reopened` says how long it was throttled. `memory pressure` lines are about this host running short of memory, not the backend: reconnects are held to a safe rate and the backend verdict is untouched.
+
+**`[t]flap`** means a session ended within 60 s, so the proxy waits (5 s doubling to 60 s) before it reconnects. `(N suppressed)` counts lines skipped by the rate limit.
+
+**`[proxy][outage]`** means an automatic eviction pass (URL reaper, URL cleanup, or give-up eviction) held off because the backend is degraded. Nothing is removed or blacklisted until it heals.
+
+**`[health][govern]`** adds `speedtests` (platform speed tests started, about two per connect) and `echoed_MB` (what the provider echoed back). The speed test is always echoed in full: a test that does not come back is retried by the server.
+
+---
+
 ## 🗑️ Packet Drop Rate-Limiting
 
 ```
