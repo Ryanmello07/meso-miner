@@ -322,6 +322,8 @@ What it does while the backend is failing:
 - **Byte breaker.** If failed attempts burn more than 256 KiB/s (about 22 GB/day) the budget is cut whatever the verdict says.
 - **Flap guard.** A session that dies in under 60 s makes that proxy wait (5 s doubling to 60 s, jittered) before it reconnects.
 - **Identities are protected.** A saved client identity is evicted only after 5 explicit refusals (HTTP 401 or 403) from a healthy backend, never on timeouts and never during an outage. The degraded-proxy reaper also holds off while an outage is under way and for 30 minutes after.
+- **Speed tests are echoed in full, and counted.** The platform speed-tests every new transport (512 KiB, twice, echoed straight back; the score feeds provider ranking), so each connect costs about 2 MiB each way on the proxy. The `urnet_speedtest_*` metrics show the cost. Do not try to ration it: a test that never comes back is retried by the server, and a provider that dropped its echoes got ten times the tests. The connect budget bounds the cost by bounding connects.
+- **Memory pressure.** If the host has under 7% of its memory available, or the Go heap is within 8% of its soft limit, the budget sheds reconnects whatever the backend verdict says and does not reopen until the pressure is gone.
 - **Restart during an outage.** A throttled budget keeps a marker file at `~/.urnetwork/govern_outage`. A restart that finds one under 10 minutes old starts at the floor and ramps on evidence; a healthy restart or hot swap pays nothing.
 
 What to look at:

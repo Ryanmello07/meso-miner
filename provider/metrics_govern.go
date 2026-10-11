@@ -43,5 +43,8 @@ func writeGovernMetrics(b *strings.Builder) {
 	for i, label := range []string{"2", "3-4", "5-8", "9+"} {
 		fmt.Fprintf(b, "urnet_transfer_resend_depth_total{send=\"%s\"} %d\n", label, xs.ResendDepth[i])
 	}
+	ss := connect.SpeedEchoStatsNow()
+	fmt.Fprintf(b, "# HELP urnet_speedtest_total Platform speed tests started on a transport (every connect gets about two).\n# TYPE urnet_speedtest_total counter\nurnet_speedtest_total %d\n", ss.Tests)
+	fmt.Fprintf(b, "# HELP urnet_speedtest_echo_bytes_total Speed test bytes echoed back to the platform (the same again arrives inbound).\n# TYPE urnet_speedtest_echo_bytes_total counter\nurnet_speedtest_echo_bytes_total %d\n", ss.EchoedBytes)
 	fmt.Fprintf(b, "# HELP urnet_govern_flap_backoffs_total Reconnects held back because the previous session died young.\n# TYPE urnet_govern_flap_backoffs_total counter\nurnet_govern_flap_backoffs_total %d\n", s.FlapBackoffs)
 }

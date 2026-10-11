@@ -1220,6 +1220,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 								switch message[0] {
 								case TransportControlSpeedStart:
 									speedTest = true
+									recordSpeedTestStart()
 									// echo
 									select {
 									case <-self.ctx.Done():
@@ -1257,7 +1258,9 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 							continue
 						}
 						if speedTest {
-							// speed test echo
+							// Always echo in full: a test that never comes back is retried by
+							// the server, many times over (see transport_speed_echo.go).
+							recordSpeedEchoBytes(len(message))
 							select {
 							case <-self.ctx.Done():
 								MessagePoolReturn(message)

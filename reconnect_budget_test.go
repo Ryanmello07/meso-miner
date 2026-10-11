@@ -863,3 +863,68 @@ func TestGovernState_MarkerIOHappensWithoutTheBudgetLock(t *testing.T) {
 		t.Fatalf("the budget lock was held during %d of %d file operations", ioCalls-lockFreeDuringIO, ioCalls)
 	}
 }
+
+// Under real memory pressure every reconnect attempt (TLS state, buffers,
+// goroutines) makes it worse; during the 2026-10 outage one box sat at 20 of
+// 24 GB. The budget sheds reconnects then, even while the backend looks fine,
+// and does not open back up until the pressure is gone.
+func TestBudget_MemoryPressureShedsReconnectsAndHoldsThem(t *testing.T) {
+	h := newBudgetHarness()
+	pressured := true
+	h.budget.memoryPressure = func() bool { return pressured }
+	h.attempts(connectOK, 100) // the backend is perfectly healthy
+
+	h.budget.control()
+	if got := h.budget.currentRate(); got != budgetCeilingRate/budgetDecreaseFactor {
+		t.Fatalf("pressure must cut the rate: %v", got)
+	}
+	h.budget.control()
+	h.budget.control()
+	cut := h.budget.currentRate()
+	if cut >= budgetCeilingRate/budgetDecreaseFactor {
+		t.Fatalf("sustained pressure keeps cutting: %v", cut)
+	}
+	if !h.budget.throttled() {
+		t.Fatal("a pressure-shed budget reads as throttled (so the marker and reaper freeze see it)")
+	}
+
+	// pressure gone and the backend healthy: it recovers
+	pressured = false
+	for i := 0; i < 40 && h.budget.currentRate() < budgetCeilingRate; i++ {
+		h.attempts(connectOK, 30)
+		h.budget.control()
+	}
+	if h.budget.currentRate() != budgetCeilingRate {
+		t.Fatal("must reopen once the pressure is gone")
+	}
+}
+
+func TestBudget_NoPressureProbeMeansNoShedding(t *testing.T) {
+	h := newBudgetHarness()
+	h.attempts(connectOK, 100)
+	h.budget.control()
+	if h.budget.currentRate() != budgetCeilingRate {
+		t.Fatal("the default probe on a healthy test host must not shed")
+	}
+}
+
+func TestMemoryPressureFrom_ThresholdsAndSources(t *testing.T) {
+	const gib = 1 << 30
+	cases := []struct {
+		name                      string
+		heap, limit, avail, total uint64
+		want                      bool
+	}{
+		{"roomy", 2 * gib, 0, 20 * gib, 24 * gib, false},
+		{"host nearly out of memory", 2 * gib, 0, 1 * gib, 24 * gib, true},
+		{"host tight but not critical", 2 * gib, 0, 3 * gib, 24 * gib, false},
+		{"heap near the soft limit", 19 * gib, 20 * gib, 8 * gib, 24 * gib, true},
+		{"heap well under the soft limit", 10 * gib, 20 * gib, 8 * gib, 24 * gib, false},
+		{"unknown host memory", 2 * gib, 0, 0, 0, false},
+	}
+	for _, c := range cases {
+		if got := memoryPressureFrom(c.heap, c.limit, c.avail, c.total); got != c.want {
+			t.Errorf("%s: pressure=%v, want %v", c.name, got, c.want)
+		}
+	}
+}
