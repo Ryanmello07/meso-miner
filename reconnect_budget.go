@@ -2,6 +2,7 @@ package connect
 
 import (
 	"context"
+	"fmt"
 	"math"
 	mathrand "math/rand"
 	"os"
@@ -184,20 +185,27 @@ type reconnectBudget struct {
 	// of memory; replaceable so tests are exact
 	memoryPressure func() bool
 
+	// emit writes one log line; replaceable so tests can read what an operator would
+	emit func(string)
+
 	mu   sync.Mutex
 	rate float64
 	// memRate is the cap memory pressure puts on the dispatch rate; it is kept
 	// apart from rate so that pressure never reads as a backend outage
 	memRate      float64
 	memPressured int
-	carry        float64
-	lastTick     time.Time
-	queue        []*admitWaiter
-	dispatched   int
+	// throttledSince is when the backend rate first fell below the ceiling, zero while open
+	throttledSince time.Time
+	// memHeld is true while memory pressure is holding the dispatch rate down
+	memHeld    bool
+	carry      float64
+	lastTick   time.Time
+	queue      []*admitWaiter
+	dispatched int
 }
 
 func newReconnectBudget(gov *connectGovernor, now func() time.Time) *reconnectBudget {
-	return &reconnectBudget{gov: gov, now: now, rate: budgetCeilingRate, memRate: budgetCeilingRate, lastTick: now(), pick: mathrand.Intn, memoryPressure: readMemoryPressure}
+	return &reconnectBudget{gov: gov, now: now, rate: budgetCeilingRate, memRate: budgetCeilingRate, lastTick: now(), pick: mathrand.Intn, memoryPressure: readMemoryPressure, emit: emitGovernLine}
 }
 
 func (self *reconnectBudget) currentRate() float64 {
@@ -408,6 +416,9 @@ func (self *reconnectBudget) adjust(recent govSnapshot) func() {
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
+	var events []string
+	rateBefore := self.rate
+
 	// Every reconnect attempt costs memory, and a box that is out of it dies and
 	// restarts into the same storm. Held down regardless of the backend's health,
 	// but as a host problem: it never touches rate, lastOutage or the marker.
@@ -419,15 +430,25 @@ func (self *reconnectBudget) adjust(recent govSnapshot) func() {
 	switch {
 	case budgetMemoryConsecutive <= self.memPressured:
 		self.memRate = max(budgetMemoryFloorRate, self.memRate/budgetDecreaseFactor)
+		if !self.memHeld {
+			self.memHeld = true
+			events = append(events, "[govern] memory pressure: holding reconnects to at most "+rateString(self.memRate)+" until memory frees up (this is the host, not the backend)")
+		}
 	case !pressured:
 		self.memRate = min(budgetCeilingRate, self.memRate*budgetIncreaseFactor)
+		if self.memHeld && self.memRate >= budgetCeilingRate {
+			self.memHeld = false
+			events = append(events, "[govern] memory pressure over: reconnects back to full speed")
+		}
 	}
 
 	failedBytesPerSec := float64(recent.FailedBytes) / budgetRecentWindow.Seconds()
+	reason := ""
 	failedAttempts := recent.Attempts - recent.OK
 	mostlyFailing := budgetMinByteBreakerFailures <= failedAttempts && budgetByteBreakerShare*float64(recent.Attempts) <= float64(failedAttempts)
 	switch {
 	case failedBytesPerSec > budgetFailedBytesCeilingPerSec && mostlyFailing:
+		reason = "bytes"
 		// whatever the verdict says, failed attempts are burning the pipe. It needs
 		// most attempts to be failing: a healthy startup in which a minority of
 		// proxies fail after the TLS handshake spends real bytes on them and is not
@@ -435,6 +456,7 @@ func (self *reconnectBudget) adjust(recent govSnapshot) func() {
 		self.rate = max(budgetFloorRate, self.rate/budgetDecreaseFactor)
 	case budgetMinDecreaseAttempts <= recent.PlatformAttempts && recent.Ratio < recent.Threshold &&
 		budgetMinHardFailures <= recent.HardFailures:
+		reason = "verdict"
 		self.rate = max(budgetFloorRate, self.rate/budgetDecreaseFactor)
 	case self.rate < budgetCeilingRate &&
 		(budgetMinIncreaseAttempts <= recent.PlatformAttempts && openRatio(recent) <= recent.Ratio):
@@ -449,9 +471,43 @@ func (self *reconnectBudget) adjust(recent govSnapshot) func() {
 
 	if self.rate < budgetCeilingRate {
 		self.lastOutage.Store(self.now().UnixNano())
+		if self.throttledSince.IsZero() {
+			self.throttledSince = self.now()
+		}
 	}
-	return self.planOutageMarkerLocked()
+	if self.rate < rateBefore && reason != "" {
+		events = append(events, fmt.Sprintf(
+			"[govern] budget cut from %s to %s reason=%s good=%.0f%% threshold=%.0f%% hard_failures=%d platform_attempts=%d failed_KB/s=%.0f",
+			rateString(rateBefore), rateString(self.rate), reason, 100*recent.Ratio, 100*recent.Threshold,
+			recent.HardFailures, recent.PlatformAttempts, failedBytesPerSec/1024))
+	}
+	if rateBefore < budgetCeilingRate && budgetCeilingRate <= self.rate && !self.throttledSince.IsZero() {
+		events = append(events, fmt.Sprintf("[govern] budget reopened to %s after being throttled for %s",
+			rateString(self.rate), self.now().Sub(self.throttledSince).Round(time.Second)))
+		self.throttledSince = time.Time{}
+	}
+	markerOp := self.planOutageMarkerLocked()
+	if len(events) == 0 {
+		return markerOp
+	}
+	emit := self.emit
+	return func() {
+		if emit != nil {
+			for _, line := range events {
+				emit(line)
+			}
+		}
+		if markerOp != nil {
+			markerOp()
+		}
+	}
 }
+
+func rateString(rate float64) string { return fmt.Sprintf("%.1f/s", rate) }
+
+// emitGovernLine writes a [govern] line to the log (the provider's important log
+// picks up every line that starts with it).
+func emitGovernLine(line string) { DefaultLogger().Infof("%s\n", line) }
 
 // writeOutageMarker leaves the marker file. Errors are ignored: the marker is a
 // courtesy to the next run, never a reason to fail.
@@ -508,6 +564,11 @@ func (self *reconnectBudget) restoreOutageMarker(path string, now time.Time) {
 	self.rate = budgetFloorRate
 	self.lastOutage.Store(info.ModTime().UnixNano())
 	self.lastMarkerWrite = now
+	self.throttledSince = now
+	if self.emit != nil {
+		self.emit(fmt.Sprintf("[govern] restart marker found (the last run ended %s into an outage): starting at %s and ramping on evidence",
+			now.Sub(info.ModTime()).Round(time.Second), rateString(budgetFloorRate)))
+	}
 }
 
 // outageRecent reports whether the budget is throttled now or was within d. A

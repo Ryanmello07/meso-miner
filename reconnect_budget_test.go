@@ -1031,3 +1031,98 @@ func TestBudget_AMemoryQueueIsNotAnOutage(t *testing.T) {
 		t.Fatal("a memory-held queue wrote the outage marker")
 	}
 }
+
+// An operator reading the log must be able to see when the budget changed, why,
+// and on what evidence, not only that the verdict flipped.
+type budgetEvents struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (e *budgetEvents) emit(s string) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.lines = append(e.lines, s)
+}
+
+func (e *budgetEvents) joined() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return strings.Join(e.lines, "\n")
+}
+
+func TestBudget_LogsEachCutAndTheReopenWithTheEvidence(t *testing.T) {
+	h := newBudgetHarness()
+	ev := &budgetEvents{}
+	h.budget.emit = ev.emit
+	h.attempts(connectTimeoutPlatform, 60)
+	h.budget.control()
+	got := ev.joined()
+	for _, want := range []string{"[govern] budget cut", "200.0/s to 50.0/s", "reason=verdict", "good=0%", "hard_failures=60"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("cut line is missing %q:\n%s", want, got)
+		}
+	}
+	h.advance(61 * time.Second)
+	for i := 0; i < 20 && h.budget.currentRate() < budgetCeilingRate; i++ {
+		h.attempts(connectOK, 30)
+		h.budget.control()
+		h.advance(budgetControlInterval)
+	}
+	if got := ev.joined(); !strings.Contains(got, "[govern] budget reopened") || !strings.Contains(got, "throttled for") {
+		t.Fatalf("no reopen line:\n%s", got)
+	}
+}
+
+func TestBudget_ByteBreakerCutNamesItsReason(t *testing.T) {
+	h := newBudgetHarness()
+	ev := &budgetEvents{}
+	h.budget.emit = ev.emit
+	h.failedBytes(connectOK, 100, 20_000)
+	h.failedBytes(connectTimeoutNoReply, 400, 20_000)
+	h.budget.control()
+	if got := ev.joined(); !strings.Contains(got, "reason=bytes") || !strings.Contains(got, "failed_KB/s=") {
+		t.Fatalf("byte breaker cut is not explained:\n%s", got)
+	}
+}
+
+func TestBudget_LogsMemoryPressureStartAndEnd(t *testing.T) {
+	h := newBudgetHarness()
+	ev := &budgetEvents{}
+	h.budget.emit = ev.emit
+	pressured := true
+	h.budget.memoryPressure = func() bool { return pressured }
+	for i := 0; i < budgetMemoryConsecutive+1; i++ {
+		h.budget.control()
+	}
+	if got := ev.joined(); !strings.Contains(got, "[govern] memory pressure: holding reconnects") {
+		t.Fatalf("no memory pressure line:\n%s", got)
+	}
+	for i := 0; i < 10; i++ {
+		h.budget.control()
+	}
+	if n := strings.Count(ev.joined(), "memory pressure: holding"); n != 1 {
+		t.Fatalf("the start of pressure is one line, not one per tick: %d\n%s", n, ev.joined())
+	}
+	pressured = false
+	for i := 0; i < 30 && h.budget.effectiveRate() < budgetCeilingRate; i++ {
+		h.budget.control()
+	}
+	if got := ev.joined(); !strings.Contains(got, "[govern] memory pressure over") {
+		t.Fatalf("no end-of-pressure line:\n%s", got)
+	}
+}
+
+func TestBudget_LogsAFoundRestartMarker(t *testing.T) {
+	path := t.TempDir() + "/govern_outage"
+	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := newBudgetHarness()
+	ev := &budgetEvents{}
+	h.budget.emit = ev.emit
+	h.budget.restoreOutageMarker(path, time.Now())
+	if got := ev.joined(); !strings.Contains(got, "[govern] restart marker found") || !strings.Contains(got, "starting at 2.0/s") {
+		t.Fatalf("no marker line:\n%s", got)
+	}
+}

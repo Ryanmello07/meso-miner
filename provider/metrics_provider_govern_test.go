@@ -15,6 +15,7 @@ func TestGovernHealthLine_CarriesTheOperatorFacts(t *testing.T) {
 	for _, want := range []string{
 		"[health][govern]", "mode=enforce", "verdict=degraded", "rate=8.0/s",
 		"waiting=3100", "attempts=138", "connected=45", "died_young=42", "flap_backoffs=77",
+		"speedtests=", "echoed_MB=",
 	} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("missing %q in %q", want, line)
