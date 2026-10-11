@@ -2959,6 +2959,7 @@ func (self *SendSequence) Run() {
 					self.observeCarrierWrite(item, disposition)
 				}
 
+				recordTransferResend(len(resendBytes), item.sendCount+1)
 				item.sendCount += 1
 				maxResendCount := self.sendBufferSettings.MaxResendCount
 				if maxResendCount > 0 && item.sendCount >= maxResendCount {
@@ -3613,6 +3614,7 @@ func (self *SendSequence) sendWithSetContract(
 			}
 		}
 	}
+	recordTransferFirstSend(len(item.transferFrameBytes))
 	if err == nil {
 		self.observeCarrierWrite(item, disposition)
 	}
