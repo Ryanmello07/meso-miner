@@ -3,6 +3,7 @@ package connect
 import (
 	"context"
 	"math"
+	mathrand "math/rand"
 	"os"
 	"strings"
 	"sync"
@@ -113,8 +114,16 @@ func setGovernModeForTest(mode governMode) func() {
 	return func() { governModeValue.Store(prev) }
 }
 
+// scoutRandomEvery makes every Nth released token go to a random waiter and the
+// rest to the waiter with the best record. Best-first brings the proxies that
+// earned before the outage back soonest and probes with the likeliest to work;
+// the random slot means a stale favourite, or a proxy with no history yet, can
+// never hold everyone else out.
+const scoutRandomEvery = 3
+
 type admitWaiter struct {
 	ch       chan struct{}
+	score    uint64
 	canceled atomic.Bool
 }
 
@@ -126,15 +135,19 @@ type reconnectBudget struct {
 	// budget throttled
 	lastOutage atomic.Int64
 
-	mu       sync.Mutex
-	rate     float64
-	carry    float64
-	lastTick time.Time
-	queue    []*admitWaiter
+	// pick chooses the random slot's waiter; replaceable so tests are exact
+	pick func(n int) int
+
+	mu         sync.Mutex
+	rate       float64
+	carry      float64
+	lastTick   time.Time
+	queue      []*admitWaiter
+	dispatched int
 }
 
 func newReconnectBudget(gov *connectGovernor, now func() time.Time) *reconnectBudget {
-	return &reconnectBudget{gov: gov, now: now, rate: budgetCeilingRate, lastTick: now()}
+	return &reconnectBudget{gov: gov, now: now, rate: budgetCeilingRate, lastTick: now(), pick: mathrand.Intn}
 }
 
 func (self *reconnectBudget) currentRate() float64 {
@@ -166,13 +179,14 @@ func (self *reconnectBudget) throttled() bool {
 // admit blocks until a connect may start. It returns false only when ctx ends
 // first. The direct path never waits.
 func (self *reconnectBudget) admit(ctx context.Context, direct bool) bool {
-	return self.admitParked(ctx, direct, nil)
+	return self.admitParked(ctx, direct, nil, nil)
 }
 
-// admitParked is admit that reports to onPark when the caller starts and stops
-// waiting, so the proxy can be shown as parked rather than broken. onPark may
-// be nil.
-func (self *reconnectBudget) admitParked(ctx context.Context, direct bool, onPark func(parked bool)) bool {
+// admitParked is admit that ranks the caller by score (evaluated only if it has
+// to wait, so the healthy path never pays for it) and reports to onPark when it
+// starts and stops waiting, so the proxy can be shown as parked rather than
+// broken. Both may be nil.
+func (self *reconnectBudget) admitParked(ctx context.Context, direct bool, score func() uint64, onPark func(parked bool)) bool {
 	if direct {
 		return true
 	}
@@ -181,7 +195,24 @@ func (self *reconnectBudget) admitParked(ctx context.Context, direct bool, onPar
 		self.mu.Unlock()
 		return true
 	}
-	w := &admitWaiter{ch: make(chan struct{})}
+	self.mu.Unlock()
+
+	// Scored only now that we know we must wait, so the healthy path never pays
+	// for it, and BEFORE joining the queue: the dispatcher reads the score under
+	// the lock, so it must never be written after the waiter is visible. The
+	// scorer takes its own locks, so it cannot run under ours.
+	var waiterScore uint64
+	if score != nil {
+		waiterScore = score()
+	}
+
+	self.mu.Lock()
+	if self.rate >= budgetCeilingRate && len(self.queue) == 0 {
+		// the budget reopened while we were scoring
+		self.mu.Unlock()
+		return true
+	}
+	w := &admitWaiter{ch: make(chan struct{}), score: waiterScore}
 	self.queue = append(self.queue, w)
 	self.mu.Unlock()
 
@@ -238,21 +269,46 @@ func (self *reconnectBudget) tick(now time.Time) {
 	n := int(math.Floor(self.carry + 1e-9))
 	self.carry -= float64(n)
 
+	// canceled waiters earn nothing and are dropped without using a token
+	live := self.queue[:0]
+	for _, w := range self.queue {
+		if !w.canceled.Load() {
+			live = append(live, w)
+		}
+	}
+	clear(self.queue[len(live):])
+	self.queue = live
+
 	released := 0
 	for released < n && 0 < len(self.queue) {
-		w := self.queue[0]
-		self.queue[0] = nil
-		self.queue = self.queue[1:]
-		if w.canceled.Load() {
-			continue
-		}
+		i := self.nextLocked()
+		w := self.queue[i]
+		self.queue = append(self.queue[:i], self.queue[i+1:]...)
 		close(w.ch)
 		released += 1
+		self.dispatched += 1
 	}
 	if len(self.queue) == 0 {
 		// unspent time is not banked: an idle budget must not release a burst
 		self.carry = 0
 	}
+}
+
+// nextLocked picks the queue index to release next: the best score, earliest
+// arrival on ties (so equal scores stay first-in first-out), except that every
+// scoutRandomEvery-th token goes to a random waiter. Caller holds mu and the
+// queue is not empty.
+func (self *reconnectBudget) nextLocked() int {
+	if self.dispatched%scoutRandomEvery == scoutRandomEvery-1 {
+		return min(max(self.pick(len(self.queue)), 0), len(self.queue)-1)
+	}
+	best := 0
+	for i, w := range self.queue {
+		if self.queue[best].score < w.score {
+			best = i
+		}
+	}
+	return best
 }
 
 // control adjusts the rate from what recent attempts did. Cut hard on evidence
@@ -322,7 +378,12 @@ func admitConnect(ctx context.Context, direct bool, proxyIndex int) bool {
 		return true
 	}
 	budgetLoopOnce.Do(func() { go connectBudget.run(context.Background()) })
-	return connectBudget.admitParked(ctx, direct, func(parked bool) { markProxyParked(proxyIndex, parked) })
+	return connectBudget.admitParked(
+		ctx,
+		direct,
+		func() uint64 { return proxyScoutScore(proxyIndex) },
+		func(parked bool) { markProxyParked(proxyIndex, parked) },
+	)
 }
 
 // OutageRecent reports whether a backend outage is under way or ended within d,
