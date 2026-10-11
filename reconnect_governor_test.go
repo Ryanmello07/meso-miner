@@ -732,7 +732,7 @@ func TestGovernor_RestoreIgnoresStaleOrNonsenseBaselines(t *testing.T) {
 // finds a fresh outage marker is a different case: it starts throttled on purpose.)
 func TestGovernor_StartupStampedeIsNotAnOutage(t *testing.T) {
 	g, now := newTestGovernor()
-	g.started = *now // a governor that has only just started
+	g.started = *now                       // a governor that has only just started
 	record(g, connectTimeoutPlatform, 146) // the first minute of a 1,100-proxy start
 	s := g.snapshot()
 	if s.Degraded {
