@@ -42,6 +42,8 @@
 
 - **Three `provider claim` rough edges** (follow-ups to the claim credential change): `--legacy-coldkey` now refuses an expired network token locally instead of sending it and reading an opaque server refusal; `--store-client=<address>` now finds the identity at that address even when the store key carries a proxy user (it refuses, without echoing usernames, when several accounts share the address); and a platform refusal prints `claim: the platform refused: <message>` and exits 1 instead of panicking with a stack trace.
 
+- **A bytes or verdict cut no longer doubles straight back open**: while the budget was throttled, any 5 s interval in which fewer than 3 attempts reached the platform doubled the rate ("probe harder"). In an outage the classifier cannot see (silent timeouts, TLS or SOCKS failures) that is every interval, so a bytes cut reopened within seconds and the connect rate oscillated around the byte ceiling. For 5 minutes after a cut for `reason=bytes` or `reason=verdict` the no-evidence reopen now adds 2/s once every 30 s instead of doubling. Attempts that reach the platform and connect still reopen the budget at the usual pace, and with no recent cut nothing changes.
+
 ### Changed
 
 - **The provider's operator logs are readable sentences** (<https://github.com/full-bars/urnetwork-3.23-fix/pull/788>): the pressure regime, pool target, trim receipt and apply, reload summary, health verdict, auth limiter and GC governor lines say what happened in plain words, with machine counters kept in a trailing `(...)` for grep. The new `[health] Verdict:` line summarizes state in one sentence. Dialer and connect lines are unchanged.

@@ -85,6 +85,18 @@ const (
 	outageMarkerMaxAge = 10 * time.Minute
 	// outageMarkerWriteEvery bounds how often a throttled budget touches the marker.
 	outageMarkerWriteEvery = 30 * time.Second
+
+	// budgetProbeHoldoff is how long after a cut for reason=bytes or
+	// reason=verdict the "probe harder" reopen may not double the rate. Without
+	// it, an outage whose attempts never reach the platform (silent timeouts,
+	// TLS or SOCKS failures) reads as "no evidence" every interval, so a bytes cut
+	// doubled straight back open within seconds and the budget oscillated around
+	// the byte ceiling.
+	budgetProbeHoldoff = 5 * time.Minute
+	// inside the holdoff the no-evidence branch still probes, but only by
+	// budgetProbeStep every budgetProbeRampEvery control intervals (+2/s per 30 s)
+	budgetProbeRampEvery = 6
+	budgetProbeStep      = budgetFloorRate
 )
 
 // A waiter that finds the dispatcher has not ticked for budgetStallGrace is let
@@ -202,6 +214,12 @@ type reconnectBudget struct {
 	lastTick   time.Time
 	queue      []*admitWaiter
 	dispatched int
+
+	// lastCut is when the rate was last cut for reason=bytes or reason=verdict,
+	// and probeIntervals counts no-evidence control intervals since the last
+	// bounded probe step (see budgetProbeHoldoff)
+	lastCut        time.Time
+	probeIntervals int
 }
 
 func newReconnectBudget(gov *connectGovernor, now func() time.Time) *reconnectBudget {
@@ -458,10 +476,12 @@ func (self *reconnectBudget) adjust(recent govSnapshot) func() {
 		// proxies fail after the TLS handshake spends real bytes on them and is not
 		// a flood.
 		self.rate = max(budgetFloorRate, self.rate/budgetDecreaseFactor)
+		self.noteCutLocked()
 	case budgetMinDecreaseAttempts <= recent.PlatformAttempts && recent.Ratio < recent.Threshold &&
 		budgetMinHardFailures <= recent.HardFailures:
 		reason = "verdict"
 		self.rate = max(budgetFloorRate, self.rate/budgetDecreaseFactor)
+		self.noteCutLocked()
 	case self.rate < budgetCeilingRate &&
 		(budgetMinIncreaseAttempts <= recent.PlatformAttempts && openRatio(recent) <= recent.Ratio):
 		self.rate = min(budgetCeilingRate, self.rate*budgetIncreaseFactor)
@@ -470,7 +490,9 @@ func (self *reconnectBudget) adjust(recent govSnapshot) func() {
 		// is trying, or the scouts the budget released landed on dead proxies.
 		// A reduced rate must not be held on no evidence, so probe harder:
 		// an uninformative attempt is cheap, it never reached the platform.
-		self.rate = min(budgetCeilingRate, self.rate*budgetIncreaseFactor)
+		// Right after a bytes or verdict cut, though, "no evidence" is what an
+		// outage the classifier cannot see looks like, so the probe only creeps.
+		self.probeLocked()
 	}
 
 	if self.rate < budgetCeilingRate {
@@ -505,6 +527,28 @@ func (self *reconnectBudget) adjust(recent govSnapshot) func() {
 			markerOp()
 		}
 	}
+}
+
+// noteCutLocked records a cut for reason=bytes or reason=verdict. Caller holds mu.
+func (self *reconnectBudget) noteCutLocked() {
+	self.lastCut = self.now()
+	self.probeIntervals = 0
+}
+
+// probeLocked is the no-evidence reopen: double the rate, unless the budget was
+// cut on evidence within budgetProbeHoldoff, in which case add budgetProbeStep
+// once every budgetProbeRampEvery intervals. Caller holds mu.
+func (self *reconnectBudget) probeLocked() {
+	if !self.lastCut.IsZero() && self.now().Sub(self.lastCut) < budgetProbeHoldoff {
+		self.probeIntervals += 1
+		if budgetProbeRampEvery <= self.probeIntervals {
+			self.probeIntervals = 0
+			self.rate = min(budgetCeilingRate, self.rate+budgetProbeStep)
+		}
+		return
+	}
+	self.probeIntervals = 0
+	self.rate = min(budgetCeilingRate, self.rate*budgetIncreaseFactor)
 }
 
 func rateString(rate float64) string { return fmt.Sprintf("%.1f/s", rate) }
