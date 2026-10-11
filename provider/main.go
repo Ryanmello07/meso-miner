@@ -2079,6 +2079,7 @@ func runHealthHeartbeat(ctx context.Context, startTime time.Time, profile string
 			report.Up, down, len(report.Dead), len(report.Degraded),
 			len(report.Recovered), len(report.NewlyDegraded),
 			report.LifetimeRecovered, report.LifetimeLost)
+		tlog("%s\n", governHealthLine(connect.GovernorStatusNow()))
 		// Feed the persistent all-time store: this loop is the exclusive
 		// consumer of the heartbeat report, so transition deltas are
 		// captured exactly once, here. Lost = up->down EVENTS only:
