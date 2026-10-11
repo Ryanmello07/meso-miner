@@ -61,9 +61,24 @@ const (
 // through: a dead dispatcher must never park proxies forever. Variables so tests
 // can shorten them.
 var (
-	budgetStallCheckInterval = 5 * time.Second
-	budgetStallGrace         = 5 * time.Second
+	budgetStallCheckIntervalNs atomic.Int64
+	budgetStallGraceNs         atomic.Int64
 )
+
+func init() {
+	budgetStallCheckIntervalNs.Store(int64(5 * time.Second))
+	budgetStallGraceNs.Store(int64(5 * time.Second))
+}
+
+// setBudgetStallForTest shortens the stall detector and returns a restore func.
+// Atomic because waiter goroutines read them while a test restores them.
+func setBudgetStallForTest(interval, grace time.Duration) func() {
+	prevI, prevG := budgetStallCheckIntervalNs.Swap(int64(interval)), budgetStallGraceNs.Swap(int64(grace))
+	return func() {
+		budgetStallCheckIntervalNs.Store(prevI)
+		budgetStallGraceNs.Store(prevG)
+	}
+}
 
 type governMode int32
 
@@ -193,7 +208,7 @@ func (self *reconnectBudget) admitParked(ctx context.Context, direct bool, score
 		defer onPark(false)
 	}
 
-	stall := time.NewTicker(budgetStallCheckInterval)
+	stall := time.NewTicker(time.Duration(budgetStallCheckIntervalNs.Load()))
 	defer stall.Stop()
 	for {
 		select {
@@ -217,7 +232,7 @@ func (self *reconnectBudget) admitParked(ctx context.Context, direct bool, score
 func (self *reconnectBudget) stalled() bool {
 	self.mu.Lock()
 	defer self.mu.Unlock()
-	return budgetStallGrace < self.now().Sub(self.lastTick)
+	return time.Duration(budgetStallGraceNs.Load()) < self.now().Sub(self.lastTick)
 }
 
 // tick releases the waiters the elapsed time has earned, oldest first. A

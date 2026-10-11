@@ -5,26 +5,37 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
 type budgetHarness struct {
-	gov    *connectGovernor
-	now    *time.Time
-	budget *reconnectBudget
+	gov     *connectGovernor
+	now     *time.Time
+	budget  *reconnectBudget
+	clockMu sync.Mutex
 }
 
 func newBudgetHarness() *budgetHarness {
 	start := time.Unix(2_000_000, 0)
 	now := start
-	clock := func() time.Time { return now }
+	h := &budgetHarness{}
+	// waiter goroutines read the clock while the test advances it
+	clock := func() time.Time {
+		h.clockMu.Lock()
+		defer h.clockMu.Unlock()
+		return now
+	}
 	gov := newConnectGovernor(clock)
-	return &budgetHarness{gov: gov, now: &now, budget: newReconnectBudget(gov, clock)}
+	h.gov, h.now, h.budget = gov, &now, newReconnectBudget(gov, clock)
+	return h
 }
 
 func (h *budgetHarness) advance(d time.Duration) {
+	h.clockMu.Lock()
+	defer h.clockMu.Unlock()
 	*h.now = h.now.Add(d)
 }
 
@@ -434,9 +445,7 @@ func TestBudget_UninformativeAttemptsLiftTheThrottle(t *testing.T) {
 
 // If the dispatcher dies, waiters must not park forever.
 func TestBudget_FailsOpenWhenTheDispatcherStalls(t *testing.T) {
-	prevInterval, prevGrace := budgetStallCheckInterval, budgetStallGrace
-	budgetStallCheckInterval, budgetStallGrace = 10*time.Millisecond, 50*time.Millisecond
-	defer func() { budgetStallCheckInterval, budgetStallGrace = prevInterval, prevGrace }()
+	defer setBudgetStallForTest(10*time.Millisecond, 50*time.Millisecond)()
 
 	h := newBudgetHarness()
 	h.budget.setRate(budgetFloorRate)
@@ -456,9 +465,7 @@ func TestBudget_FailsOpenWhenTheDispatcherStalls(t *testing.T) {
 }
 
 func TestBudget_HealthyDispatcherDoesNotFailOpen(t *testing.T) {
-	prevInterval, prevGrace := budgetStallCheckInterval, budgetStallGrace
-	budgetStallCheckInterval, budgetStallGrace = 10*time.Millisecond, 50*time.Millisecond
-	defer func() { budgetStallCheckInterval, budgetStallGrace = prevInterval, prevGrace }()
+	defer setBudgetStallForTest(10*time.Millisecond, 50*time.Millisecond)()
 
 	h := newBudgetHarness()
 	h.budget.setRate(budgetFloorRate)
