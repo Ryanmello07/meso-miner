@@ -4,6 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -217,9 +221,12 @@ type connectGovernor struct {
 	// baseline is the share of platform attempts this host usually sees go well,
 	// learned from windows the verdict called healthy; 0 until learned
 	baseline float64
-	mu       sync.Mutex
-	now      func() time.Time
-	ring     [int(govWindow / time.Second)]govBucket
+	// baselinePath, when set, is where the baseline is kept across restarts
+	baselinePath  string
+	savedBaseline float64
+	mu            sync.Mutex
+	now           func() time.Time
+	ring          [int(govWindow / time.Second)]govBucket
 }
 
 func newConnectGovernor(now func() time.Time) *connectGovernor {
@@ -313,22 +320,86 @@ func (self *connectGovernor) learnBaseline() {
 	if s.Degraded || s.PlatformAttempts < govMinAttempts {
 		return
 	}
+	path, baseline, save := func() (string, float64, bool) {
+		self.mu.Lock()
+		defer self.mu.Unlock()
+		switch {
+		case self.baseline == 0:
+			if govDegradedRatio <= s.Ratio {
+				self.baseline = s.Ratio
+			}
+		case self.baseline <= s.Ratio:
+			// A single window may not pull the baseline far: a fleet-wide reconnect
+			// burst (hundreds of clean connects in a minute after a platform-side
+			// drop) says nothing about what this host's proxies usually do, and would
+			// otherwise teach it that 90% good is normal.
+			ratio := min(s.Ratio, govBaselineMaxStep*self.baseline)
+			self.baseline = (1-govBaselineAlphaUp)*self.baseline + govBaselineAlphaUp*ratio
+		case 0.5*self.baseline <= s.Ratio:
+			self.baseline = (1-govBaselineAlphaDown)*self.baseline + govBaselineAlphaDown*s.Ratio
+		}
+		// written when it has moved enough to matter, never on every minute
+		if self.baselinePath == "" || self.baseline == 0 || math.Abs(self.baseline-self.savedBaseline) < govBaselineSaveDelta {
+			return "", 0, false
+		}
+		self.savedBaseline = self.baseline
+		return self.baselinePath, self.baseline, true
+	}()
+	// the file write happens outside the lock
+	if save {
+		writeBaselineFile(path, baseline)
+	}
+}
+
+// govBaselineSaveDelta is how far the baseline must move before it is written
+// again, so a steady host does not touch the disk every minute.
+const govBaselineSaveDelta = 0.02
+
+// govBaselineMaxAge is how old a kept baseline may be and still be believed.
+const govBaselineMaxAge = 7 * 24 * time.Hour
+
+func writeBaselineFile(path string, baseline float64) {
+	_ = os.MkdirAll(filepath.Dir(path), 0o700)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(strconv.FormatFloat(baseline, 'f', 4, 64)+"\n"), 0o600); err == nil {
+		_ = os.Rename(tmp, path)
+	}
+}
+
+// saveBaseline writes the baseline now (used by tests and at shutdown paths).
+func (self *connectGovernor) saveBaseline() {
+	self.mu.Lock()
+	path, baseline := self.baselinePath, self.baseline
+	self.mu.Unlock()
+	if path != "" && 0 < baseline {
+		writeBaselineFile(path, baseline)
+	}
+}
+
+// restoreBaseline reads the baseline a previous run kept, so a restart on a host
+// with a poor proxy list does not start by judging it against the blunt plain
+// threshold. A stale, unreadable or nonsensical file is ignored.
+func (self *connectGovernor) restoreBaseline(path string, now time.Time) {
+	self.mu.Lock()
+	self.baselinePath = path
+	self.mu.Unlock()
+	info, err := os.Stat(path)
+	if err != nil || govBaselineMaxAge <= now.Sub(info.ModTime()) {
+		return
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(string(raw)), 64)
+	if err != nil || v < govMinThreshold || 1 < v {
+		return
+	}
 	self.mu.Lock()
 	defer self.mu.Unlock()
-	switch {
-	case self.baseline == 0:
-		if govDegradedRatio <= s.Ratio {
-			self.baseline = s.Ratio
-		}
-	case self.baseline <= s.Ratio:
-		// A single window may not pull the baseline far: a fleet-wide reconnect
-		// burst (hundreds of clean connects in a minute after a platform-side
-		// drop) says nothing about what this host's proxies usually do, and would
-		// otherwise teach it that 90% good is normal.
-		ratio := min(s.Ratio, govBaselineMaxStep*self.baseline)
-		self.baseline = (1-govBaselineAlphaUp)*self.baseline + govBaselineAlphaUp*ratio
-	case 0.5*self.baseline <= s.Ratio:
-		self.baseline = (1-govBaselineAlphaDown)*self.baseline + govBaselineAlphaDown*s.Ratio
+	if self.baseline == 0 {
+		self.baseline = v
+		self.savedBaseline = v
 	}
 }
 
