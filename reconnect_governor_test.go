@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/gorilla/websocket"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -666,4 +667,58 @@ func TestGovLine_CarriesTheBaselineAndThreshold(t *testing.T) {
 			t.Fatalf("missing %q in %q", want, line)
 		}
 	}
+}
+
+// A restart on a host with a poor proxy list must not forget what is normal for
+// it, or its first minutes are judged by the blunt 20% line and read as an outage.
+func TestGovernor_BaselineSurvivesARestart(t *testing.T) {
+	path := t.TempDir() + "/govern_baseline"
+	g1, now := newTestGovernor()
+	g1.baselinePath = path
+	for i := 0; i < 10; i++ {
+		windowWith(g1, now, 9, 21) // 30% good
+	}
+	g1.saveBaseline() // as the minute tick does
+
+	g2, _ := newTestGovernor()
+	g2.restoreBaseline(path, time.Now())
+	if b := g2.snapshot().Baseline; b < 0.25 || 0.35 < b {
+		t.Fatalf("restored baseline = %.2f, want about 0.30", b)
+	}
+	record(g2, connectOK, 6)
+	record(g2, connectTimeoutPlatform, 38) // 14%: this host's bad minute, right after restart
+	if g2.snapshot().Degraded {
+		t.Fatalf("a restart forgot what is normal for the host: %+v", g2.snapshot())
+	}
+}
+
+func TestGovernor_RestoreIgnoresStaleOrNonsenseBaselines(t *testing.T) {
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"junk":  "banana",
+		"zero":  "0.0",
+		"huge":  "7.5",
+		"tiny":  "0.001",
+		"empty": "",
+	} {
+		p := dir + "/" + name
+		os.WriteFile(p, []byte(content), 0o600)
+		g, _ := newTestGovernor()
+		g.restoreBaseline(p, time.Now())
+		if g.snapshot().Baseline != 0 {
+			t.Errorf("%s: restored a baseline from %q", name, content)
+		}
+	}
+	// stale
+	p := dir + "/stale"
+	os.WriteFile(p, []byte("0.4"), 0o600)
+	old := time.Now().Add(-30 * 24 * time.Hour)
+	os.Chtimes(p, old, old)
+	g, _ := newTestGovernor()
+	g.restoreBaseline(p, time.Now())
+	if g.snapshot().Baseline != 0 {
+		t.Error("restored a month-old baseline")
+	}
+	// missing
+	g.restoreBaseline(dir+"/absent", time.Now())
 }

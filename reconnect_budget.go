@@ -675,6 +675,8 @@ func InitGovernState(markerPath string) {
 		return
 	}
 	connectBudget.restoreOutageMarker(markerPath, time.Now())
+	// the learned baseline lives beside the marker
+	connectGov.restoreBaseline(filepath.Join(filepath.Dir(markerPath), "govern_baseline"), time.Now())
 }
 
 // openRatio is the share of good platform attempts at which a throttled budget
