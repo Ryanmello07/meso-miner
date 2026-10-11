@@ -121,6 +121,7 @@ type proxyHealth struct {
 	currentlyUp     bool
 	everUp          bool
 	connecting      bool      // registered and still trying to establish first WebSocket
+	parked          bool      // waiting its turn under the reconnect attempt budget: not broken
 	connectingSince time.Time // when connecting was last set true (bounds stale connecting)
 	downSince       time.Time // when currentlyUp last went false (for recovery latency)
 	lastSeenUp      bool      // currentlyUp as of the previous heartbeat (baseline)
@@ -153,6 +154,12 @@ const connectingStaleAfter = 65 * time.Minute
 // window (true) or its connecting state has gone stale (false). A stale
 // connecting proxy is treated as degraded rather than "connecting".
 func (h *proxyHealth) connectingActive(now time.Time) bool {
+	// a proxy waiting its turn under the reconnect attempt budget is neither
+	// degraded nor dead, whatever its history: reading it as connecting keeps the
+	// reaper, the dead-proxy cleanup and the URL-cache eviction away from it
+	if h.parked {
+		return true
+	}
 	if !h.connecting {
 		return false
 	}
@@ -293,6 +300,17 @@ func ProxyBandwidthByKey(key string) *ProxyBandwidth {
 		return h.bw
 	}
 	return nil
+}
+
+// markProxyParked records that the proxy is waiting its turn under the reconnect
+// attempt budget (parked) or has been released from it. Unknown indices are
+// ignored.
+func markProxyParked(index int, parked bool) {
+	proxyHealthMu.Lock()
+	defer proxyHealthMu.Unlock()
+	if h, ok := proxyHealthByIndex[index]; ok {
+		h.parked = parked
+	}
 }
 
 // markProxyDown records that the proxy's platform transport went down, stamping

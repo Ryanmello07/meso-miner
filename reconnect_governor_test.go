@@ -231,3 +231,53 @@ func TestGovernorReport_LogsTransitionsAndHeartbeat(t *testing.T) {
 	}
 	_ = fmt.Sprint
 }
+
+// A proxy that accepts the connection and never answers fails the same way a
+// dead proxy always has. It says nothing about the backend, so a poor proxy
+// list on a healthy backend must not read as an outage.
+func TestGovernor_SilentTimeoutsAreAmbiguous(t *testing.T) {
+	g, _ := newTestGovernor()
+	record(g, connectTimeoutNoReply, 900)
+	record(g, connectOK, 100)
+	if g.snapshot().Degraded {
+		t.Fatal("silent timeouts are proxy trouble, not evidence against the platform")
+	}
+	only, _ := newTestGovernor()
+	record(only, connectTimeoutNoReply, 900)
+	if only.snapshot().Degraded {
+		t.Fatal("nothing but silent timeouts is no evidence at all")
+	}
+}
+
+func TestGovernor_TlsAndOtherFailuresAreAmbiguous(t *testing.T) {
+	g, _ := newTestGovernor()
+	record(g, connectTlsFail, 400)
+	record(g, connectOtherFail, 400)
+	record(g, connectOK, 100)
+	if g.snapshot().Degraded {
+		t.Fatal("tls and unclassified failures can be a proxy tampering with the connection")
+	}
+}
+
+// The platform answered and said no: that is the backend talking.
+func TestGovernor_RejectedUpgradesCount(t *testing.T) {
+	g, _ := newTestGovernor()
+	record(g, connectUpgradeFail, 100)
+	if !g.snapshot().Degraded {
+		t.Fatal("a flood of rejected upgrades is the platform failing")
+	}
+}
+
+// A poor proxy list mixed with a backend that is working: the connects that do
+// happen are good, everything else is ambiguous, so the verdict is healthy.
+func TestGovernor_PoorProxyListOnAHealthyBackendIsHealthy(t *testing.T) {
+	g, _ := newTestGovernor()
+	record(g, connectSocksFail, 500)
+	record(g, connectTimeoutNoReply, 300)
+	record(g, connectTlsFail, 50)
+	record(g, connectOK, 150)
+	record(g, connectTimeoutPlatform, 10)
+	if g.snapshot().Degraded {
+		t.Fatalf("a mostly dead proxy list must not look like an outage: %+v", g.snapshot())
+	}
+}
