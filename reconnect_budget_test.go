@@ -31,6 +31,8 @@ func newBudgetHarness() *budgetHarness {
 	}
 	gov := newConnectGovernor(clock)
 	h.gov, h.now, h.budget = gov, &now, newReconnectBudget(gov, clock)
+	// tests judge the budget, not the startup grace: start the governor long ago
+	gov.started = start.Add(-time.Hour)
 	// the real probe reads this machine's memory; tests must not depend on it
 	h.budget.memoryPressure = func() bool { return false }
 	return h
@@ -1124,5 +1126,24 @@ func TestBudget_LogsAFoundRestartMarker(t *testing.T) {
 	h.budget.restoreOutageMarker(path, time.Now())
 	if got := ev.joined(); !strings.Contains(got, "[govern] restart marker found") || !strings.Contains(got, "starting at 2.0/s") {
 		t.Fatalf("no marker line:\n%s", got)
+	}
+}
+
+// The same stampede must not make the budget cut a start.
+func TestBudget_DoesNotCutDuringTheStartupGrace(t *testing.T) {
+	h := newBudgetHarness()
+	h.gov.started = *h.now // only just started
+	h.attempts(connectTimeoutPlatform, 300)
+	h.failedBytes(connectTimeoutNoReply, 900, 20_000) // and the byte breaker would trip too
+	h.budget.control()
+	if h.budget.currentRate() != budgetCeilingRate {
+		t.Fatalf("the budget cut a start: %v", h.budget.currentRate())
+	}
+	h.advance(govStartupGrace + time.Second)
+	h.attempts(connectTimeoutPlatform, 300)
+	h.failedBytes(connectTimeoutNoReply, 900, 20_000)
+	h.budget.control()
+	if h.budget.currentRate() == budgetCeilingRate {
+		t.Fatal("after the grace the same failures must cut the rate")
 	}
 }

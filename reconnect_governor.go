@@ -211,10 +211,12 @@ type govSnapshot struct {
 	// Threshold is the good ratio below which this host's window reads as degraded
 	Threshold float64
 	// Baseline is the share of platform attempts this host usually sees go well, 0 until learned
-	Baseline  float64
-	Ratio     float64
-	Degraded  bool
-	WouldHold int64
+	Baseline float64
+	// StartupGrace is true while the governor is inside its startup grace and its verdict is not trusted
+	StartupGrace bool
+	Ratio        float64
+	Degraded     bool
+	WouldHold    int64
 }
 
 type connectGovernor struct {
@@ -224,14 +226,30 @@ type connectGovernor struct {
 	// baselinePath, when set, is where the baseline is kept across restarts
 	baselinePath  string
 	savedBaseline float64
-	mu            sync.Mutex
-	now           func() time.Time
-	ring          [int(govWindow / time.Second)]govBucket
+	// started is when the governor was created, for the startup grace
+	started time.Time
+	// seedWindows counts, and seedMin keeps the lowest of, the first healthy
+	// windows: one start burst must not seed the baseline
+	seedWindows int
+	seedMin     float64
+	mu          sync.Mutex
+	now         func() time.Time
+	ring        [int(govWindow / time.Second)]govBucket
 }
 
 func newConnectGovernor(now func() time.Time) *connectGovernor {
-	return &connectGovernor{now: now}
+	return &connectGovernor{now: now, started: now()}
 }
+
+// govStartupGrace is how long after the governor starts (a cold start, a hot swap
+// or a restart) its verdict is not trusted. A start is a stampede: thousands of
+// proxies dial at once and for a while most attempts fail on the host's own
+// congestion, which is not the backend failing, and throttling it would slow the
+// start the owner requires to stay fast. A restart that finds a fresh outage
+// marker starts throttled on purpose and is not affected. Starting inside a real
+// outage costs one unprotected minute of attempts, a one-time hundred megabytes,
+// against a sustained leak the protection exists for.
+const govStartupGrace = 90 * time.Second
 
 // bucket returns the current second's bucket, zeroing it when it still holds an
 // older lap of the ring. Caller holds mu.
@@ -302,6 +320,9 @@ const govMinThreshold = 0.08
 // govBaselineAlphaUp and govBaselineAlphaDown are the weights of a healthy window
 // that is better or worse than the baseline. Down is far slower: a backend that
 // degrades over a quarter of an hour must not drag the baseline with it.
+// govBaselineSeedWindows is how many qualifying windows seed the baseline.
+const govBaselineSeedWindows = 3
+
 // govBaselineMaxStep caps a window's ratio at this multiple of the current
 // baseline when it is folded in.
 const govBaselineMaxStep = 1.25
@@ -325,8 +346,18 @@ func (self *connectGovernor) learnBaseline() {
 		defer self.mu.Unlock()
 		switch {
 		case self.baseline == 0:
-			if govDegradedRatio <= s.Ratio {
-				self.baseline = s.Ratio
+			// Seeded from several windows, taking the lowest: one start burst of
+			// clean connects must not leave the baseline far above the host's
+			// normal, which would also raise the bar the budget needs to reopen.
+			if s.StartupGrace || s.Ratio < govDegradedRatio {
+				break
+			}
+			if self.seedWindows == 0 || s.Ratio < self.seedMin {
+				self.seedMin = s.Ratio
+			}
+			self.seedWindows += 1
+			if govBaselineSeedWindows <= self.seedWindows {
+				self.baseline = self.seedMin
 			}
 		case self.baseline <= s.Ratio:
 			// A single window may not pull the baseline far: a fleet-wide reconnect
@@ -459,7 +490,8 @@ func (self *connectGovernor) snapshotWindow(window time.Duration) govSnapshot {
 	}
 	s.Threshold = threshold
 	s.Baseline = self.baseline
-	s.Degraded = govMinAttempts <= s.PlatformAttempts && s.Ratio < threshold && govMinHardFailures <= s.HardFailures
+	s.StartupGrace = self.now().Sub(self.started) < govStartupGrace
+	s.Degraded = !s.StartupGrace && govMinAttempts <= s.PlatformAttempts && s.Ratio < threshold && govMinHardFailures <= s.HardFailures
 	if s.Degraded {
 		s.WouldHold = max(0, s.Attempts-govShadowBudgetPerSecond*int64(govWindow/time.Second))
 	}
@@ -547,7 +579,7 @@ func govLine(state string, s govSnapshot) string {
 		perAttemptDials = float64(s.Dials) / float64(s.Attempts)
 		perAttemptKB = float64(s.Bytes) / float64(s.Attempts) / 1024
 	}
-	return fmt.Sprintf(
+	line := fmt.Sprintf(
 		"[govern] %s window=%ds attempts=%d (%.1f/s) connected=%d died_young=%d good=%.0f%% baseline=%.0f%% threshold=%.0f%% socks=%d tls=%d upgrade=%d timeout_platform=%d timeout_silent=%d other=%d refused=%d dials/attempt=%.1f KB/attempt=%.1f failed_KB=%d would_hold=%d",
 		state, int(govWindow/time.Second), s.Attempts, float64(s.Attempts)/govWindow.Seconds(),
 		s.OK, s.Early, 100*s.Ratio, 100*s.Baseline, 100*s.Threshold,
@@ -555,6 +587,10 @@ func govLine(state string, s govSnapshot) string {
 		s.Classes[connectTimeoutPlatform], s.Classes[connectTimeoutNoReply], s.Classes[connectOtherFail], s.Classes[connectRefused],
 		perAttemptDials, perAttemptKB, s.FailedBytes/1024, s.WouldHold,
 	)
+	if s.StartupGrace {
+		line += " startup_grace=yes"
+	}
+	return line
 }
 
 // connectGov is the process-wide governor. "Is the platform reachable from this

@@ -15,6 +15,8 @@ import (
 func newTestGovernor() (*connectGovernor, *time.Time) {
 	now := time.Unix(1_000_000, 0)
 	g := newConnectGovernor(func() time.Time { return now })
+	// tests judge the verdict, not the startup grace: start the governor long ago
+	g.started = now.Add(-time.Hour)
 	return g, &now
 }
 
@@ -721,4 +723,57 @@ func TestGovernor_RestoreIgnoresStaleOrNonsenseBaselines(t *testing.T) {
 	}
 	// missing
 	g.restoreBaseline(dir+"/absent", time.Now())
+}
+
+// A start (cold, hot swap or restart) is a stampede: thousands of proxies dial at
+// once, and for a while most attempts fail on the host's own congestion. That is
+// not the backend failing, and throttling it slows the start the owner requires
+// to stay fast. For a short grace the verdict is not trusted. (A restart that
+// finds a fresh outage marker is a different case: it starts throttled on purpose.)
+func TestGovernor_StartupStampedeIsNotAnOutage(t *testing.T) {
+	g, now := newTestGovernor()
+	g.started = *now                       // a governor that has only just started
+	record(g, connectTimeoutPlatform, 146) // the first minute of a 1,100-proxy start
+	s := g.snapshot()
+	if s.Degraded {
+		t.Fatalf("the startup stampede read as an outage: %+v", s)
+	}
+	if !s.StartupGrace {
+		t.Fatal("the snapshot should say it is inside the startup grace")
+	}
+	*now = now.Add(govStartupGrace + time.Second)
+	record(g, connectTimeoutPlatform, 146)
+	if !g.snapshot().Degraded {
+		t.Fatal("after the grace the same failures must read as an outage")
+	}
+}
+
+// One burst of clean connects at a start says nothing about what the host's
+// proxies usually do. The baseline is seeded from several windows and takes the
+// lowest, so a start cannot leave it far above the host's normal (which would
+// also raise the bar the budget needs to reopen).
+func TestGovernor_BaselineNeedsSeveralWindowsAndTakesTheLowest(t *testing.T) {
+	g, now := newTestGovernor()
+	windowWith(g, now, 600, 10) // a start burst: 98% good
+	if b := g.snapshot().Baseline; b != 0 {
+		t.Fatalf("one window seeded the baseline: %.2f", b)
+	}
+	windowWith(g, now, 9, 21)  // 30%
+	windowWith(g, now, 10, 20) // 33%
+	b := g.snapshot().Baseline
+	if b < 0.28 || 0.32 < b {
+		t.Fatalf("baseline = %.2f, want the lowest of the first windows (about 0.30), not the burst", b)
+	}
+}
+
+func TestGovLine_SaysWhenItIsInsideTheStartupGrace(t *testing.T) {
+	g, now := newTestGovernor()
+	g.started = *now
+	if line := govLine("ok", g.snapshot()); !strings.Contains(line, "startup_grace=yes") {
+		t.Fatalf("no startup_grace in %q", line)
+	}
+	*now = now.Add(govStartupGrace + time.Second)
+	if line := govLine("ok", g.snapshot()); strings.Contains(line, "startup_grace") {
+		t.Fatalf("startup_grace after the grace: %q", line)
+	}
 }

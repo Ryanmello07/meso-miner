@@ -460,6 +460,7 @@ On by default (`URNETWORK_GOVERN`, see [Configuration](docs/Configuration.md#bac
 | `dials/attempt`, `KB/attempt`, `failed_KB` | What an attempt costs: proxy dials and bytes, and bytes spent on attempts that failed. |
 | `would_hold` | In `shadow` mode, how many connects the budget would have delayed. |
 | `rate`, `waiting` | The attempt budget (200/s is open) and how many proxies are waiting their turn. |
+| `startup_grace=yes` | Printed during the first 90 s of the process, when the verdict is not trusted and the budget does not cut, because a start is a stampede whose failures are the host's own congestion. |
 
 **Budget lines.** `budget cut` says what pulled the rate down: `reason=verdict` (the window was degraded) or `reason=bytes` (failed attempts burned more than 256 KiB/s with most attempts failing). `budget reopened` says how long it was throttled. `memory pressure` lines are about this host running short of memory, not the backend: reconnects are held to a safe rate and the backend verdict is untouched.
 
