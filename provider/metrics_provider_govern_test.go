@@ -28,6 +28,8 @@ func TestProviderMetrics_ExposeTheGovernor(t *testing.T) {
 		"urnet_govern_degraded", "urnet_govern_budget_rate", "urnet_govern_waiting",
 		"urnet_govern_attempts", "urnet_govern_died_young", "urnet_govern_flap_backoffs_total",
 		"urnet_govern_mode",
+		"urnet_transfer_send_frames_total", "urnet_transfer_resend_deferred_total",
+		"urnet_speedtest_total", "urnet_speedtest_echo_bytes_total",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics are missing %s", want)

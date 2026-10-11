@@ -174,6 +174,10 @@ type reconnectBudget struct {
 	// pick chooses the random slot's waiter; replaceable so tests are exact
 	pick func(n int) int
 
+	// memoryPressure reports whether the host or the Go heap is critically short
+	// of memory; replaceable so tests are exact
+	memoryPressure func() bool
+
 	mu         sync.Mutex
 	rate       float64
 	carry      float64
@@ -183,7 +187,7 @@ type reconnectBudget struct {
 }
 
 func newReconnectBudget(gov *connectGovernor, now func() time.Time) *reconnectBudget {
-	return &reconnectBudget{gov: gov, now: now, rate: budgetCeilingRate, lastTick: now(), pick: mathrand.Intn}
+	return &reconnectBudget{gov: gov, now: now, rate: budgetCeilingRate, lastTick: now(), pick: mathrand.Intn, memoryPressure: readMemoryPressure}
 }
 
 func (self *reconnectBudget) currentRate() float64 {
@@ -374,6 +378,8 @@ func (self *reconnectBudget) control() {
 // adjust applies one control decision under the lock and returns the marker file
 // operation to run once it is released, or nil.
 func (self *reconnectBudget) adjust(recent govSnapshot) func() {
+	// read before the lock: it touches the runtime and /proc
+	pressured := self.memoryPressure != nil && self.memoryPressure()
 	self.mu.Lock()
 	defer self.mu.Unlock()
 
@@ -381,6 +387,11 @@ func (self *reconnectBudget) adjust(recent govSnapshot) func() {
 	failedAttempts := recent.Attempts - recent.OK
 	mostlyFailing := budgetMinByteBreakerFailures <= failedAttempts && budgetByteBreakerShare*float64(recent.Attempts) <= float64(failedAttempts)
 	switch {
+	case pressured:
+		// Every reconnect attempt costs memory, and a box that is out of it dies and
+		// restarts into the same storm. Shed regardless of the backend's health, and
+		// do not open back up until the pressure is gone.
+		self.rate = max(budgetFloorRate, self.rate/budgetDecreaseFactor)
 	case failedBytesPerSec > budgetFailedBytesCeilingPerSec && mostlyFailing:
 		// whatever the verdict says, failed attempts are burning the pipe. It needs
 		// most attempts to be failing: a healthy startup in which a minority of
