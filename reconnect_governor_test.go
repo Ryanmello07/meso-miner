@@ -528,3 +528,24 @@ func TestClassify_AnEarlierPlatformFailureSurvivesALaterSocksTimeout(t *testing.
 		t.Fatalf("only proxy-level failures classified %v, want socks", got)
 	}
 }
+
+// One burst window (the whole fleet reconnecting at once after a platform-side
+// drop, 600 clean connects in a minute) says nothing about what this host's
+// proxies usually do. It must not teach the baseline that 90% good is normal, or
+// the next ordinary window of a poor list reads as degraded. Seen on a live host:
+// 683 attempts at 23:19, then a plain 14%-good window flagged DEGRADED at 23:25.
+func TestGovernor_AFleetWideReconnectBurstDoesNotRaiseTheBaseline(t *testing.T) {
+	g, now := newTestGovernor()
+	for i := 0; i < 10; i++ {
+		windowWith(g, now, 9, 21) // 30% good, the host's usual
+	}
+	windowWith(g, now, 600, 10) // everything reconnects cleanly at once
+	for i := 0; i < 2; i++ {
+		windowWith(g, now, 9, 21)
+	}
+	record(g, connectOK, 6)
+	record(g, connectTimeoutPlatform, 38) // 14% good: this host's bad minute
+	if g.snapshot().Degraded {
+		t.Fatalf("an ordinary bad minute read as degraded after a reconnect burst: %+v", g.snapshot())
+	}
+}
