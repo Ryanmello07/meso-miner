@@ -76,6 +76,8 @@ func TestRetryBudget_RefusalsAreNotCharged(t *testing.T) {
 // to 16 times, so a node sent many times what it delivered. With the budget the
 // resends are bounded by what was first sent plus a small floor.
 func TestSendSequence_ResendsToANonAckingPeerAreBudgeted(t *testing.T) {
+	// these tests exercise refusal, which only enforce does (shadow is the default on this line)
+	defer setGovernModeForTest(governEnforce)()
 	clientSettings := DefaultClientSettings()
 	clientSettings.EncryptionSettings.Mode = EncryptionModeOff
 	clientSettings.SendBufferSettings.MinResendInterval = 2 * time.Millisecond
@@ -174,6 +176,8 @@ func TestSendSequence_ResendBudgetIsOnlyEnforcedInEnforceMode(t *testing.T) {
 // every deferral halved the flight window and forgot the flight for a send that
 // never happened.
 func TestSendSequence_DeferredResendHasNoFlightSideEffects(t *testing.T) {
+	// these tests exercise refusal, which only enforce does (shadow is the default on this line)
+	defer setGovernModeForTest(governEnforce)()
 	clientSettings := DefaultClientSettings()
 	clientSettings.EncryptionSettings.Mode = EncryptionModeOff
 	clientSettings.SendBufferSettings.MinResendInterval = 2 * time.Millisecond
@@ -236,6 +240,8 @@ func TestSendSequence_DeferredResendHasNoFlightSideEffects(t *testing.T) {
 // says: the first resend is free, and the frame at the head of the sequence, the
 // one every later frame waits behind, gets a head start of further free resends.
 func TestSendSequence_FirstResendIsFreeAndTheHeadGetsAHeadStart(t *testing.T) {
+	// these tests exercise refusal, which only enforce does (shadow is the default on this line)
+	defer setGovernModeForTest(governEnforce)()
 	clientSettings := DefaultClientSettings()
 	clientSettings.EncryptionSettings.Mode = EncryptionModeOff
 	clientSettings.SendBufferSettings.MinResendInterval = 2 * time.Millisecond
