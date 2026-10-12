@@ -1111,6 +1111,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 								// note that for websocket a dealine timeout cannot be recovered
 								return
 							}
+							transportPingFrames.tx.Add(1)
 						case message, ok := <-controlSend:
 							if !ok {
 								return
@@ -1156,6 +1157,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 								// note that for websocket a dealine timeout cannot be recovered
 								return
 							}
+							transportPingFrames.tx.Add(1)
 						case message, ok := <-controlSend:
 							if !ok {
 								return
@@ -2236,6 +2238,7 @@ func (self *PlatformTransport) runH3(ptMode TransportMode, initialTimeout time.D
 
 					if 0 == len(message) {
 						// ping
+						transportPingFrames.rx.Add(1)
 						self.log.V(2).Infof("[tr]ping %s<-\n", clientId)
 						MessagePoolReturn(message)
 						continue

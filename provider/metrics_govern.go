@@ -81,6 +81,22 @@ func writeGovernMetrics(b *strings.Builder) {
 		}
 		fmt.Fprintf(b, "urnet_dead_client_return_after_release_seconds_bucket{mode=\"%s\",le=\"+Inf\"} %d\nurnet_dead_client_return_after_release_seconds_count{mode=\"%s\"} %d\n", mode, rc[len(rc)-1], mode, rc[len(rc)-1])
 	}
+	sb := connect.SocketBytesNow()
+	fmt.Fprintf(b, "# HELP urnet_socket_bytes_total Bytes on the proxy sockets by what the connection was doing: handshake (a connect attempt that had not finished, failed ones included), session (the same connection after it connected) and other (connections made outside a connect attempt).\n# TYPE urnet_socket_bytes_total counter\n")
+	for _, phase := range connect.SocketPhaseNames() {
+		fmt.Fprintf(b, "urnet_socket_bytes_total{phase=\"%s\",dir=\"rx\"} %d\nurnet_socket_bytes_total{phase=\"%s\",dir=\"tx\"} %d\n", phase, sb.Rx[phase], phase, sb.Tx[phase])
+	}
+	fmt.Fprintf(b, "# HELP urnet_connect_attempt_bytes_total Bytes spent by finished platform connect attempts, by outcome.\n# TYPE urnet_connect_attempt_bytes_total counter\n")
+	outcomes := connect.ConnectAttemptOutcomesNow()
+	for _, outcome := range outcomes {
+		fmt.Fprintf(b, "urnet_connect_attempt_bytes_total{outcome=\"%s\",dir=\"rx\"} %d\nurnet_connect_attempt_bytes_total{outcome=\"%s\",dir=\"tx\"} %d\n", outcome.Outcome, outcome.RxBytes, outcome.Outcome, outcome.TxBytes)
+	}
+	fmt.Fprintf(b, "# HELP urnet_connect_attempts_total Finished platform connect attempts, by outcome.\n# TYPE urnet_connect_attempts_total counter\n")
+	for _, outcome := range outcomes {
+		fmt.Fprintf(b, "urnet_connect_attempts_total{outcome=\"%s\"} %d\n", outcome.Outcome, outcome.Attempts)
+	}
+	pingTx, pingRx := connect.TransportPingFramesNow()
+	fmt.Fprintf(b, "# HELP urnet_transport_ping_frames_total Keepalive frames on the platform transports.\n# TYPE urnet_transport_ping_frames_total counter\nurnet_transport_ping_frames_total{dir=\"tx\"} %d\nurnet_transport_ping_frames_total{dir=\"rx\"} %d\n", pingTx, pingRx)
 	fmt.Fprintf(b, "# HELP urnet_transfer_resend_depth_total Resends by how many times the item had already been sent.\n# TYPE urnet_transfer_resend_depth_total counter\n")
 	for i, label := range []string{"2", "3-4", "5-8", "9+"} {
 		fmt.Fprintf(b, "urnet_transfer_resend_depth_total{send=\"%s\"} %d\n", label, xs.ResendDepth[i])
