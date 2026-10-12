@@ -440,6 +440,9 @@ On by default (`URNETWORK_GOVERN`, see [Configuration](docs/Configuration.md#bac
 [govern] memory pressure: holding reconnects to at most 50.0/s until memory frees up (this is the host, not the backend)
 [govern] memory pressure over: reconnects back to full speed
 [govern] restart marker found (the last run ended 2m0s into an outage): starting at 2.0/s and ramping on evidence
+[govern] crash loop: 3 starts in the last 10m0s, skipping the startup grace and starting at 2.0/s, ramping on evidence
+[govern] attempt cap on: more than 80% of attempts failed in each of the last 2 minutes (last minute attempts=3912 failed=97%, any class), holding connects to 6.7/s for 4000 proxies until 20% succeed
+[govern] attempt cap off: attempts are succeeding again (recent attempts=66 connected=19)
 [t]flap 01a02cf8-... session lived 3.2s, holding reconnect 8.1s (14 suppressed)
 [proxy][outage] url reaper (212 probe results ignored) held off: the backend is degraded, so proxy failures are not evidence; no proxy will be removed or blacklisted until it heals
 ❤️ [health][govern] mode=enforce verdict=ok rate=200.0/s waiting=0 attempts=40 connected=17 died_young=8 would_hold=0 flap_backoffs=168 speedtests=2368 echoed_MB=1190
@@ -460,9 +463,14 @@ On by default (`URNETWORK_GOVERN`, see [Configuration](docs/Configuration.md#bac
 | `dials/attempt`, `KB/attempt`, `failed_KB` | What an attempt costs: proxy dials and bytes, and bytes spent on attempts that failed. |
 | `would_hold` | In `shadow` mode, how many connects the budget would have delayed. |
 | `rate`, `waiting` | The attempt budget (200/s is open) and how many proxies are waiting their turn. |
+| `cap` | Printed only while the per-host attempt cap is on: the attempts per second connects are held to (see below). |
 | `startup_grace=yes` | Printed during the first 90 s of the process, when the verdict is not trusted and the budget does not cut, because a start is a stampede whose failures are the host's own congestion. |
 
-**Budget lines.** `budget cut` says what pulled the rate down: `reason=verdict` (the window was degraded) or `reason=bytes` (failed attempts burned more than 256 KiB/s with most attempts failing). `budget reopened` says how long it was throttled. `memory pressure` lines are about this host running short of memory, not the backend: reconnects are held to a safe rate and the backend verdict is untouched.
+**Budget lines.** `budget cut` says what pulled the rate down: `reason=verdict` (the window was degraded) or `reason=bytes` (failed attempts burned more than 256 KiB/s with most attempts failing). `budget reopened` says how long it was throttled. `memory pressure` lines are about this host running short of memory, not the backend: reconnects are held to a safe rate and the backend verdict is untouched. For 5 minutes after a `budget cut`, a throttled budget that sees no attempts reach the platform creeps up by 2/s every 30 s instead of doubling, so an outage made of silent timeouts or TLS failures cannot reopen it in seconds.
+
+**`attempt cap`** lines are the backstop for failures the verdict gives no weight (`socks`, `timeout_silent`, `tls`, `other`, `refused`): on a node with 60 or more proxies, when more than 80% of attempts fail in each of 2 consecutive minutes, connects are held to one per second per 600 proxies (never under 2/s) until 20% of a 10 s window connects or a minute is no longer a failure storm. It is a host hold like memory pressure: it does not mark an outage, so the reapers keep running. A node whose proxy list is mostly dead can trip it on a healthy backend.
+
+**`crash loop`** means this is the third start within 10 minutes (from `~/.urnetwork/govern_starts`; hot-swap successors are not counted), so the start skips the 90 s grace and begins at the floor, like a found restart marker.
 
 **`[t]flap`** means a session ended within 60 s, so the proxy waits (5 s doubling to 60 s) before it reconnects. `(N suppressed)` counts lines skipped by the rate limit.
 
