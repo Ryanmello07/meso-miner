@@ -2804,7 +2804,7 @@ func (self *SendSequence) Run() {
 				}
 			}
 			if item.retainAfterAckTimeout {
-				self.retainedByteCount -= item.MessageByteCount()
+				self.releaseRetained(item)
 			}
 			// Settle the contract without crediting ackedByteCount — these
 			// bytes were never delivered (H1).
@@ -3703,7 +3703,10 @@ func (self *SendSequence) sendWithSetContract(
 		// the Add so the invariant "charge ⇔ in queue" cannot desync.
 		if item.retainAfterAckTimeout {
 			retainCapByteCount := ByteCount(float64(self.sendBufferSettings.ResendQueueMaxByteCount) * 0.25)
-			if self.retainedByteCount+messageByteCount > retainCapByteCount {
+			// charged at what the queue holds (the wire frame), the same unit the
+			// cap is a fraction of
+			retainCharge := item.MessageByteCount()
+			if self.retainedByteCount+retainCharge > retainCapByteCount {
 				item.retainAfterAckTimeout = false
 				item.backstopDeadline = time.Time{}
 				// M3/L5: retention was denied by the R-5 cap. The item now
@@ -3723,7 +3726,8 @@ func (self *SendSequence) sendWithSetContract(
 						retainCapByteCount, item.sendCount))
 				}
 			} else {
-				self.retainedByteCount += messageByteCount
+				item.retainedCharge = retainCharge
+				self.retainedByteCount += retainCharge
 			}
 		}
 		self.sendItems = append(self.sendItems, item)
@@ -3929,7 +3933,7 @@ func (self *SendSequence) receiveAck(messageId Id, selective bool, tag *protocol
 		// A retained item acknowledged here leaves the queue permanently —
 		// release its share of the R-5 retained-byte budget.
 		if removed.retainAfterAckTimeout {
-			self.retainedByteCount -= removed.MessageByteCount()
+			self.releaseRetained(removed)
 			if v := self.log.V(1); v.Enabled() {
 				v.Infof("[s]%s->%s...%s s(%s) retain acked — retention saved %x (%dB held %s past ack timeout, sendCount=%d)\n",
 					self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId,
@@ -4015,7 +4019,7 @@ func (self *SendSequence) dropItem(item *sendItem, err error) {
 
 	// release retained byte budget
 	if item.retainAfterAckTimeout {
-		self.retainedByteCount -= item.MessageByteCount()
+		self.releaseRetained(item)
 	}
 
 	// settle contract bytes and fire the error callback + pool-return.
@@ -4415,6 +4419,13 @@ type sendItem struct {
 	// resend queue; dropping them at the ack deadline would lose the bytes
 	// permanently.
 	retainAfterAckTimeout bool
+	// retainedCharge is exactly what was added to the sequence's retained-byte
+	// budget when this item was admitted as retained, so exactly that is released
+	// later. The wire frame can change size (a head rewrite) and is larger than the
+	// payload, so releasing a recomputed size drifts the budget negative and
+	// loosens the cap.
+	retainedCharge   ByteCount
+	retainedReleased bool
 	// backstopDeadline is the absolute time after which a retained item is
 	// force-dropped even without a flow-teardown signal. Set to sendTime +
 	// 10*AckTimeout at creation. Prevents indefinite queue occupancy on dead
@@ -6897,3 +6908,19 @@ func MessageByteCount(frames []*protocol.Frame) ByteCount {
 // 	}
 // 	return messages
 // }
+
+// releaseRetained gives back exactly what admission charged for this item, once.
+// An item that was never charged through admission (built directly) releases its
+// current queue size, the historical behaviour.
+func (self *SendSequence) releaseRetained(item *sendItem) {
+	if item.retainedReleased {
+		return
+	}
+	item.retainedReleased = true
+	charge := item.retainedCharge
+	if charge == 0 {
+		charge = item.MessageByteCount()
+	}
+	item.retainedCharge = 0
+	self.retainedByteCount -= charge
+}
