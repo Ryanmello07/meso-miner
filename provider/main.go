@@ -2904,6 +2904,11 @@ func provide(opts docopt.Opts) {
 	if home, err := os.UserHomeDir(); err == nil {
 		// a restart in the middle of a backend outage starts throttled
 		connect.InitGovernState(filepath.Join(home, ".urnetwork", "govern_outage"))
+		// and so does the third start in ten minutes (a crash loop shorter than
+		// the startup grace); a hot-swap successor is a planned handoff, not a start
+		if os.Getenv(EnvHotSwap) != "1" && os.Getenv(EnvHotSwapExec) != "1" {
+			connect.NoteGovernStart(filepath.Join(home, ".urnetwork", "govern_outage"))
+		}
 	}
 
 	port, _ := opts.Int("--port")
