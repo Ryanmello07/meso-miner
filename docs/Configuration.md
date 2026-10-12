@@ -34,6 +34,7 @@ Quick jump:
 | `BUILD` | `stable` | Set to `jwt` for auth code login, or `stable` for email/password auth. |
 | `USER_AUTH` | - | Your email. Required if `BUILD=stable`. Also used for **self-healing** in `BUILD=jwt` mode to refresh expired tokens. |
 | `PASSWORD` | - | Your password. Required if `BUILD=stable`. Also used for **self-healing** in `BUILD=jwt` mode to refresh expired tokens. |
+| `URNETWORK_RETAINED_ACK_TIMEOUT` | `240` | Seconds a provider send sequence holding retained returns (TCP and prepared datagram) may go with nothing acknowledged before it gives up and fails those returns. Any acknowledgement restarts the clock. `0` turns the bound off, leaving retained items to their 10x ack-timeout backstop. The shipped value is a first guess and has not been validated against fleet ack-silence data. An empty, negative or unparseable value keeps `240`. |
 | `URNETWORK_AUTH_CODE` | - | First-run auth code for `BUILD=jwt`. Use this instead of passing the code as a trailing command argument. Ignored once a JWT exists in the volume. |
 | `UR_API_URL` | `https://api.bringyour.com` | Custom API URL, for operators running their own backend. Must be set together with `UR_CONNECT_URL`. Applied once at startup via `provider choose_network` and persisted to `~/.urnetwork/network.json`, so it survives restarts if that directory is on a volume, same as the JWT. |
 | `UR_CONNECT_URL` | `wss://connect.bringyour.com` | Custom connect (WebSocket signaling) URL, for operators running their own backend. Must be set together with `UR_API_URL`. See `UR_API_URL`. |
