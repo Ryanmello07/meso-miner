@@ -2963,7 +2963,10 @@ func (self *SendSequence) Run() {
 
 				// resend
 				var transferFrameBytes []byte
-				if self.sendItems[0].sequenceNumber == item.sequenceNumber && !item.head {
+				// The rewrite that makes an item the head re-establishes the receiver;
+				// it happens once per promotion and must never wait on the budget.
+				promotingHead := self.sendItems[0].sequenceNumber == item.sequenceNumber && !item.head
+				if promotingHead {
 					// set `head=true`
 					var err error
 					transferFrameBytes, err = self.setHead(item)
@@ -3008,21 +3011,26 @@ func (self *SendSequence) Run() {
 				// waits behind: a frame lost once must always be recoverable, however
 				// busy the rest of the host is. Only the deep resends, which are where
 				// the amplification lives, are charged.
-				if !resendIsFree(item.sendCount, self.sendItems[0].sequenceNumber == item.sequenceNumber) &&
-					!retryAllowed(len(transferFrameBytes)) {
-					recordTransferResendDeferred(len(transferFrameBytes))
-					deferredTimeout := resendBackoff(
-						self.rttWindow.ScaledRtt(),
-						item.sendCount+1,
-						self.sendBufferSettings.MaxResendInterval,
-					)
-					if !item.retainAfterAckTimeout && itemAckTimeout <= deferredTimeout {
-						item.resendTime = sendTime.Add(itemAckTimeout)
-					} else {
-						item.resendTime = sendTime.Add(deferredTimeout)
+				resendDebit := 0
+				if !promotingHead &&
+					!resendIsFree(item.sendCount, self.sendItems[0].sequenceNumber == item.sequenceNumber) {
+					allowed, debited := retryAllowed(len(transferFrameBytes))
+					if !allowed {
+						recordTransferResendDeferred(len(transferFrameBytes))
+						deferredTimeout := resendBackoff(
+							self.rttWindow.ScaledRtt(),
+							item.sendCount+1,
+							self.sendBufferSettings.MaxResendInterval,
+						)
+						if !item.retainAfterAckTimeout && itemAckTimeout <= deferredTimeout {
+							item.resendTime = sendTime.Add(itemAckTimeout)
+						} else {
+							item.resendTime = sendTime.Add(deferredTimeout)
+						}
+						self.resendQueue.Add(item)
+						continue
 					}
-					self.resendQueue.Add(item)
-					continue
+					resendDebit = debited
 				}
 
 				reliableOnlyResend := false
@@ -3041,10 +3049,10 @@ func (self *SendSequence) Run() {
 				resendBytes := transferFrameBytes
 				resendForceUnwrapped := item.forceUnwrapped
 				var disposition transferWriteDisposition
+				var resendWriteErr error
 				c := func() error {
-					var writeErr error
-					disposition, writeErr = self.writeMaybeWrappedBytes(resendBytes, resendPath, resendForceUnwrapped, reliableOnlyResend)
-					return writeErr
+					disposition, resendWriteErr = self.writeMaybeWrappedBytes(resendBytes, resendPath, resendForceUnwrapped, reliableOnlyResend)
+					return resendWriteErr
 				}
 				if self.log.V(2).Enabled() {
 					TraceWithReturn(
@@ -3063,6 +3071,10 @@ func (self *SendSequence) Run() {
 					if err != nil {
 						self.log.V(1).Infof("[s]resend drop = %s", err)
 					}
+				}
+				if resendWriteErr != nil {
+					// the frame did not go out: give back what it was charged
+					refundRetry(resendDebit)
 				}
 				if disposition.transportType != "" || disposition.unreliable || disposition.reliable {
 					self.observeCarrierWrite(item, disposition)
@@ -3729,8 +3741,6 @@ func (self *SendSequence) sendWithSetContract(
 	}
 	recordTransferFirstSend(len(item.transferFrameBytes))
 	if err == nil {
-		// only a frame that actually went out earns the right to resend later
-		transferResendBudget.earn(len(item.transferFrameBytes))
 		self.observeCarrierWrite(item, disposition)
 	}
 
@@ -3780,7 +3790,7 @@ func (self *SendSequence) sendWithSetContract(
 	} else {
 		// immediately ack
 		if err == nil {
-			self.ackItem(item)
+			self.ackItemCounted(item, false)
 		} else {
 			safeAck(item.ackCallback, err)
 			item.messagePoolReturn()
@@ -4009,6 +4019,17 @@ func (self *SendSequence) receiveAck(messageId Id, selective bool, tag *protocol
 }
 
 func (self *SendSequence) ackItem(item *sendItem) {
+	self.ackItemCounted(item, true)
+}
+
+// ackItemCounted settles an acknowledged item. countAck is false for a send that
+// asked for no acknowledgement and is settled locally: that is not the far end
+// confirming anything, so it earns no resend budget.
+func (self *SendSequence) ackItemCounted(item *sendItem, countAck bool) {
+	// the far end confirmed these bytes arrived; that is what earns resend budget
+	if countAck {
+		recordTransferAckedBytes(len(item.transferFrameBytes))
+	}
 	self.releaseUnreliableFlight(item)
 	if item.contractId != nil {
 		if itemSendContract, ok := self.openSendContracts[*item.contractId]; ok {
