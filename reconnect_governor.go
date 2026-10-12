@@ -563,7 +563,7 @@ func (self *govReporter) budgetFields() string {
 			out += fmt.Sprintf(" cap=%.1f/s", c)
 		}
 	}
-	return out
+	return out + governFeedFields()
 }
 
 func govModeName(mode governMode) string {

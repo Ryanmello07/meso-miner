@@ -3011,6 +3011,9 @@ func provide(opts docopt.Opts) {
 	}
 	defer cancel()
 
+	// observation-only reading of the external backend-health feed (off by default)
+	startVerdictFeed(ctx)
+
 	// Listen for SIGUSR2 to initiate in-process HotSwap handoff (Unix).
 	// Only arm listener if running as live provider, not while acting as candidate.
 	if !isHotSwapCandidate {
