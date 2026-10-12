@@ -1374,6 +1374,10 @@ func (self *h3ConnStream) close() {
 // transport beside H1, which is never a health signal; it is still held back so it
 // cannot redial in a tight loop.
 func sessionEndWait(ctx context.Context, flaps *flapGuard, lived time.Duration, clientLimitClosed bool, clientId string, log Logger, countsAsHealth bool) time.Duration {
+	if countsAsHealth {
+		// only the main transport: an auxiliary H3 beside H1 would double count
+		recordSessionEnd(ctx, lived, clientLimitClosed)
+	}
 	if countsAsHealth && flaps.isYoung(lived) && ctx.Err() == nil && !clientLimitClosed {
 		if flaps.everStable {
 			connectGov.recordProvenEarlyDeath()

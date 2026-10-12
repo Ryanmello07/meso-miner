@@ -97,6 +97,15 @@ func writeGovernMetrics(b *strings.Builder) {
 	}
 	pingTx, pingRx := connect.TransportPingFramesNow()
 	fmt.Fprintf(b, "# HELP urnet_transport_ping_frames_total Keepalive frames on the platform transports.\n# TYPE urnet_transport_ping_frames_total counter\nurnet_transport_ping_frames_total{dir=\"tx\"} %d\nurnet_transport_ping_frames_total{dir=\"rx\"} %d\n", pingTx, pingRx)
+	se := connect.SessionEndStatsNow()
+	fmt.Fprintf(b, "# HELP urnet_transport_session_lifetime_seconds Platform transport sessions that ended, by how long they lived and why. Every session is a new connection and costs about 1.75 MB of platform speed tests.\n# TYPE urnet_transport_session_lifetime_seconds histogram\n")
+	for _, reason := range connect.SessionEndReasons() {
+		cumulative := se.Cumulative[reason]
+		for i, bound := range se.BoundsSeconds {
+			fmt.Fprintf(b, "urnet_transport_session_lifetime_seconds_bucket{reason=\"%s\",le=\"%g\"} %d\n", reason, bound, cumulative[i])
+		}
+		fmt.Fprintf(b, "urnet_transport_session_lifetime_seconds_bucket{reason=\"%s\",le=\"+Inf\"} %d\nurnet_transport_session_lifetime_seconds_count{reason=\"%s\"} %d\n", reason, cumulative[len(cumulative)-1], reason, cumulative[len(cumulative)-1])
+	}
 	fmt.Fprintf(b, "# HELP urnet_transfer_resend_depth_total Resends by how many times the item had already been sent.\n# TYPE urnet_transfer_resend_depth_total counter\n")
 	for i, label := range []string{"2", "3-4", "5-8", "9+"} {
 		fmt.Fprintf(b, "urnet_transfer_resend_depth_total{send=\"%s\"} %d\n", label, xs.ResendDepth[i])

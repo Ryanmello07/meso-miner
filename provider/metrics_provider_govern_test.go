@@ -45,6 +45,7 @@ func TestProviderMetrics_ExposeTheGovernor(t *testing.T) {
 		// where the proxy socket bytes go
 		"urnet_socket_bytes_total", "urnet_connect_attempt_bytes_total",
 		"urnet_connect_attempts_total", "urnet_transport_ping_frames_total",
+		"urnet_transport_session_lifetime_seconds",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics are missing %s", want)
