@@ -1779,6 +1779,9 @@ type SendBuffer struct {
 	sendSequences              map[sendSequenceId]*SendSequence
 	sendSequencesByDestination map[TransferPath]map[*SendSequence]bool
 	sendSequenceDestinations   map[*SendSequence]map[TransferPath]bool
+
+	// destination -> *destinationYield, see transfer_dest_yield.go
+	yields sync.Map
 }
 
 func NewSendBuffer(ctx context.Context,
@@ -2990,6 +2993,7 @@ func (self *SendSequence) Run() {
 					}
 				}
 				if disposition.transportType != "" || disposition.unreliable || disposition.reliable {
+					self.noteYieldSend(len(resendBytes))
 					self.observeCarrierWrite(item, disposition)
 				}
 
@@ -3638,6 +3642,8 @@ func (self *SendSequence) sendWithSetContract(
 	}
 	recordTransferFirstSend(len(item.transferFrameBytes))
 	if err == nil {
+		// a write that never reached a carrier says nothing about the destination
+		self.noteYieldSend(len(item.transferFrameBytes))
 		self.observeCarrierWrite(item, disposition)
 	}
 
@@ -3687,7 +3693,7 @@ func (self *SendSequence) sendWithSetContract(
 	} else {
 		// immediately ack
 		if err == nil {
-			self.ackItem(item)
+			self.ackItemCounted(item, false)
 		} else {
 			safeAck(item.ackCallback, err)
 			item.messagePoolReturn()
@@ -3821,6 +3827,8 @@ func (self *SendSequence) receiveAck(messageId Id, selective bool, tag *protocol
 		if !item.selectiveAcked {
 			self.releaseUnreliableFlight(item)
 		}
+		// a selective ack proves the destination is receiving
+		self.noteYieldLive()
 		item.resendTime = time.Now().Add(self.sendBufferSettings.SelectiveAckTimeout)
 		item.sendTime = time.Now()
 		item.selectiveAcked = true
@@ -3915,8 +3923,18 @@ func (self *SendSequence) receiveAck(messageId Id, selective bool, tag *protocol
 }
 
 func (self *SendSequence) ackItem(item *sendItem) {
+	self.ackItemCounted(item, true)
+}
+
+// ackItemCounted settles an acknowledged item. countYield is false for a send
+// that asked for no acknowledgement and is settled locally: that is not the far
+// end confirming anything.
+func (self *SendSequence) ackItemCounted(item *sendItem, countYield bool) {
 	// the far end confirmed these bytes arrived; that is what earns resend budget
-	recordTransferAckedBytes(len(item.transferFrameBytes))
+	if countYield {
+		recordTransferAckedBytes(len(item.transferFrameBytes))
+		self.noteYieldAck(len(item.transferFrameBytes))
+	}
 	self.releaseUnreliableFlight(item)
 	if item.contractId != nil {
 		if itemSendContract, ok := self.openSendContracts[*item.contractId]; ok {
@@ -6853,3 +6871,27 @@ func MessageByteCount(frames []*protocol.Frame) ByteCount {
 // 	}
 // 	return messages
 // }
+
+// noteYieldSend records a frame written to this sequence's destination.
+func (self *SendSequence) noteYieldSend(byteCount int) {
+	if self.sendBuffer == nil || self.destination.IsControlDestination() {
+		return
+	}
+	self.sendBuffer.yieldFor(self.destination.DestinationId).noteSend(byteCount, time.Now().UnixNano())
+}
+
+// noteYieldAck records a frame the destination acknowledged.
+func (self *SendSequence) noteYieldAck(byteCount int) {
+	if self.sendBuffer == nil || self.destination.IsControlDestination() {
+		return
+	}
+	self.sendBuffer.yieldFor(self.destination.DestinationId).noteAck(byteCount, time.Now().UnixNano())
+}
+
+// noteYieldLive records proof the destination is receiving without counting bytes.
+func (self *SendSequence) noteYieldLive() {
+	if self.sendBuffer == nil || self.destination.IsControlDestination() {
+		return
+	}
+	self.sendBuffer.yieldFor(self.destination.DestinationId).noteLive(time.Now().UnixNano())
+}
