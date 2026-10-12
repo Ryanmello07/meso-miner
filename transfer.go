@@ -172,7 +172,12 @@ func DefaultSendBufferSettings() *SendBufferSettings {
 		RttWindowTimeout:     60 * time.Second,
 		AckTimeout:           60 * time.Second,
 		UnreliableAckTimeout: 90 * time.Second,
-		IdleTimeout:          300 * time.Second,
+		// twice the provider's own unreachable-source bound, so its source
+		// release normally acts first. Backstop for retained returns to a
+		// destination that acknowledges nothing, which would otherwise be
+		// rewritten every MaxResendInterval until the item backstop.
+		RetainedAckTimeout: 240 * time.Second,
+		IdleTimeout:        300 * time.Second,
 		// pause on resend for selectively acked messaged
 		SelectiveAckTimeout:                  60 * time.Second,
 		SelectiveAckGapThreshold:             3,
@@ -1704,7 +1709,15 @@ type SendBufferSettings struct {
 	// on ack timeout, no longer attempt to retransmit and notify of ack failure
 	AckTimeout           time.Duration
 	UnreliableAckTimeout time.Duration
-	IdleTimeout          time.Duration
+	// RetainedAckTimeout bounds a sequence holding retained items (provider
+	// TCP and prepared datagram returns). It is how long the destination may
+	// acknowledge nothing, measured from the first write after its last
+	// acknowledgement; any acknowledgement restarts it, so a slow live peer is
+	// never cut off. When it runs out the sequence exits as an ordinary ACK
+	// timeout does and fails every retained owner. Zero leaves retained items
+	// bound only by their per-item backstop.
+	RetainedAckTimeout time.Duration
+	IdleTimeout        time.Duration
 
 	SelectiveAckTimeout      time.Duration
 	SelectiveAckGapThreshold int
@@ -2124,6 +2137,10 @@ type SendSequence struct {
 	// flow cannot consume the whole send window and stall unrelated traffic
 	// on this sequence (R-5).
 	retainedByteCount ByteCount
+	// retainedSilenceStart is the first write since the destination last
+	// acknowledged anything, zero while nothing written is unanswered. Owned
+	// by the send worker; RetainedAckTimeout runs from here.
+	retainedSilenceStart time.Time
 
 	idleCondition *IdleCondition
 
@@ -2204,12 +2221,51 @@ func (self *SendSequence) reliableOnlyWrite(policies ...transferFlightPolicySnap
 		0 < self.flightController.messageCount
 }
 
+// When a sequence holding retained items must stop rewriting them. Only a
+// sequence with retained items qualifies; every other sequence is already
+// bounded by its items' ordinary ACK timeouts.
+func (self *SendSequence) retainedSilenceDeadline() (time.Time, bool) {
+	timeout := self.sendBufferSettings.RetainedAckTimeout
+	if timeout <= 0 || self.retainedSilenceStart.IsZero() || self.retainedByteCount <= 0 {
+		return time.Time{}, false
+	}
+	return self.retainedSilenceStart.Add(timeout), true
+}
+
+// A destination that has acknowledged nothing written to it for
+// RetainedAckTimeout is unreachable for this sequence. Retention promises to
+// keep socket-owned bytes through slow and lossy delivery, not to rewrite them
+// forever: a retired window, a removed probe client or a lease the platform
+// refuses would otherwise keep the whole retained window on the wire every
+// MaxResendInterval. The ordinary exit then fails every retained owner.
+func (self *SendSequence) retainedDestinationSilent(now time.Time) bool {
+	if self.resendQueue.IsEmpty() {
+		// nothing written is unanswered, so no earlier silence carries over
+		self.retainedSilenceStart = time.Time{}
+		return false
+	}
+	deadline, ok := self.retainedSilenceDeadline()
+	if !ok || now.Before(deadline) {
+		return false
+	}
+	self.log.V(1).Infof("[s]%s->%s...%s s(%s) exit retained silence (%s)\n", self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId, self.sendBufferSettings.RetainedAckTimeout)
+	if self.sendBufferSettings.RetentionEventCallback != nil {
+		self.sendBufferSettings.RetentionEventCallback(fmt.Sprintf(
+			"retain_silence timeout=%s retained_bytes=%d", self.sendBufferSettings.RetainedAckTimeout, self.retainedByteCount))
+	}
+	return true
+}
+
 func (self *SendSequence) observeCarrierWrite(
 	item *sendItem,
 	disposition transferWriteDisposition,
 ) {
 	if item == nil {
 		return
+	}
+	// a written item awaits an answer; silence runs until any acknowledgement
+	if self.retainedSilenceStart.IsZero() {
+		self.retainedSilenceStart = time.Now()
 	}
 	if !disposition.unreliable {
 		if disposition.reliable && !item.unreliableCarrierObserved {
@@ -2834,6 +2890,10 @@ func (self *SendSequence) Run() {
 		sendTime := time.Now()
 		var timeout time.Duration
 
+		if self.retainedDestinationSilent(sendTime) {
+			return
+		}
+
 		if self.resendQueue.IsEmpty() {
 			timeout = self.sendBufferSettings.IdleTimeout
 		} else {
@@ -3045,6 +3105,10 @@ func (self *SendSequence) Run() {
 				}
 				self.dropItem(retainedItem, errors.New("Retain backstop expired."))
 			}
+		}
+
+		if deadline, ok := self.retainedSilenceDeadline(); ok {
+			timeout = min(timeout, max(time.Until(deadline), time.Millisecond))
 		}
 
 		checkpointId := self.idleCondition.Checkpoint()
@@ -3810,6 +3874,8 @@ func (self *SendSequence) receiveAck(messageId Id, selective bool, tag *protocol
 		// message not pending ack
 		return
 	}
+	// any acknowledgement of an outstanding item proves the destination live
+	self.retainedSilenceStart = time.Time{}
 
 	var sTag sequenceTag
 	if tag != nil {
