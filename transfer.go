@@ -2249,7 +2249,9 @@ func (self *SendSequence) retainedDestinationSilent(now time.Time) bool {
 	if !ok || now.Before(deadline) {
 		return false
 	}
-	self.log.V(1).Infof("[s]%s->%s...%s s(%s) exit retained silence (%s)\n", self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId, self.sendBufferSettings.RetainedAckTimeout)
+	if v := self.log.V(1); v.Enabled() {
+		v.Infof("[s]%s->%s...%s s(%s) exit retained silence (%s)\n", self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId, self.sendBufferSettings.RetainedAckTimeout)
+	}
 	if self.sendBufferSettings.RetentionEventCallback != nil {
 		self.sendBufferSettings.RetentionEventCallback(fmt.Sprintf(
 			"retain_silence timeout=%s retained_bytes=%d", self.sendBufferSettings.RetainedAckTimeout, self.retainedByteCount))
