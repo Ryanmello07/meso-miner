@@ -43,3 +43,6 @@ func setGovernModeForTest(mode governMode) func() {
 	prev := governModeValue.Swap(int32(mode))
 	return func() { governModeValue.Store(prev) }
 }
+
+// emitGovernLine writes one operator-facing [govern] line to the default log.
+func emitGovernLine(line string) { DefaultLogger().Infof("%s\n", line) }

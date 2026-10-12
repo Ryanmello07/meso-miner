@@ -2,6 +2,7 @@ package connect
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -289,5 +290,82 @@ func TestSendSequence_FirstResendIsFreeAndTheHeadGetsAHeadStart(t *testing.T) {
 	}
 	if head.sendCount != 5 {
 		t.Fatalf("the head frame gets free resends through the 5th send: sendCount=%d, want 5", head.sendCount)
+	}
+}
+
+// Budget comes from bytes the far end acknowledged. A first send earns nothing,
+// and an acknowledged frame earns a quarter of its size.
+func TestRetryBudget_EarnsOnAcknowledgedBytesNotSentBytes(t *testing.T) {
+	transferResendBudget.reset(0)
+	frozen := time.Now()
+	previousNow := transferResendBudget.now
+	transferResendBudget.now = func() time.Time { return frozen }
+	defer func() { transferResendBudget.now = previousNow }()
+	transferResendBudget.reset(0)
+
+	before := TransferSendStatsNow()
+	recordTransferFirstSend(10_000)
+	if got := TransferRetryBudgetTokens(); got != 0 {
+		t.Fatalf("a first send earned %.0f tokens, want 0", got)
+	}
+	recordTransferAckedBytes(10_000)
+	if got := TransferRetryBudgetTokens(); got != retryBudgetRatio*10_000 {
+		t.Fatalf("an acknowledged frame earned %.0f tokens, want %.0f", got, retryBudgetRatio*10_000)
+	}
+	if got := TransferSendStatsNow().BudgetEarnedBytes - before.BudgetEarnedBytes; got != 10_000 {
+		t.Fatalf("earned bytes counter moved %d, want 10000", got)
+	}
+}
+
+// Shadow sends anyway but reports what enforce would have refused.
+func TestRetryBudget_ShadowSendsAndCountsWhatEnforceWouldRefuse(t *testing.T) {
+	frozen := time.Now()
+	previousNow := transferResendBudget.now
+	transferResendBudget.now = func() time.Time { return frozen }
+	defer func() { transferResendBudget.now = previousNow }()
+	transferResendBudget.reset(0)
+	defer setGovernModeForTest(governShadow)()
+
+	before := TransferSendStatsNow()
+	if !retryAllowed(1000) {
+		t.Fatal("shadow must send")
+	}
+	after := TransferSendStatsNow()
+	if after.ResendWouldDeferFrames-before.ResendWouldDeferFrames != 1 || after.ResendWouldDeferBytes-before.ResendWouldDeferBytes != 1000 {
+		t.Fatalf("shadow did not count the would-be refusal: %+v -> %+v", before, after)
+	}
+	if after.ResendDeferredFrames != before.ResendDeferredFrames {
+		t.Fatal("shadow must not count a real deferral")
+	}
+
+	restore := setGovernModeForTest(governOff)
+	defer restore()
+	if !retryAllowed(1000) || TransferSendStatsNow().ResendWouldDeferFrames != after.ResendWouldDeferFrames {
+		t.Fatal("off must neither refuse nor report")
+	}
+}
+
+// Refusals become one log line per interval, naming the mode.
+func TestRetryBudget_ReportsRefusalsOncePerInterval(t *testing.T) {
+	clock := time.Unix(1_000_000, 0)
+	var lines []string
+	reporter := &retryBudgetReporter{
+		now:  func() time.Time { return clock },
+		emit: func(line string) { lines = append(lines, line) },
+	}
+	reporter.note(true, 1000) // starts the interval
+	reporter.note(true, 2000)
+	clock = clock.Add(retryBudgetReportInterval - time.Second)
+	reporter.note(true, 3000)
+	if len(lines) != 0 {
+		t.Fatalf("logged inside the interval: %v", lines)
+	}
+	clock = clock.Add(2 * time.Second)
+	reporter.note(false, 4000)
+	if len(lines) != 1 {
+		t.Fatalf("want one line after the interval, got %v", lines)
+	}
+	if !strings.Contains(lines[0], "[govern] retry budget") || !strings.Contains(lines[0], "shadow") || !strings.Contains(lines[0], "4 resends") {
+		t.Fatalf("unexpected line: %s", lines[0])
 	}
 }

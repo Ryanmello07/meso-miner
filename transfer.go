@@ -2884,7 +2884,10 @@ func (self *SendSequence) Run() {
 
 				// resend
 				var transferFrameBytes []byte
-				if self.sendItems[0].sequenceNumber == item.sequenceNumber && !item.head {
+				// The rewrite that makes an item the head re-establishes the receiver;
+				// it happens once per promotion and must never wait on the budget.
+				promotingHead := self.sendItems[0].sequenceNumber == item.sequenceNumber && !item.head
+				if promotingHead {
 					// set `head=true`
 					var err error
 					transferFrameBytes, err = self.setHead(item)
@@ -2929,7 +2932,8 @@ func (self *SendSequence) Run() {
 				// waits behind: a frame lost once must always be recoverable, however
 				// busy the rest of the host is. Only the deep resends, which are where
 				// the amplification lives, are charged.
-				if !resendIsFree(item.sendCount, self.sendItems[0].sequenceNumber == item.sequenceNumber) &&
+				if !promotingHead &&
+					!resendIsFree(item.sendCount, self.sendItems[0].sequenceNumber == item.sequenceNumber) &&
 					!retryAllowed(len(transferFrameBytes)) {
 					recordTransferResendDeferred(len(transferFrameBytes))
 					deferredTimeout := resendBackoff(
@@ -3634,8 +3638,6 @@ func (self *SendSequence) sendWithSetContract(
 	}
 	recordTransferFirstSend(len(item.transferFrameBytes))
 	if err == nil {
-		// only a frame that actually went out earns the right to resend later
-		transferResendBudget.earn(len(item.transferFrameBytes))
 		self.observeCarrierWrite(item, disposition)
 	}
 
@@ -3913,6 +3915,8 @@ func (self *SendSequence) receiveAck(messageId Id, selective bool, tag *protocol
 }
 
 func (self *SendSequence) ackItem(item *sendItem) {
+	// the far end confirmed these bytes arrived; that is what earns resend budget
+	recordTransferAckedBytes(len(item.transferFrameBytes))
 	self.releaseUnreliableFlight(item)
 	if item.contractId != nil {
 		if itemSendContract, ok := self.openSendContracts[*item.contractId]; ok {

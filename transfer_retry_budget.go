@@ -1,7 +1,9 @@
 package connect
 
 import (
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -57,7 +59,9 @@ func (self *transferRetryBudget) refillLocked() {
 	self.last = now
 }
 
-// earn credits a first send of byteCount bytes.
+// earn credits byteCount bytes the far end acknowledged. Credit comes from
+// acknowledged frames, not sent ones: a destination that acknowledges nothing
+// earns nothing, so it cannot fund resends to itself.
 func (self *transferRetryBudget) earn(byteCount int) {
 	self.mu.Lock()
 	defer self.mu.Unlock()
@@ -77,6 +81,14 @@ func (self *transferRetryBudget) allow(byteCount int) bool {
 	return false
 }
 
+// balance reports the current tokens.
+func (self *transferRetryBudget) balance() float64 {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+	self.refillLocked()
+	return self.tokens
+}
+
 // reset sets the balance. For tests.
 func (self *transferRetryBudget) reset(tokens float64) {
 	self.mu.Lock()
@@ -89,13 +101,64 @@ func (self *transferRetryBudget) reset(tokens float64) {
 // pipe, so it is shared by every send sequence.
 var transferResendBudget = newTransferRetryBudget(time.Now)
 
-// retryAllowed asks whether a resend of byteCount bytes may go out. Only enforce
-// mode ever refuses; shadow and off behave as before the budget existed.
+// retryAllowed asks whether a resend of byteCount bytes may go out. Enforce
+// refuses when the budget cannot pay. Shadow sends anyway but counts and logs
+// what enforce would have refused, so a shadow canary measures the budget.
+// Off behaves as before the budget existed.
 func retryAllowed(byteCount int) bool {
-	if currentGovernMode() != governEnforce {
+	mode := currentGovernMode()
+	if mode == governOff {
 		return true
 	}
-	return transferResendBudget.allow(byteCount)
+	if transferResendBudget.allow(byteCount) {
+		return true
+	}
+	if mode == governEnforce {
+		retryBudgetReport.note(true, byteCount)
+		return false
+	}
+	recordTransferResendWouldDefer(byteCount)
+	retryBudgetReport.note(false, byteCount)
+	return true
+}
+
+// retryBudgetReportInterval is how often refusals are summarised in the log.
+const retryBudgetReportInterval = 60 * time.Second
+
+// retryBudgetReporter turns a stream of refusals into one log line per interval,
+// so an overloaded host does not log once per refused resend.
+type retryBudgetReporter struct {
+	now      func() time.Time
+	emit     func(string)
+	lastNano atomic.Int64
+	frames   atomic.Int64
+	bytes    atomic.Int64
+}
+
+var retryBudgetReport = &retryBudgetReporter{now: time.Now, emit: emitGovernLine}
+
+func (self *retryBudgetReporter) note(enforced bool, byteCount int) {
+	self.frames.Add(1)
+	self.bytes.Add(int64(byteCount))
+	now := self.now().UnixNano()
+	last := self.lastNano.Load()
+	if last == 0 {
+		self.lastNano.CompareAndSwap(0, now)
+		return
+	}
+	if now-last < int64(retryBudgetReportInterval) || !self.lastNano.CompareAndSwap(last, now) {
+		return
+	}
+	frames := self.frames.Swap(0)
+	bytes := self.bytes.Swap(0)
+	verb := "deferred"
+	if !enforced {
+		verb = "would have deferred (shadow, sent anyway)"
+	}
+	self.emit(fmt.Sprintf(
+		"[govern] retry budget %s %d resends (%.1f MiB) in the last %s; tokens left %.0f KiB. Resends are paid for by bytes the far end acknowledged, so this means acks are not keeping up with what we send",
+		verb, frames, float64(bytes)/(1<<20), time.Duration(now-last).Round(time.Second), transferResendBudget.balance()/1024,
+	))
 }
 
 // resendIsFree reports whether the next send of an item is exempt from the budget.
@@ -106,3 +169,6 @@ func resendIsFree(sendCount int, isHead bool) bool {
 	next := sendCount + 1
 	return next <= 2 || (isHead && next <= 5)
 }
+
+// TransferRetryBudgetTokens reports the process-wide resend budget balance in bytes.
+func TransferRetryBudgetTokens() float64 { return transferResendBudget.balance() }
