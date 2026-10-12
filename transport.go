@@ -1084,6 +1084,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 					err := ws.WriteMessage(websocket.BinaryMessage, message)
 					MessagePoolReturn(message)
 					if err != nil {
+						recordTransportCloseCause("h1", "write", err)
 						// note that for websocket a dealine timeout cannot be recovered
 						if ok, suppressed := shouldLogWriteErr(); ok {
 							if suppressed > 0 {
@@ -1198,6 +1199,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 					ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
 					messageType, r, err := ws.NextReader()
 					if err != nil {
+						recordTransportCloseCause("h1", "read", err)
 						self.log.V(2).Infof("[tr]%s<- error = %s\n", clientId, err)
 						if isClientLimitCloseError(err) {
 							self.noteClientLimitClose(TransportModeH1, auth.ProvideIntent, clientLimitResetGeneration)
@@ -1210,6 +1212,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 
 						message, err := MessagePoolReadAll(r)
 						if err != nil {
+							recordTransportCloseCause("h1", "read", err)
 							self.log.V(2).Infof("[tr]%s<- error = %s\n", clientId, err)
 							return
 						}
@@ -2231,6 +2234,7 @@ func (self *PlatformTransport) runH3(ptMode TransportMode, initialTimeout time.D
 					}
 					message, err := framer.Read(stream)
 					if err != nil {
+						recordTransportCloseCause("h3", "read", err)
 						self.log.Infof("[tr]%s<- error = %s\n", clientId, err)
 						if isClientLimitCloseError(err) {
 							noteClientLimitOnce()

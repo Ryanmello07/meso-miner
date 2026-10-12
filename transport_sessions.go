@@ -2,10 +2,17 @@ package connect
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // How long platform transport sessions live and why they end.
@@ -144,4 +151,88 @@ func RemoteCloseBurstsNow() (bursts int64, largest int64) {
 	remoteCloseBursts.mutex.Lock()
 	defer remoteCloseBursts.mutex.Unlock()
 	return remoteCloseBursts.bursts, remoteCloseBursts.maxBurst
+}
+
+// Why transports close.
+//
+// The lifetime histogram says how long sessions live; this says what ended them,
+// from the error the read or write loop saw: a websocket close code from the
+// platform, a read timeout, a reset, an EOF, or our own teardown. The set of
+// causes is small and fixed so the metric cannot grow without bound.
+
+var transportCloseCauseNames = []string{
+	"ws_normal", "ws_going_away", "ws_abnormal", "ws_policy", "ws_internal", "ws_app", "ws_other",
+	"timeout", "reset", "eof", "closed_local", "other",
+}
+
+var transportCloseCauseCounts [2][2][12]atomic.Int64 // [h1=0,h3=1][read=0,write=1][cause]
+
+func classifyTransportCloseCause(err error) int {
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		switch {
+		case closeErr.Code == websocket.CloseNormalClosure:
+			return 0
+		case closeErr.Code == websocket.CloseGoingAway:
+			return 1
+		case closeErr.Code == websocket.CloseAbnormalClosure:
+			return 2
+		case closeErr.Code == websocket.ClosePolicyViolation:
+			return 3
+		case closeErr.Code == websocket.CloseInternalServerErr:
+			return 4
+		case 4000 <= closeErr.Code:
+			return 5
+		}
+		return 6
+	}
+	var netErr net.Error
+	switch {
+	case errors.Is(err, os.ErrDeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
+		return 7
+	case errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE):
+		return 8
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return 9
+	case errors.Is(err, net.ErrClosed), errors.Is(err, context.Canceled):
+		return 10
+	}
+	return 11
+}
+
+func recordTransportCloseCause(mode string, side string, err error) {
+	if err == nil {
+		return
+	}
+	modeIndex, sideIndex := 0, 0
+	if mode == "h3" {
+		modeIndex = 1
+	}
+	if side == "write" {
+		sideIndex = 1
+	}
+	transportCloseCauseCounts[modeIndex][sideIndex][classifyTransportCloseCause(err)].Add(1)
+}
+
+// TransportCloseCause is the count of transport read or write errors of one kind.
+type TransportCloseCause struct {
+	Mode  string
+	Side  string
+	Cause string
+	Count int64
+}
+
+func TransportCloseCausesNow() []TransportCloseCause {
+	var causes []TransportCloseCause
+	for mode, modeName := range []string{"h1", "h3"} {
+		for side, sideName := range []string{"read", "write"} {
+			for cause, causeName := range transportCloseCauseNames {
+				causes = append(causes, TransportCloseCause{
+					Mode: modeName, Side: sideName, Cause: causeName,
+					Count: transportCloseCauseCounts[mode][side][cause].Load(),
+				})
+			}
+		}
+	}
+	return causes
 }

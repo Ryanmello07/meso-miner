@@ -108,6 +108,13 @@ func writeGovernMetrics(b *strings.Builder) {
 	}
 	bursts, largestBurst := connect.RemoteCloseBurstsNow()
 	fmt.Fprintf(b, "# HELP urnet_transport_mass_disconnects_total Bursts of 50 or more transports closed by the platform or network within 10 seconds, the signature of a platform rollout cycling connections.\n# TYPE urnet_transport_mass_disconnects_total counter\nurnet_transport_mass_disconnects_total %d\n# HELP urnet_transport_mass_disconnect_largest The most transports closed within one 10 second window.\n# TYPE urnet_transport_mass_disconnect_largest gauge\nurnet_transport_mass_disconnect_largest %d\n", bursts, largestBurst)
+	fmt.Fprintf(b, "# HELP urnet_transport_close_cause_total Platform transport read and write errors by cause: a websocket close code from the platform, a timeout, a reset, an EOF, or our own teardown.\n# TYPE urnet_transport_close_cause_total counter\n")
+	for _, cause := range connect.TransportCloseCausesNow() {
+		if cause.Count == 0 {
+			continue
+		}
+		fmt.Fprintf(b, "urnet_transport_close_cause_total{mode=\"%s\",side=\"%s\",cause=\"%s\"} %d\n", cause.Mode, cause.Side, cause.Cause, cause.Count)
+	}
 	fmt.Fprintf(b, "# HELP urnet_transfer_resend_depth_total Resends by how many times the item had already been sent.\n# TYPE urnet_transfer_resend_depth_total counter\n")
 	for i, label := range []string{"2", "3-4", "5-8", "9+"} {
 		fmt.Fprintf(b, "urnet_transfer_resend_depth_total{send=\"%s\"} %d\n", label, xs.ResendDepth[i])

@@ -2,8 +2,16 @@ package connect
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func sessionTotals() map[string]int64 {
@@ -97,5 +105,46 @@ func TestRemoteCloseBursts_DetectsSimultaneousClosesNotAScatter(t *testing.T) {
 	}
 	if detector.bursts != 2 || len(lines) != 2 {
 		t.Fatalf("second burst: bursts=%d lines=%d", detector.bursts, len(lines))
+	}
+}
+
+func TestTransportCloseCause_ClassifiesTheErrorsALoopSees(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{&websocket.CloseError{Code: websocket.CloseNormalClosure}, "ws_normal"},
+		{&websocket.CloseError{Code: websocket.CloseGoingAway}, "ws_going_away"},
+		{&websocket.CloseError{Code: websocket.CloseAbnormalClosure}, "ws_abnormal"},
+		{&websocket.CloseError{Code: 4003}, "ws_app"},
+		{os.ErrDeadlineExceeded, "timeout"},
+		{fmt.Errorf("read tcp: %w", syscall.ECONNRESET), "reset"},
+		{io.EOF, "eof"},
+		{io.ErrUnexpectedEOF, "eof"},
+		{net.ErrClosed, "closed_local"},
+		{errors.New("something else"), "other"},
+	}
+	for _, c := range cases {
+		if got := transportCloseCauseNames[classifyTransportCloseCause(c.err)]; got != c.want {
+			t.Errorf("%v classified as %q, want %q", c.err, got, c.want)
+		}
+	}
+	before := map[string]int64{}
+	for _, cause := range TransportCloseCausesNow() {
+		before[cause.Mode+cause.Side+cause.Cause] = cause.Count
+	}
+	recordTransportCloseCause("h1", "read", io.EOF)
+	recordTransportCloseCause("h3", "write", os.ErrDeadlineExceeded)
+	recordTransportCloseCause("h1", "read", nil) // no error: not counted
+	for _, cause := range TransportCloseCausesNow() {
+		delta := cause.Count - before[cause.Mode+cause.Side+cause.Cause]
+		want := int64(0)
+		if (cause.Mode == "h1" && cause.Side == "read" && cause.Cause == "eof") ||
+			(cause.Mode == "h3" && cause.Side == "write" && cause.Cause == "timeout") {
+			want = 1
+		}
+		if delta != want {
+			t.Errorf("%s/%s/%s moved by %d, want %d", cause.Mode, cause.Side, cause.Cause, delta, want)
+		}
 	}
 }
