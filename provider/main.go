@@ -2904,6 +2904,11 @@ func provide(opts docopt.Opts) {
 	if home, err := os.UserHomeDir(); err == nil {
 		// a restart in the middle of a backend outage starts throttled
 		connect.InitGovernState(filepath.Join(home, ".urnetwork", "govern_outage"))
+		// and so does the third start in ten minutes (a crash loop shorter than
+		// the startup grace); a hot-swap successor is a planned handoff, not a start
+		if os.Getenv(EnvHotSwap) != "1" && os.Getenv(EnvHotSwapExec) != "1" {
+			connect.NoteGovernStart(filepath.Join(home, ".urnetwork", "govern_outage"))
+		}
 	}
 
 	port, _ := opts.Int("--port")
@@ -3154,13 +3159,8 @@ func provide(opts docopt.Opts) {
 			case <-ctx.Done():
 				return
 			case <-time.After(1 * time.Hour):
-				if connect.ProxyHealthCount() > 0 {
-					_, dead, degraded, _, connecting := connect.ProxyHealthSnapshot()
-					down := len(dead) + len(degraded)
-					tlog("[hourly-maintenance] reconnecting stalled transports: down=%d dead=%d degraded=%d connecting=%d\n",
-						down, len(dead), len(degraded), len(connecting))
-				}
-				connect.TriggerPulse()
+				// skipped while the backend is degraded (see hourlyPulse)
+				hourlyPulse()
 			}
 		}
 	}()

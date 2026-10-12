@@ -238,6 +238,9 @@ type connectGovernor struct {
 	mu          sync.Mutex
 	now         func() time.Time
 	ring        [int(govWindow / time.Second)]govBucket
+
+	// unproven tracks early deaths of not-yet-stable proxies (governor_unproven.go)
+	unproven unprovenEarlyState
 }
 
 func newConnectGovernor(now func() time.Time) *connectGovernor {
@@ -452,6 +455,7 @@ func (self *connectGovernor) snapshot() govSnapshot {
 func (self *connectGovernor) snapshotWindow(window time.Duration) govSnapshot {
 	self.mu.Lock()
 	defer self.mu.Unlock()
+	self.observeUnprovenLocked()
 
 	var s govSnapshot
 	seconds := min(int64(window/time.Second), int64(len(self.ring)))
@@ -485,6 +489,9 @@ func (self *connectGovernor) snapshotWindow(window time.Duration) govSnapshot {
 	// a connect whose session died young is as hard a failure as any: it is the
 	// incident's own shape (the platform accepts the websocket, then drops it)
 	s.HardFailures = s.Classes[connectTimeoutPlatform] + s.Classes[connectUpgradeFail] + s.EarlyProven
+	if self.unprovenEarlyHardLocked() {
+		s.HardFailures += max(0, s.Early-s.EarlyProven)
+	}
 	if 0 < s.PlatformAttempts {
 		s.Ratio = float64(s.PlatformGood) / float64(s.PlatformAttempts)
 	}
@@ -516,6 +523,8 @@ type govReporter struct {
 	mode    func() governMode
 	rate    func() float64
 	waiting func() int
+	// capRate is the per-host attempt cap, 0 while off; optional
+	capRate func() float64
 }
 
 func (self *govReporter) currentMode() governMode {
@@ -544,6 +553,11 @@ func (self *govReporter) budgetFields() string {
 	}
 	if self.waiting != nil {
 		out += fmt.Sprintf(" waiting=%d", self.waiting())
+	}
+	if self.capRate != nil {
+		if c := self.capRate(); 0 < c {
+			out += fmt.Sprintf(" cap=%.1f/s", c)
+		}
 	}
 	return out
 }
@@ -615,6 +629,7 @@ func startGovernorLoop() {
 				mode:    currentGovernMode,
 				rate:    connectBudget.currentRate,
 				waiting: connectBudget.queued,
+				capRate: connectBudget.currentCap,
 			}
 			ticker := time.NewTicker(time.Minute)
 			defer ticker.Stop()
