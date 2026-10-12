@@ -45,6 +45,7 @@ Quick jump:
 | Variable | Default | Description |
 | :--- | :--- | :--- |
 | `URNETWORK_PROFILE` | - | Advanced provider profile: `auto`, `lowmem`, `eco`, `turbo-v4`, or `turbo-v8`. For turbo, prefer `TURBO`. On systemd/native, set this with `urnet-tools turbo/eco/lowmode/auto` rather than a drop-in (v31+). |
+| `URNETWORK_RETAINED_ACK_TIMEOUT` | `240` | Seconds a provider send sequence holding retained returns (TCP and prepared datagram) may go with nothing acknowledged before it gives up and fails those returns. Any acknowledgement restarts the clock. `0` turns the bound off, leaving retained items to their 10x ack-timeout backstop. The shipped value is a first guess and has not been validated against fleet ack-silence data. An empty, negative or unparseable value keeps `240`. |
 | `URNETWORK_GOVERN` | `enforce` | Backend-outage protection for the platform transport, **on by default**. Leave it unset. `shadow` observes and logs `[govern]` lines but never delays a connect, and `off` does nothing; both are emergency overrides for rollback or debugging, and an unrecognised value counts as `enforce`. See [Backend outage protection](#backend-outage-protection). |
 | `TURBO` | - | Set to `v4` or `v8` to enable turbo mode. Prefer this variable for Docker turbo mode. |
 | `URNETWORK_RAMLOGS` | `0` | Set to `1` to redirect provider logs to RAM instead of stdout. Cannot be used with Docker `--log-opt`. On systemd/native, set this with `urnet-tools ramlogs on\|off` (v31+). |
