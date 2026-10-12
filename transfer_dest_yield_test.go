@@ -30,7 +30,7 @@ func TestDeadClientPolicy_ReleasesOneSilentClientWhileTheFleetIsHealthy(t *testi
 	if decision.FleetCollapsed {
 		t.Fatal("9 of 10 acking is not a collapse")
 	}
-	if len(decision.Release) != 1 || decision.Release[0].DestinationId != dead.DestinationId {
+	if len(decision.Release) != 1 || decision.Release[0].View.DestinationId != dead.DestinationId || decision.Release[0].Reason != deadClientReasonHealthy {
 		t.Fatalf("release = %+v, want exactly the silent client", decision.Release)
 	}
 }
@@ -59,22 +59,39 @@ func TestDeadClientPolicy_FleetWideCollapseHoldsReleaseUntilTheHardLimit(t *test
 		t.Fatalf("collapse must hold every release: %+v", held)
 	}
 	released := decideDeadClients(build(policy.HardSilence+time.Second), policy)
-	if len(released.Release) != 9 {
+	if len(released.Release) != 9 || released.Release[0].Reason != deadClientReasonHard {
 		t.Fatalf("past the hard limit all silent clients are released, got %d", len(released.Release))
 	}
 }
 
-// Too few active destinations to blame the backend: a provider with a couple of
-// clients that are both gone must still release them.
-func TestDeadClientPolicy_SmallFleetsAreNotCalledACollapse(t *testing.T) {
+// Too few active destinations to blame the client rather than the platform: a
+// small fleet waits for the hard limit, which still releases clients that are
+// really gone.
+func TestDeadClientPolicy_SmallFleetsWaitForTheHardLimit(t *testing.T) {
 	policy := defaultDeadClientPolicy()
-	views := []destinationYieldView{
-		yieldView(policy.Silence+time.Second, 0, time.Second),
-		yieldView(policy.Silence+time.Second, 0, time.Second),
+	build := func(silent time.Duration) []destinationYieldView {
+		return []destinationYieldView{
+			yieldView(silent, 0, time.Second),
+			yieldView(silent, 0, time.Second),
+		}
 	}
-	decision := decideDeadClients(views, policy)
-	if decision.FleetCollapsed || len(decision.Release) != 2 {
-		t.Fatalf("small fleet: %+v", decision)
+	early := decideDeadClients(build(policy.Silence+time.Minute), policy)
+	if early.FleetCollapsed || len(early.Release) != 0 || early.Silent != 2 {
+		t.Fatalf("a small fleet must not release at the silence window: %+v", early)
+	}
+	late := decideDeadClients(build(policy.HardSilence+time.Second), policy)
+	if len(late.Release) != 2 || late.Release[0].Reason != deadClientReasonSmall {
+		t.Fatalf("a small fleet releases at the hard limit: %+v", late)
+	}
+}
+
+// Silence with nothing being written is an idle client, not a gone one.
+func TestDeadClientPolicy_IdleClientIsNeverReleased(t *testing.T) {
+	policy := defaultDeadClientPolicy()
+	idle := yieldView(policy.HardSilence+time.Hour, 0, policy.ActiveWindow+time.Minute)
+	decision := decideDeadClients(append(healthyFleet(9), idle), policy)
+	if len(decision.Release) != 0 || decision.Silent != 0 {
+		t.Fatalf("a destination we stopped writing to was released: %+v", decision)
 	}
 }
 
@@ -129,6 +146,9 @@ func TestSendBuffer_DestinationYieldsAreTrackedAndOldIdleOnesDropped(t *testing.
 	staleYield := sendBuffer.yieldFor(stale)
 	staleYield.noteSend(10, now.Add(-2*yieldRetention).UnixNano())
 	staleYield.noteAck(10, now.Add(-2*yieldRetention).UnixNano())
+
+	silentIdle := sendBuffer.yieldFor(NewId())
+	silentIdle.noteSend(10, now.Add(-2*yieldRetention).UnixNano()) // silent, but nothing written for a long time
 
 	views := sendBuffer.DestinationYields(now)
 	if len(views) != 1 || views[0].DestinationId != live || views[0].SilentFor < time.Minute {
@@ -263,9 +283,9 @@ func TestUdpBuffer_CancelSourceCancelsOnlyThatSourcesFlows(t *testing.T) {
 	}
 }
 
-// The sweeper acts on the yield by mode: enforce releases, shadow only reports
-// (once per destination per interval), off does nothing.
-func TestDeadClientSweeper_ActsByGovernMode(t *testing.T) {
+// The sweeper acts on the yield by mode: enforce releases, shadow only counts
+// (once per silence) and names it, off does nothing.
+func TestDeadClientSweeper_ActsByMode(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	settings := DefaultClientSettings()
@@ -278,7 +298,7 @@ func TestDeadClientSweeper_ActsByGovernMode(t *testing.T) {
 
 	var lines []string
 	clock := time.Now()
-	sweeper := newDeadClientSweeper(provider)
+	sweeper := newDeadClientSweeper(func() []*RemoteUserNatProvider { return []*RemoteUserNatProvider{provider} })
 	sweeper.now = func() time.Time { return clock }
 	sweeper.emit = func(line string) { lines = append(lines, line) }
 
@@ -287,34 +307,41 @@ func TestDeadClientSweeper_ActsByGovernMode(t *testing.T) {
 	client.sendBuffer.mutex.Lock()
 	client.sendBuffer.sendSequences[sendSequenceId{Destination: gone}] = seq
 	client.sendBuffer.mutex.Unlock()
-	silentFor := sweeper.policy.Silence + 20*time.Second
-	client.sendBuffer.yieldFor(gone.DestinationId).noteSend(4096, clock.Add(-silentFor).UnixNano())
+	// a lone destination is a small fleet: only the hard limit releases it
+	silentFor := sweeper.policy.HardSilence + 20*time.Second
+	seed := func() {
+		yield := client.sendBuffer.yieldFor(gone.DestinationId)
+		yield.noteSend(4096, clock.Add(-silentFor).UnixNano())
+		yield.noteSend(10, clock.Add(-time.Second).UnixNano()) // still being written to
+	}
+	seed()
 
 	before := DeadClientStatsNow()
 
-	restore := setGovernModeForTest(governOff)
+	restore := setDeadClientModeForTest(governOff)
 	if sweeper.sweep() != 0 || seq.ctx.Err() != nil || len(lines) != 0 {
 		t.Fatal("off must do nothing")
 	}
 	restore()
 
-	restore = setGovernModeForTest(governShadow)
+	restore = setDeadClientModeForTest(governShadow)
 	sweeper.sweep()
-	sweeper.sweep() // inside the log interval: counted, not logged again
+	sweeper.sweep() // the silence was forgotten after being counted: not counted again
 	restore()
 	shadow := DeadClientStatsNow()
 	if seq.ctx.Err() != nil {
 		t.Fatal("shadow must not cancel anything")
 	}
-	if shadow.WouldRelease-before.WouldRelease != 2 || shadow.Released != before.Released {
-		t.Fatalf("shadow counters: %+v", shadow)
+	if shadow.WouldRelease-before.WouldRelease != 1 || shadow.Released != before.Released || shadow.ByReasonSmall-before.ByReasonSmall != 1 {
+		t.Fatalf("shadow must count one silence once, by reason: before %+v after %+v", before, shadow)
 	}
-	if len(lines) != 1 || !containsAll(lines[0], "dead client", gone.DestinationId.String(), "shadow") {
+	if len(lines) != 1 || !containsAll(lines[0], "dead client", gone.DestinationId.String(), "shadow", deadClientReasonSmall) {
 		t.Fatalf("shadow must log once: %v", lines)
 	}
 
 	lines = nil
-	restore = setGovernModeForTest(governEnforce)
+	seed() // written to again and still silent: a new silence
+	restore = setDeadClientModeForTest(governEnforce)
 	released := sweeper.sweep()
 	restore()
 	if released != 1 || seq.ctx.Err() == nil {
@@ -327,11 +354,75 @@ func TestDeadClientSweeper_ActsByGovernMode(t *testing.T) {
 	if len(lines) != 1 || !containsAll(lines[0], "released dead client", gone.DestinationId.String(), "cancelled 1 send sequences") {
 		t.Fatalf("enforce must log the release: %v", lines)
 	}
-	if view := client.sendBuffer.DestinationYields(clock)[0]; view.SilentFor != 0 {
-		t.Fatal("a released destination's silence must be forgotten so it is judged afresh")
+	restore = setDeadClientModeForTest(governEnforce)
+	again := sweeper.sweep()
+	restore()
+	if again != 0 {
+		t.Fatal("the same silence must not be released twice")
 	}
-	if again := (func() int { restore := setGovernModeForTest(governEnforce); defer restore(); return sweeper.sweep() })(); again != 0 {
-		t.Fatal("the same destination must not be released twice")
+}
+
+func TestParseDeadClientMode_DefaultsToShadow(t *testing.T) {
+	for raw, want := range map[string]governMode{
+		"": governShadow, "garbage": governShadow, "shadow": governShadow,
+		"enforce": governEnforce, "ON": governEnforce, "true": governEnforce,
+		"off": governOff, "0": governOff,
+	} {
+		if got := parseDeadClientMode(raw); got != want {
+			t.Fatalf("parseDeadClientMode(%q) = %v, want %v", raw, got, want)
+		}
+	}
+}
+
+// An ack ends a silence and the silence's length lands in the recovered-silence
+// histogram; a selective ack (noteLive) proves liveness without counting bytes.
+func TestDestinationYield_RecoveredSilenceFeedsTheHistogramAndSelectiveAckProvesLiveness(t *testing.T) {
+	_, before := RecoveredSilenceHistogram()
+	yield := &destinationYield{destinationId: NewId()}
+	base := time.Unix(2_000_000, 0)
+	yield.noteSend(100, base.UnixNano())
+	yield.noteLive(base.Add(45 * time.Second).UnixNano())
+	if view := yield.view(base.Add(46 * time.Second)); view.SilentFor != 0 || view.AckedBytes != 0 {
+		t.Fatalf("a selective ack must end the silence without counting bytes: %+v", view)
+	}
+	yield.noteSend(100, base.Add(100*time.Second).UnixNano())
+	yield.noteAck(100, base.Add(100*time.Second+2*time.Second).UnixNano())
+
+	bounds, after := RecoveredSilenceHistogram()
+	if len(after) != len(bounds)+1 {
+		t.Fatalf("histogram shape: %d bounds, %d buckets", len(bounds), len(after))
+	}
+	// 45s lands in the <=60s bucket and 2s in the <=10s bucket, both counted in
+	// every cumulative bucket from their own upwards
+	if after[len(after)-1]-before[len(before)-1] != 2 {
+		t.Fatalf("expected 2 recovered silences, got %d", after[len(after)-1]-before[len(before)-1])
+	}
+	if after[0]-before[0] != 1 || after[2]-before[2] != 2 {
+		t.Fatalf("buckets: <=10s +%d, <=60s +%d", after[0]-before[0], after[2]-before[2])
+	}
+}
+
+// A send that asked for no acknowledgement is settled locally; that is not the
+// far end confirming anything.
+func TestSendSequence_NoAckSendDoesNotClearSilenceOrEarnBudget(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	settings := DefaultClientSettings()
+	client := NewClient(ctx, NewId(), NewNoContractClientOob(), settings)
+	defer client.Close()
+	sendBuffer := NewSendBuffer(ctx, client, settings.SendBufferSettings)
+	destination := DestinationId(NewId())
+	seq := NewSendSequence(ctx, client, sendBuffer, destination, MultiHopId{}, false, true, sequenceTlsRoleClient, false, settings.SendBufferSettings)
+
+	yield := sendBuffer.yieldFor(destination.DestinationId)
+	yield.noteSend(100, time.Now().Add(-time.Minute).UnixNano())
+	earnedBefore := TransferSendStatsNow().BudgetEarnedBytes
+	seq.ackItemCounted(&sendItem{transferItem: transferItem{messageByteCount: 100}, transferFrameBytes: make([]byte, 100)}, false)
+	if view := yield.view(time.Now()); view.SilentFor == 0 || view.AckedBytes != 0 {
+		t.Fatalf("a local no-ack settlement cleared the silence: %+v", view)
+	}
+	if TransferSendStatsNow().BudgetEarnedBytes != earnedBefore {
+		t.Fatal("a local no-ack settlement earned resend budget")
 	}
 }
 
@@ -342,4 +433,44 @@ func containsAll(s string, parts ...string) bool {
 		}
 	}
 	return true
+}
+
+// A platform outage looks like many small fleets, each too small to judge. The
+// sweeper judges every provider's destinations together, so the collapse is seen
+// and nothing is released at the silence window.
+func TestDeadClientSweeper_JudgesTheFleetAcrossAllProviders(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	newProvider := func() *RemoteUserNatProvider {
+		client := NewClient(ctx, NewId(), NewNoContractClientOob(), DefaultClientSettings())
+		t.Cleanup(client.Close)
+		nat := NewLocalUserNatWithDefaults(ctx, "t", nil)
+		t.Cleanup(nat.Close)
+		provider := NewRemoteUserNatProviderWithDefaults(client, nat, nil)
+		t.Cleanup(provider.Close)
+		return provider
+	}
+	providers := []*RemoteUserNatProvider{newProvider(), newProvider()}
+	clock := time.Now()
+	sweeper := newDeadClientSweeper(func() []*RemoteUserNatProvider { return providers })
+	sweeper.now = func() time.Time { return clock }
+	sweeper.emit = func(string) {}
+
+	silentFor := sweeper.policy.Silence + time.Minute
+	for _, provider := range providers {
+		for i := 0; i < 3; i++ { // 3 per provider: each alone is below MinActive
+			yield := provider.client.sendBuffer.yieldFor(NewId())
+			yield.noteSend(100, clock.Add(-silentFor).UnixNano())
+			yield.noteSend(100, clock.Add(-time.Second).UnixNano())
+		}
+	}
+	restore := setDeadClientModeForTest(governEnforce)
+	defer restore()
+	if released := sweeper.sweep(); released != 0 {
+		t.Fatalf("released %d clients while nothing anywhere was acknowledging", released)
+	}
+	stats := DeadClientStatsNow()
+	if stats.FleetCollapsed != 1 || stats.Active != 6 || stats.Acking != 0 || stats.Silent != 6 {
+		t.Fatalf("the sweep must see one collapsed fleet of 6: %+v", stats)
+	}
 }

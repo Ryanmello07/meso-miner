@@ -3103,7 +3103,7 @@ func NewRemoteUserNatProvider(
 	clientUnsub := client.AddReceiveCallback(userNatProvider.ClientReceive)
 	userNatProvider.clientUnsub = clientUnsub
 
-	go HandleError(newDeadClientSweeper(userNatProvider).run)
+	registerDeadClientProvider(userNatProvider)
 
 	return userNatProvider
 }
@@ -3271,6 +3271,7 @@ func (self *RemoteUserNatProvider) ClientReceive(source TransferPath, frames []*
 }
 
 func (self *RemoteUserNatProvider) Close() {
+	unregisterDeadClientProvider(self)
 	// self.client.RemoveReceiveCallback(self.clientCallbackId)
 	// self.localUserNat.RemoveReceivePacketCallback(self.localUserNatCallbackId)
 	self.clientUnsub()

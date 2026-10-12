@@ -46,9 +46,17 @@ func writeGovernMetrics(b *strings.Builder) {
 	fmt.Fprintf(b, "# HELP urnet_transfer_budget_tokens Resend budget tokens (bytes) left right now.\n# TYPE urnet_transfer_budget_tokens gauge\nurnet_transfer_budget_tokens %.0f\n", connect.TransferRetryBudgetTokens())
 	dc := connect.DeadClientStatsNow()
 	fmt.Fprintf(b, "# HELP urnet_dead_client_released_total Clients released after acknowledging nothing for the silence window, with what was cancelled for them.\n# TYPE urnet_dead_client_released_total counter\nurnet_dead_client_released_total{unit=\"clients\"} %d\nurnet_dead_client_released_total{unit=\"nat_flows\"} %d\nurnet_dead_client_released_total{unit=\"send_sequences\"} %d\n", dc.Released, dc.ReleasedFlows, dc.ReleasedSequences)
-	fmt.Fprintf(b, "# HELP urnet_dead_client_would_release_total Clients shadow mode would have released.\n# TYPE urnet_dead_client_would_release_total counter\nurnet_dead_client_would_release_total %d\n", dc.WouldRelease)
-	fmt.Fprintf(b, "# HELP urnet_dead_client_silent Clients past the silence window at the latest sweep, released or held.\n# TYPE urnet_dead_client_silent gauge\nurnet_dead_client_silent %d\n", dc.Silent)
-	fmt.Fprintf(b, "# HELP urnet_dead_client_fleet_collapsed 1 when the latest sweep judged the backend, not the clients, at fault and held releases.\n# TYPE urnet_dead_client_fleet_collapsed gauge\nurnet_dead_client_fleet_collapsed %d\n", dc.FleetCollapsed)
+	fmt.Fprintf(b, "# HELP urnet_dead_client_would_release_total Silences shadow mode would have released, by why release was allowed.\n# TYPE urnet_dead_client_would_release_total counter\nurnet_dead_client_would_release_total %d\n", dc.WouldRelease)
+	fmt.Fprintf(b, "# HELP urnet_dead_client_reason_total Releases and would-be releases by reason.\n# TYPE urnet_dead_client_reason_total counter\nurnet_dead_client_reason_total{reason=\"healthy_fleet\"} %d\nurnet_dead_client_reason_total{reason=\"hard_silence\"} %d\nurnet_dead_client_reason_total{reason=\"small_fleet\"} %d\n", dc.ByReasonHealthy, dc.ByReasonHard, dc.ByReasonSmall)
+	fmt.Fprintf(b, "# HELP urnet_dead_client_silent Clients still being written to that were past the silence window at the latest sweep.\n# TYPE urnet_dead_client_silent gauge\nurnet_dead_client_silent %d\n", dc.Silent)
+	fmt.Fprintf(b, "# HELP urnet_dead_client_fleet_collapsed 1 when the latest sweep judged the platform, not the clients, at fault and held releases.\n# TYPE urnet_dead_client_fleet_collapsed gauge\nurnet_dead_client_fleet_collapsed %d\n", dc.FleetCollapsed)
+	fmt.Fprintf(b, "# HELP urnet_dead_client_fleet Destinations judged by the latest sweep: active (written to or acknowledged recently) and acking.\n# TYPE urnet_dead_client_fleet gauge\nurnet_dead_client_fleet{state=\"active\"} %d\nurnet_dead_client_fleet{state=\"acking\"} %d\nurnet_dead_client_fleet{state=\"records\"} %d\n", dc.Active, dc.Acking, dc.Records)
+	bounds, cumulative := connect.RecoveredSilenceHistogram()
+	fmt.Fprintf(b, "# HELP urnet_dead_client_recovered_silence_seconds Silences that ended in an acknowledgement, the data the release window should be chosen from.\n# TYPE urnet_dead_client_recovered_silence_seconds histogram\n")
+	for i, bound := range bounds {
+		fmt.Fprintf(b, "urnet_dead_client_recovered_silence_seconds_bucket{le=\"%g\"} %d\n", bound, cumulative[i])
+	}
+	fmt.Fprintf(b, "urnet_dead_client_recovered_silence_seconds_bucket{le=\"+Inf\"} %d\nurnet_dead_client_recovered_silence_seconds_count %d\n", cumulative[len(cumulative)-1], cumulative[len(cumulative)-1])
 	fmt.Fprintf(b, "# HELP urnet_transfer_resend_depth_total Resends by how many times the item had already been sent.\n# TYPE urnet_transfer_resend_depth_total counter\n")
 	for i, label := range []string{"2", "3-4", "5-8", "9+"} {
 		fmt.Fprintf(b, "urnet_transfer_resend_depth_total{send=\"%s\"} %d\n", label, xs.ResendDepth[i])

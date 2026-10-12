@@ -3706,7 +3706,7 @@ func (self *SendSequence) sendWithSetContract(
 	} else {
 		// immediately ack
 		if err == nil {
-			self.ackItem(item)
+			self.ackItemCounted(item, false)
 		} else {
 			safeAck(item.ackCallback, err)
 			item.messagePoolReturn()
@@ -3840,6 +3840,8 @@ func (self *SendSequence) receiveAck(messageId Id, selective bool, tag *protocol
 		if !item.selectiveAcked {
 			self.releaseUnreliableFlight(item)
 		}
+		// a selective ack proves the destination is receiving
+		self.noteYieldLive()
 		item.resendTime = time.Now().Add(self.sendBufferSettings.SelectiveAckTimeout)
 		item.sendTime = time.Now()
 		item.selectiveAcked = true
@@ -3934,9 +3936,18 @@ func (self *SendSequence) receiveAck(messageId Id, selective bool, tag *protocol
 }
 
 func (self *SendSequence) ackItem(item *sendItem) {
+	self.ackItemCounted(item, true)
+}
+
+// ackItemCounted settles an acknowledged item. countYield is false for a send
+// that asked for no acknowledgement and is settled locally: that is not the far
+// end confirming anything.
+func (self *SendSequence) ackItemCounted(item *sendItem, countYield bool) {
 	// the far end confirmed these bytes arrived; that is what earns resend budget
-	recordTransferAckedBytes(len(item.transferFrameBytes))
-	self.noteYieldAck(len(item.transferFrameBytes))
+	if countYield {
+		recordTransferAckedBytes(len(item.transferFrameBytes))
+		self.noteYieldAck(len(item.transferFrameBytes))
+	}
 	self.releaseUnreliableFlight(item)
 	if item.contractId != nil {
 		if itemSendContract, ok := self.openSendContracts[*item.contractId]; ok {
@@ -6942,4 +6953,12 @@ func (self *SendSequence) noteYieldAck(byteCount int) {
 		return
 	}
 	self.sendBuffer.yieldFor(self.destination.DestinationId).noteAck(byteCount, time.Now().UnixNano())
+}
+
+// noteYieldLive records proof the destination is receiving without counting bytes.
+func (self *SendSequence) noteYieldLive() {
+	if self.sendBuffer == nil || self.destination.IsControlDestination() {
+		return
+	}
+	self.sendBuffer.yieldFor(self.destination.DestinationId).noteLive(time.Now().UnixNano())
 }

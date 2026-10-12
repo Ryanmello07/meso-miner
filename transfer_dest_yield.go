@@ -36,8 +36,18 @@ func (self *destinationYield) noteSend(byteCount int, nowNano int64) {
 
 func (self *destinationYield) noteAck(byteCount int, nowNano int64) {
 	self.ackedBytes.Add(int64(byteCount))
+	self.noteLive(nowNano)
+}
+
+// noteLive records proof the destination is receiving without counting bytes,
+// for acknowledgements that are counted when the item is later acknowledged in
+// order (a selective ack). A silence that ends here is a recovered silence, and
+// its length is the data the release thresholds should be chosen from.
+func (self *destinationYield) noteLive(nowNano int64) {
 	self.lastAckNano.Store(nowNano)
-	self.silentSinceNano.Store(0)
+	if since := self.silentSinceNano.Swap(0); since != 0 && since < nowNano {
+		recordRecoveredSilence(time.Duration(nowNano - since))
+	}
 }
 
 // reset forgets the silence after a release, so a client that comes back is
@@ -50,6 +60,9 @@ func (self *destinationYield) reset() {
 // are zero when the event never happened.
 type destinationYieldView struct {
 	DestinationId Id
+	// owner is the send buffer holding the record, set when views from several
+	// send buffers are judged together.
+	owner *SendBuffer
 	// SilentFor is how long the destination has been written to without
 	// acknowledging anything. Zero when it is not silent.
 	SilentFor time.Duration
@@ -93,7 +106,10 @@ func (self *SendBuffer) DestinationYields(now time.Time) []destinationYieldView 
 	self.yields.Range(func(key, value any) bool {
 		yield := value.(*destinationYield)
 		view := yield.view(now)
-		if yieldRetention < max(view.SinceLastSend, view.SinceLastAck) && view.SilentFor == 0 {
+		// a destination nothing has been sent to or acknowledged by for a while is
+		// forgotten whether or not it was silent: silence only means something
+		// while we are still writing to it
+		if yieldRetention < max(view.SinceLastSend, view.SinceLastAck) {
 			self.yields.Delete(key)
 			return true
 		}
@@ -131,7 +147,7 @@ func (self *SendBuffer) CancelDestination(destinationId Id) int {
 
 // The dead-client policy.
 //
-// A destination is released when it has been silent for Silence while the fleet
+// A destination that is still being written to is released when it has been silent for Silence while the fleet
 // looks healthy, meaning other destinations are acknowledging: then the problem
 // is that client, not the backend, and its held bytes are not coming back. When
 // almost nothing is being acknowledged anywhere the backend or relay is the
@@ -163,15 +179,34 @@ func defaultDeadClientPolicy() deadClientPolicy {
 	}
 }
 
+// Why a destination was released.
+const (
+	// the fleet is acknowledging, so this client is the problem
+	deadClientReasonHealthy = "healthy_fleet"
+	// the fleet is collapsed, but the client has been silent past the hard limit
+	deadClientReasonHard = "hard_silence"
+	// too few active destinations to judge the fleet, silent past the hard limit
+	deadClientReasonSmall = "small_fleet"
+)
+
+type deadClientRelease struct {
+	View   destinationYieldView
+	Reason string
+}
+
 type deadClientDecision struct {
-	Release []destinationYieldView
-	// Silent counts destinations past Silence, released or held.
+	Release []deadClientRelease
+	// Silent counts destinations still being written to that are past Silence,
+	// released or held.
 	Silent         int
 	FleetCollapsed bool
 	Active         int
 	Acking         int
 }
 
+// decideDeadClients judges the views together. A destination is only a
+// candidate while we are still writing to it: silence with nothing outstanding
+// is an idle client, not a gone one.
 func decideDeadClients(views []destinationYieldView, policy deadClientPolicy) deadClientDecision {
 	decision := deadClientDecision{}
 	for _, view := range views {
@@ -185,17 +220,63 @@ func decideDeadClients(views []destinationYieldView, policy deadClientPolicy) de
 			decision.Acking += 1
 		}
 	}
-	decision.FleetCollapsed = policy.MinActive <= decision.Active &&
+	judged := policy.MinActive <= decision.Active
+	decision.FleetCollapsed = judged &&
 		float64(decision.Acking) < policy.HealthyFraction*float64(decision.Active)
 	for _, view := range views {
-		if view.SilentFor < policy.Silence {
+		writing := view.SinceLastSend != 0 && view.SinceLastSend <= policy.ActiveWindow
+		if !writing || view.SilentFor < policy.Silence {
 			continue
 		}
 		decision.Silent += 1
-		if decision.FleetCollapsed && view.SilentFor < policy.HardSilence {
-			continue
+		switch {
+		case !judged:
+			// with few active destinations there is no basis to blame the client
+			// rather than the platform, so only the hard limit releases
+			if policy.HardSilence <= view.SilentFor {
+				decision.Release = append(decision.Release, deadClientRelease{view, deadClientReasonSmall})
+			}
+		case decision.FleetCollapsed:
+			if policy.HardSilence <= view.SilentFor {
+				decision.Release = append(decision.Release, deadClientRelease{view, deadClientReasonHard})
+			}
+		default:
+			decision.Release = append(decision.Release, deadClientRelease{view, deadClientReasonHealthy})
 		}
-		decision.Release = append(decision.Release, view)
 	}
 	return decision
+}
+
+// recoveredSilenceBounds are the upper bounds of the recovered-silence
+// histogram; the last bucket is everything longer.
+var recoveredSilenceBounds = []time.Duration{
+	10 * time.Second, 30 * time.Second, 60 * time.Second, 120 * time.Second,
+	180 * time.Second, 300 * time.Second, 600 * time.Second,
+}
+
+var recoveredSilenceCounts [8]atomic.Int64
+
+func recordRecoveredSilence(duration time.Duration) {
+	for i, bound := range recoveredSilenceBounds {
+		if duration <= bound {
+			recoveredSilenceCounts[i].Add(1)
+			return
+		}
+	}
+	recoveredSilenceCounts[len(recoveredSilenceBounds)].Add(1)
+}
+
+// RecoveredSilenceHistogram is the count of silences that ended in an
+// acknowledgement, per bucket (cumulative, Prometheus style), with the bucket
+// upper bounds in seconds and +Inf last.
+func RecoveredSilenceHistogram() (boundsSeconds []float64, cumulative []int64) {
+	total := int64(0)
+	for i := range recoveredSilenceCounts {
+		total += recoveredSilenceCounts[i].Load()
+		cumulative = append(cumulative, total)
+		if i < len(recoveredSilenceBounds) {
+			boundsSeconds = append(boundsSeconds, recoveredSilenceBounds[i].Seconds())
+		}
+	}
+	return boundsSeconds, cumulative
 }
