@@ -18,20 +18,22 @@ import (
 // bytes as first-send bytes (90% of everything it transmitted) for a billable
 // payload that was a fraction of the first sends.
 //
-// A retry budget bounds that. Resends are paid for out of tokens earned by first
-// sends: every first-sent byte earns retryBudgetRatio of a token, so resends can
-// never exceed that share of fresh traffic, plus a small floor refill so a quiet
-// flow can still recover a lost frame. A resend that cannot pay is rescheduled
-// without being sent, the same way the resend-cap park works.
+// A retry budget bounds that. Resends are paid for out of tokens earned when the
+// far end acknowledges frames: every acknowledged byte earns retryBudgetRatio of a
+// token, so resends can never exceed that share of what is actually delivered,
+// plus a small floor refill so a quiet flow can still recover a lost frame. A
+// destination that acknowledges nothing earns nothing, so it cannot fund resends
+// to itself. A resend that cannot pay is rescheduled without being sent, the same
+// way the resend-cap park works.
 //
 // With ordinary loss (a few percent) the budget never binds. It binds exactly
 // when the resend share explodes.
 
 const (
-	// retryBudgetRatio is the share of first-sent bytes that may be resent.
+	// retryBudgetRatio is the share of acknowledged bytes that may be resent.
 	retryBudgetRatio = 0.25
 	// retryBudgetFloorBytesPerSecond refills regardless of traffic, so a flow with
-	// almost no first sends can still resend a lost frame.
+	// almost no acknowledged bytes can still resend a lost frame.
 	retryBudgetFloorBytesPerSecond = 64 << 10
 	// retryBudgetBurstBytes caps what can be saved up.
 	retryBudgetBurstBytes = 8 << 20
