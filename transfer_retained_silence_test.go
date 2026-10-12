@@ -149,3 +149,30 @@ func TestRetainedSilenceClockRules(t *testing.T) {
 		t.Fatal("an empty queue must forget earlier silence")
 	}
 }
+
+// An acknowledgement that leaves other retained bytes unanswered restarts the
+// silence window at the acknowledgement, so the bound does not wait for the next
+// carrier write (which a parked resend can delay); once nothing retained is left
+// the clock is cleared.
+func TestRetainedSilenceRestartsAtTheAckWhileRetainedBytesRemain(t *testing.T) {
+	seq, cancel := newRetainedSilenceSequence(t, time.Minute)
+	defer cancel()
+
+	first := addRetainedItem(seq, 1, func(error) {})
+	second := addRetainedItem(seq, 2, func(error) {})
+	seq.retainedSilenceStart = time.Now().Add(-50 * time.Second)
+
+	before := time.Now()
+	seq.receiveAck(first.messageId, false, nil)
+	if seq.retainedSilenceStart.Before(before) {
+		t.Fatal("an ack with retained bytes still outstanding must restart the silence window at the ack")
+	}
+	if _, ok := seq.retainedSilenceDeadline(); !ok {
+		t.Fatal("the deadline must stay armed while retained bytes are outstanding")
+	}
+
+	seq.receiveAck(second.messageId, false, nil)
+	if !seq.retainedSilenceStart.IsZero() {
+		t.Fatal("with no retained bytes left the clock must be cleared")
+	}
+}

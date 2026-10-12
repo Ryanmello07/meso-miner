@@ -178,7 +178,7 @@ func DefaultSendBufferSettings() *SendBufferSettings {
 		// provider-side unreachable-source release to act first. A platform
 		// outage longer than this fails retained owners that the item
 		// backstop alone would have kept for up to 10x AckTimeout.
-		RetainedAckTimeout: 240 * time.Second,
+		RetainedAckTimeout: retainedAckTimeoutDefault(),
 		IdleTimeout:        300 * time.Second,
 		// pause on resend for selectively acked messaged
 		SelectiveAckTimeout:                  60 * time.Second,
@@ -2234,6 +2234,20 @@ func (self *SendSequence) retainedSilenceDeadline() (time.Time, bool) {
 	return self.retainedSilenceStart.Add(timeout), true
 }
 
+// restartRetainedSilence runs once an acknowledgement has been applied. The
+// acknowledgement proves the destination live, so the silence window restarts
+// from now while retained bytes are still unanswered; with none left there is
+// nothing to bound and the clock is cleared. Restarting at the acknowledgement,
+// and not at the next carrier write, keeps the bound from stretching to a parked
+// resend's wait when some retained items are acknowledged and others are not.
+func (self *SendSequence) restartRetainedSilence() {
+	if 0 < self.retainedByteCount {
+		self.retainedSilenceStart = time.Now()
+	} else {
+		self.retainedSilenceStart = time.Time{}
+	}
+}
+
 // A destination that has acknowledged nothing written to it for
 // RetainedAckTimeout is unreachable for this sequence. Retention promises to
 // keep socket-owned bytes through slow and lossy delivery, not to rewrite them
@@ -3878,9 +3892,6 @@ func (self *SendSequence) receiveAck(messageId Id, selective bool, tag *protocol
 		// message not pending ack
 		return
 	}
-	// any acknowledgement of an outstanding item proves the destination live
-	self.retainedSilenceStart = time.Time{}
-
 	var sTag sequenceTag
 	if tag != nil {
 		sTag = sequenceTag{sendTime: tag.SendTime, set: true}
@@ -3906,6 +3917,7 @@ func (self *SendSequence) receiveAck(messageId Id, selective bool, tag *protocol
 		item.sendTime = time.Now()
 		item.selectiveAcked = true
 		self.resendQueue.Add(item)
+		self.restartRetainedSilence()
 		return
 	}
 
@@ -3989,6 +4001,7 @@ func (self *SendSequence) receiveAck(messageId Id, selective bool, tag *protocol
 		}
 	}
 	self.sendItems = self.sendItems[i:]
+	self.restartRetainedSilence()
 	if self.log.V(2).Enabled() {
 		a, b := self.resendQueue.QueueSize()
 		self.log.Infof("[s]ack %d/%d (stop %d %dB %d) %s->%s...%s s(%s)\n", item.sequenceNumber, self.nextSequenceNumber-1, a, b, len(self.sendItems), self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId)
