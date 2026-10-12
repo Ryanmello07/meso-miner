@@ -172,10 +172,12 @@ func DefaultSendBufferSettings() *SendBufferSettings {
 		RttWindowTimeout:     60 * time.Second,
 		AckTimeout:           60 * time.Second,
 		UnreliableAckTimeout: 90 * time.Second,
-		// twice the provider's own unreachable-source bound, so its source
-		// release normally acts first. Backstop for retained returns to a
-		// destination that acknowledges nothing, which would otherwise be
-		// rewritten every MaxResendInterval until the item backstop.
+		// the primary bound on retained returns to a destination that
+		// acknowledges nothing, which would otherwise be rewritten every
+		// MaxResendInterval until the item backstop. This line has no
+		// provider-side unreachable-source release to act first. A platform
+		// outage longer than this fails retained owners that the item
+		// backstop alone would have kept for up to 10x AckTimeout.
 		RetainedAckTimeout: 240 * time.Second,
 		IdleTimeout:        300 * time.Second,
 		// pause on resend for selectively acked messaged
