@@ -98,13 +98,18 @@ func writeGovernMetrics(b *strings.Builder) {
 	pingTx, pingRx := connect.TransportPingFramesNow()
 	fmt.Fprintf(b, "# HELP urnet_transport_ping_frames_total Keepalive frames on the platform transports.\n# TYPE urnet_transport_ping_frames_total counter\nurnet_transport_ping_frames_total{dir=\"tx\"} %d\nurnet_transport_ping_frames_total{dir=\"rx\"} %d\n", pingTx, pingRx)
 	se := connect.SessionEndStatsNow()
-	fmt.Fprintf(b, "# HELP urnet_transport_session_lifetime_seconds Platform transport sessions that ended, by how long they lived and why. Every session is a new connection and costs about 1.75 MB of platform speed tests.\n# TYPE urnet_transport_session_lifetime_seconds histogram\n")
-	for _, reason := range connect.SessionEndReasons() {
-		cumulative := se.Cumulative[reason]
-		for i, bound := range se.BoundsSeconds {
-			fmt.Fprintf(b, "urnet_transport_session_lifetime_seconds_bucket{reason=\"%s\",le=\"%g\"} %d\n", reason, bound, cumulative[i])
+	fmt.Fprintf(b, "# HELP urnet_transport_session_lifetime_seconds Platform transport sessions that ended, by proxy source, how long they lived and why. Every session is a new connection and costs about 1.75 MB of platform speed tests.\n# TYPE urnet_transport_session_lifetime_seconds histogram\n")
+	for _, source := range connect.ProxySourceNames() {
+		for _, reason := range connect.SessionEndReasons() {
+			cumulative := se.Cumulative[source][reason]
+			if cumulative[len(cumulative)-1] == 0 {
+				continue
+			}
+			for i, bound := range se.BoundsSeconds {
+				fmt.Fprintf(b, "urnet_transport_session_lifetime_seconds_bucket{source=\"%s\",reason=\"%s\",le=\"%g\"} %d\n", source, reason, bound, cumulative[i])
+			}
+			fmt.Fprintf(b, "urnet_transport_session_lifetime_seconds_bucket{source=\"%s\",reason=\"%s\",le=\"+Inf\"} %d\nurnet_transport_session_lifetime_seconds_count{source=\"%s\",reason=\"%s\"} %d\n", source, reason, cumulative[len(cumulative)-1], source, reason, cumulative[len(cumulative)-1])
 		}
-		fmt.Fprintf(b, "urnet_transport_session_lifetime_seconds_bucket{reason=\"%s\",le=\"+Inf\"} %d\nurnet_transport_session_lifetime_seconds_count{reason=\"%s\"} %d\n", reason, cumulative[len(cumulative)-1], reason, cumulative[len(cumulative)-1])
 	}
 	bursts, largestBurst := connect.RemoteCloseBurstsNow()
 	fmt.Fprintf(b, "# HELP urnet_transport_mass_disconnects_total Bursts of 50 or more transports closed by the platform or network within 10 seconds, the signature of a platform rollout cycling connections.\n# TYPE urnet_transport_mass_disconnects_total counter\nurnet_transport_mass_disconnects_total %d\n# HELP urnet_transport_mass_disconnect_largest The most transports closed within one 10 second window.\n# TYPE urnet_transport_mass_disconnect_largest gauge\nurnet_transport_mass_disconnect_largest %d\n", bursts, largestBurst)
@@ -113,7 +118,7 @@ func writeGovernMetrics(b *strings.Builder) {
 		if cause.Count == 0 {
 			continue
 		}
-		fmt.Fprintf(b, "urnet_transport_close_cause_total{mode=\"%s\",side=\"%s\",cause=\"%s\"} %d\n", cause.Mode, cause.Side, cause.Cause, cause.Count)
+		fmt.Fprintf(b, "urnet_transport_close_cause_total{source=\"%s\",mode=\"%s\",side=\"%s\",cause=\"%s\"} %d\n", cause.Source, cause.Mode, cause.Side, cause.Cause, cause.Count)
 	}
 	fmt.Fprintf(b, "# HELP urnet_transfer_resend_depth_total Resends by how many times the item had already been sent.\n# TYPE urnet_transfer_resend_depth_total counter\n")
 	for i, label := range []string{"2", "3-4", "5-8", "9+"} {

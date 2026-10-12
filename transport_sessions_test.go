@@ -17,8 +17,10 @@ import (
 func sessionTotals() map[string]int64 {
 	stats := SessionEndStatsNow()
 	totals := map[string]int64{}
-	for reason, cumulative := range stats.Cumulative {
-		totals[reason] = cumulative[len(cumulative)-1]
+	for _, byReason := range stats.Cumulative {
+		for reason, cumulative := range byReason {
+			totals[reason] += cumulative[len(cumulative)-1]
+		}
 	}
 	return totals
 }
@@ -29,12 +31,12 @@ func TestSessionEnd_CountsByReasonAndLifetime(t *testing.T) {
 	beforeStats := SessionEndStatsNow()
 
 	alive := context.Background()
-	recordSessionEnd(alive, 20*time.Second, false) // remote, <=30s
-	recordSessionEnd(alive, 20*time.Minute, false) // remote, <=30m
-	recordSessionEnd(alive, 5*time.Second, true)   // client limit, <=10s
+	recordSessionEnd(alive, 20*time.Second, false, "url") // remote, <=30s
+	recordSessionEnd(alive, 20*time.Minute, false, "url") // remote, <=30m
+	recordSessionEnd(alive, 5*time.Second, true, "file")  // client limit, <=10s
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
-	recordSessionEnd(cancelled, 2*time.Hour, false) // local, <=6h, even if it was also young
+	recordSessionEnd(cancelled, 2*time.Hour, false, "file") // local, <=6h, even if it was also young
 
 	after := sessionTotals()
 	if after["remote"]-before["remote"] != 2 || after["client_limit"]-before["client_limit"] != 1 || after["local"]-before["local"] != 1 {
@@ -51,10 +53,10 @@ func TestSessionEnd_CountsByReasonAndLifetime(t *testing.T) {
 		return -1
 	}
 	remote30s, remote30m := bound(30), bound(1800)
-	if afterStats.Cumulative["remote"][remote30s]-beforeStats.Cumulative["remote"][remote30s] != 1 {
+	if afterStats.Cumulative["url"]["remote"][remote30s]-beforeStats.Cumulative["url"]["remote"][remote30s] != 1 {
 		t.Fatal("the 20s session must be in the <=30s bucket")
 	}
-	if afterStats.Cumulative["remote"][remote30m]-beforeStats.Cumulative["remote"][remote30m] != 2 {
+	if afterStats.Cumulative["url"]["remote"][remote30m]-beforeStats.Cumulative["url"]["remote"][remote30m] != 2 {
 		t.Fatal("both remote sessions must be in the <=30m bucket (cumulative)")
 	}
 }
@@ -64,11 +66,11 @@ func TestSessionEnd_CountsByReasonAndLifetime(t *testing.T) {
 func TestSessionEnd_AuxiliaryTransportIsNotCounted(t *testing.T) {
 	before := sessionTotals()
 	flaps := newFlapGuard(time.Minute, time.Second)
-	sessionEndWait(context.Background(), flaps, 5*time.Second, false, "aux", NewNoopLogger(), false)
+	sessionEndWait(context.Background(), flaps, 5*time.Second, false, "aux", NewNoopLogger(), false, "url")
 	if after := sessionTotals(); after["remote"] != before["remote"] {
 		t.Fatalf("an auxiliary session was counted: %v -> %v", before, after)
 	}
-	sessionEndWait(context.Background(), flaps, 5*time.Second, false, "main", NewNoopLogger(), true)
+	sessionEndWait(context.Background(), flaps, 5*time.Second, false, "main", NewNoopLogger(), true, "url")
 	if after := sessionTotals(); after["remote"]-before["remote"] != 1 {
 		t.Fatalf("the main transport's session was not counted: %v -> %v", before, after)
 	}
@@ -131,16 +133,16 @@ func TestTransportCloseCause_ClassifiesTheErrorsALoopSees(t *testing.T) {
 	}
 	before := map[string]int64{}
 	for _, cause := range TransportCloseCausesNow() {
-		before[cause.Mode+cause.Side+cause.Cause] = cause.Count
+		before[cause.Source+cause.Mode+cause.Side+cause.Cause] = cause.Count
 	}
-	recordTransportCloseCause("h1", "read", io.EOF)
-	recordTransportCloseCause("h3", "write", os.ErrDeadlineExceeded)
-	recordTransportCloseCause("h1", "read", nil) // no error: not counted
+	recordTransportCloseCause("url", "h1", "read", io.EOF)
+	recordTransportCloseCause("file", "h3", "write", os.ErrDeadlineExceeded)
+	recordTransportCloseCause("url", "h1", "read", nil) // no error: not counted
 	for _, cause := range TransportCloseCausesNow() {
-		delta := cause.Count - before[cause.Mode+cause.Side+cause.Cause]
+		delta := cause.Count - before[cause.Source+cause.Mode+cause.Side+cause.Cause]
 		want := int64(0)
-		if (cause.Mode == "h1" && cause.Side == "read" && cause.Cause == "eof") ||
-			(cause.Mode == "h3" && cause.Side == "write" && cause.Cause == "timeout") {
+		if (cause.Source == "url" && cause.Mode == "h1" && cause.Side == "read" && cause.Cause == "eof") ||
+			(cause.Source == "file" && cause.Mode == "h3" && cause.Side == "write" && cause.Cause == "timeout") {
 			want = 1
 		}
 		if delta != want {

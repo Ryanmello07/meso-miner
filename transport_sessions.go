@@ -44,9 +44,47 @@ var sessionLifetimeBounds = []time.Duration{
 	15 * time.Minute, 30 * time.Minute, time.Hour, 6 * time.Hour,
 }
 
-var sessionLifetimeCounts [sessionEndReasonCount][9]atomic.Int64
+// proxy sources: where a transport's proxy came from. The provider tags each
+// proxy "file", "internal" or "url" at launch and reload; a transport with no
+// proxy is "direct"; one the provider never tagged is "unknown".
+var proxySourceNames = []string{"file", "internal", "url", "direct", "unknown"}
 
-func recordSessionEnd(ctx context.Context, lived time.Duration, clientLimitClosed bool) {
+var proxySourceLabels sync.Map // proxy identity key -> source name
+
+// SetProxySource records where a proxy came from, keyed by ProxySettings.Key().
+func SetProxySource(key string, source string) {
+	if source == "" {
+		return
+	}
+	proxySourceLabels.Store(key, source)
+}
+
+func proxySourceIndex(source string) int {
+	for i, name := range proxySourceNames {
+		if name == source {
+			return i
+		}
+	}
+	return len(proxySourceNames) - 1
+}
+
+// proxySourceLabel names the source of this transport's proxy.
+func (self *PlatformTransport) proxySourceLabel() string {
+	if self.clientStrategy == nil || self.clientStrategy.settings == nil || self.clientStrategy.settings.ProxySettings == nil {
+		return "direct"
+	}
+	if v, ok := proxySourceLabels.Load(self.clientStrategy.settings.ProxySettings.Key()); ok {
+		if label, ok := v.(string); ok {
+			return label
+		}
+	}
+	return "unknown"
+}
+
+var sessionLifetimeCounts [5][sessionEndReasonCount][9]atomic.Int64
+
+func recordSessionEnd(ctx context.Context, lived time.Duration, clientLimitClosed bool, source string) {
+	sourceIndex := proxySourceIndex(source)
 	reason := sessionEndRemote
 	switch {
 	case ctx.Err() != nil:
@@ -59,37 +97,43 @@ func recordSessionEnd(ctx context.Context, lived time.Duration, clientLimitClose
 	}
 	for i, bound := range sessionLifetimeBounds {
 		if lived <= bound {
-			sessionLifetimeCounts[reason][i].Add(1)
+			sessionLifetimeCounts[sourceIndex][reason][i].Add(1)
 			return
 		}
 	}
-	sessionLifetimeCounts[reason][len(sessionLifetimeBounds)].Add(1)
+	sessionLifetimeCounts[sourceIndex][reason][len(sessionLifetimeBounds)].Add(1)
 }
 
-// SessionEndStats is, per end reason, the cumulative count of ended sessions by
-// lifetime bucket (bounds in seconds, +Inf last).
+// SessionEndStats is, per proxy source and end reason, the cumulative count of
+// ended sessions by lifetime bucket (bounds in seconds, +Inf last).
 type SessionEndStats struct {
 	BoundsSeconds []float64
-	// Cumulative is keyed by SessionEndReasons.
-	Cumulative map[string][]int64
+	// Cumulative is keyed by source then SessionEndReasons.
+	Cumulative map[string]map[string][]int64
 }
 
 func SessionEndStatsNow() SessionEndStats {
-	stats := SessionEndStats{Cumulative: map[string][]int64{}}
+	stats := SessionEndStats{Cumulative: map[string]map[string][]int64{}}
 	for _, bound := range sessionLifetimeBounds {
 		stats.BoundsSeconds = append(stats.BoundsSeconds, bound.Seconds())
 	}
-	for reason, name := range sessionEndReasonNames {
-		total := int64(0)
-		cumulative := make([]int64, 0, len(sessionLifetimeCounts[reason]))
-		for i := range sessionLifetimeCounts[reason] {
-			total += sessionLifetimeCounts[reason][i].Load()
-			cumulative = append(cumulative, total)
+	for sourceIndex, sourceName := range proxySourceNames {
+		stats.Cumulative[sourceName] = map[string][]int64{}
+		for reason, name := range sessionEndReasonNames {
+			total := int64(0)
+			cumulative := make([]int64, 0, len(sessionLifetimeCounts[sourceIndex][reason]))
+			for i := range sessionLifetimeCounts[sourceIndex][reason] {
+				total += sessionLifetimeCounts[sourceIndex][reason][i].Load()
+				cumulative = append(cumulative, total)
+			}
+			stats.Cumulative[sourceName][name] = cumulative
 		}
-		stats.Cumulative[name] = cumulative
 	}
 	return stats
 }
+
+// ProxySourceNames lists the proxy source labels in a stable order.
+func ProxySourceNames() []string { return append([]string(nil), proxySourceNames...) }
 
 func SessionEndReasons() []string { return append([]string(nil), sessionEndReasonNames[:]...) }
 
@@ -165,7 +209,7 @@ var transportCloseCauseNames = []string{
 	"timeout", "reset", "eof", "closed_local", "other",
 }
 
-var transportCloseCauseCounts [2][2][12]atomic.Int64 // [h1=0,h3=1][read=0,write=1][cause]
+var transportCloseCauseCounts [5][2][2][12]atomic.Int64 // [source][h1=0,h3=1][read=0,write=1][cause]
 
 func classifyTransportCloseCause(err error) int {
 	var closeErr *websocket.CloseError
@@ -200,7 +244,7 @@ func classifyTransportCloseCause(err error) int {
 	return 11
 }
 
-func recordTransportCloseCause(mode string, side string, err error) {
+func recordTransportCloseCause(source string, mode string, side string, err error) {
 	if err == nil {
 		return
 	}
@@ -211,26 +255,29 @@ func recordTransportCloseCause(mode string, side string, err error) {
 	if side == "write" {
 		sideIndex = 1
 	}
-	transportCloseCauseCounts[modeIndex][sideIndex][classifyTransportCloseCause(err)].Add(1)
+	transportCloseCauseCounts[proxySourceIndex(source)][modeIndex][sideIndex][classifyTransportCloseCause(err)].Add(1)
 }
 
 // TransportCloseCause is the count of transport read or write errors of one kind.
 type TransportCloseCause struct {
-	Mode  string
-	Side  string
-	Cause string
-	Count int64
+	Source string
+	Mode   string
+	Side   string
+	Cause  string
+	Count  int64
 }
 
 func TransportCloseCausesNow() []TransportCloseCause {
 	var causes []TransportCloseCause
-	for mode, modeName := range []string{"h1", "h3"} {
-		for side, sideName := range []string{"read", "write"} {
-			for cause, causeName := range transportCloseCauseNames {
-				causes = append(causes, TransportCloseCause{
-					Mode: modeName, Side: sideName, Cause: causeName,
-					Count: transportCloseCauseCounts[mode][side][cause].Load(),
-				})
+	for sourceIndex, sourceName := range proxySourceNames {
+		for mode, modeName := range []string{"h1", "h3"} {
+			for side, sideName := range []string{"read", "write"} {
+				for cause, causeName := range transportCloseCauseNames {
+					causes = append(causes, TransportCloseCause{
+						Source: sourceName, Mode: modeName, Side: sideName, Cause: causeName,
+						Count: transportCloseCauseCounts[sourceIndex][mode][side][cause].Load(),
+					})
+				}
 			}
 		}
 	}
