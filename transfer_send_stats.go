@@ -21,6 +21,10 @@ var transferSendCounters struct {
 
 	deferredFrames atomic.Int64
 	deferredBytes  atomic.Int64
+
+	wouldDeferFrames atomic.Int64
+	wouldDeferBytes  atomic.Int64
+	earnedBytes      atomic.Int64
 }
 
 // TransferSendStats is a snapshot of the process-wide transfer send counters.
@@ -34,6 +38,12 @@ type TransferSendStats struct {
 	// ResendDeferred counts resends the retry budget refused to send yet.
 	ResendDeferredFrames int64
 	ResendDeferredBytes  int64
+
+	// ResendWouldDefer counts resends shadow mode sent anyway that enforce would
+	// have refused. BudgetEarnedBytes is acknowledged bytes credited to the budget.
+	ResendWouldDeferFrames int64
+	ResendWouldDeferBytes  int64
+	BudgetEarnedBytes      int64
 }
 
 func TransferSendStatsNow() TransferSendStats {
@@ -47,12 +57,26 @@ func TransferSendStatsNow() TransferSendStats {
 	}
 	s.ResendDeferredFrames = transferSendCounters.deferredFrames.Load()
 	s.ResendDeferredBytes = transferSendCounters.deferredBytes.Load()
+	s.ResendWouldDeferFrames = transferSendCounters.wouldDeferFrames.Load()
+	s.ResendWouldDeferBytes = transferSendCounters.wouldDeferBytes.Load()
+	s.BudgetEarnedBytes = transferSendCounters.earnedBytes.Load()
 	return s
 }
 
 func recordTransferFirstSend(byteCount int) {
 	transferSendCounters.firstFrames.Add(1)
 	transferSendCounters.firstBytes.Add(int64(byteCount))
+}
+
+func recordTransferResendWouldDefer(byteCount int) {
+	transferSendCounters.wouldDeferFrames.Add(1)
+	transferSendCounters.wouldDeferBytes.Add(int64(byteCount))
+}
+
+// recordTransferAckedBytes credits acknowledged bytes to the resend budget.
+func recordTransferAckedBytes(byteCount int) {
+	transferSendCounters.earnedBytes.Add(int64(byteCount))
+	transferResendBudget.earn(byteCount)
 }
 
 func recordTransferResendDeferred(byteCount int) {
