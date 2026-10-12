@@ -1334,6 +1334,7 @@ These explain a proxy that is not signing in. Per-attempt `[t]auth error` lines 
 [proxy][cleanup] warning: could not read proxy.state: <error>
 [proxy-quality] dropped 12 under-performing proxies (kept best 1800 of 2012)
 [hourly-maintenance] reconnecting stalled transports: down=14 dead=9 degraded=5 connecting=3
+[pulse] skipped hourly reset (backend degraded)
 [proxy][supervisor] loop reload_watchdog ended unexpectedly, restarting in 5s
 ❤️ [health][pool][leak] tag=0 caller=ip.go:812 leaked=1840 returned=97.10% (95.30% reused)
 [turbo] profile=turbo-v8 window=8MiB resendQueue=16MiB
@@ -1355,6 +1356,7 @@ These explain a proxy that is not signing in. Per-attempt `[t]auth error` lines 
 | `[proxy][cleanup] automatically removed N ...` | The URL-source reaper removed proxies that stayed dead, inactive or degraded past the threshold from `proxy_url.json`. `scope` is `url` (only URL-sourced) or `all`. |
 | `[proxy-quality] dropped N under-performing proxies` | The degraded-proxy reaper ranks degraded proxies by lifetime contribution (traffic and contracts acquired) and released the worst ones, keeping the best. |
 | `[hourly-maintenance] reconnecting stalled transports` | Once an hour the provider nudges transports that are down, dead, degraded or still connecting to reconnect without a restart. The counts are the health snapshot at that moment. |
+| `[pulse] skipped hourly reset (backend degraded)` | The hourly nudge was skipped because the backend is degraded, or the connect budget was throttled within the last 10 minutes. Resetting every failing proxy's backoff then would only send them all back into the outage at once. The next hour tries again. |
 | `[proxy][supervisor] loop X ended unexpectedly, restarting` | A supervised background loop (`reload_watchdog`, `pressure_monitor`, `pool_controller`, `thrash_watchdog`, `degraded_proxy_reaper`) exited and the supervisor restarted it after a backoff. One line is fine; a stream of them names a loop that keeps failing. |
 | `[health][pool][leak] tag=... caller=...` | With a pool verdict of `watch` or `leak`, the three call sites holding the most buffers. A hint for where to look, printed next to the `[health][pool]` line. |
 | `[turbo] profile=...` | The turbo profile in effect and the transfer window and resend queue it set. |

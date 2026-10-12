@@ -3159,13 +3159,8 @@ func provide(opts docopt.Opts) {
 			case <-ctx.Done():
 				return
 			case <-time.After(1 * time.Hour):
-				if connect.ProxyHealthCount() > 0 {
-					_, dead, degraded, _, connecting := connect.ProxyHealthSnapshot()
-					down := len(dead) + len(degraded)
-					tlog("[hourly-maintenance] reconnecting stalled transports: down=%d dead=%d degraded=%d connecting=%d\n",
-						down, len(dead), len(degraded), len(connecting))
-				}
-				connect.TriggerPulse()
+				// skipped while the backend is degraded (see hourlyPulse)
+				hourlyPulse()
 			}
 		}
 	}()
