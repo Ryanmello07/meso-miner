@@ -2,6 +2,8 @@ package connect
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -45,6 +47,9 @@ func recordSessionEnd(ctx context.Context, lived time.Duration, clientLimitClose
 	case clientLimitClosed:
 		reason = sessionEndClientLimit
 	}
+	if reason == sessionEndRemote {
+		remoteCloseBursts.note(time.Now())
+	}
 	for i, bound := range sessionLifetimeBounds {
 		if lived <= bound {
 			sessionLifetimeCounts[reason][i].Add(1)
@@ -80,3 +85,63 @@ func SessionEndStatsNow() SessionEndStats {
 }
 
 func SessionEndReasons() []string { return append([]string(nil), sessionEndReasonNames[:]...) }
+
+// Bursts of simultaneous remote closes.
+//
+// When the platform cycles its connection servers (a rollout) every provider
+// transport is dropped at once and redials, and each redial earns a speed test.
+// That shows as many sessions ending "remote" within seconds. A burst is a
+// window of remoteCloseBurstWindow with at least remoteCloseBurstMin remote
+// closes; the worst one seen is kept and each is logged, at most once a minute.
+
+const (
+	remoteCloseBurstWindow = 10 * time.Second
+	remoteCloseBurstMin    = 50
+	remoteCloseLogEvery    = time.Minute
+)
+
+type remoteCloseBurstDetector struct {
+	mutex     sync.Mutex
+	window    []time.Time
+	bursts    int64
+	maxBurst  int64
+	lastLogAt time.Time
+	emit      func(string)
+}
+
+var remoteCloseBursts = &remoteCloseBurstDetector{emit: emitGovernLine}
+
+func (self *remoteCloseBurstDetector) note(now time.Time) {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	cutoff := now.Add(-remoteCloseBurstWindow)
+	keep := 0
+	for keep < len(self.window) && self.window[keep].Before(cutoff) {
+		keep++
+	}
+	self.window = append(self.window[keep:], now)
+	count := int64(len(self.window))
+	if count < remoteCloseBurstMin {
+		return
+	}
+	if count == remoteCloseBurstMin {
+		self.bursts += 1
+	}
+	if self.maxBurst < count {
+		self.maxBurst = count
+	}
+	if self.lastLogAt.IsZero() || remoteCloseLogEvery <= now.Sub(self.lastLogAt) {
+		self.lastLogAt = now
+		self.emit(fmt.Sprintf(
+			"[t]mass disconnect: %d transports closed by the platform or network within %s; each redial costs about 1.75 MB of platform speed tests",
+			count, remoteCloseBurstWindow,
+		))
+	}
+}
+
+// RemoteCloseBurstsNow returns how many bursts were seen and the largest one.
+func RemoteCloseBurstsNow() (bursts int64, largest int64) {
+	remoteCloseBursts.mutex.Lock()
+	defer remoteCloseBursts.mutex.Unlock()
+	return remoteCloseBursts.bursts, remoteCloseBursts.maxBurst
+}

@@ -65,3 +65,37 @@ func TestSessionEnd_AuxiliaryTransportIsNotCounted(t *testing.T) {
 		t.Fatalf("the main transport's session was not counted: %v -> %v", before, after)
 	}
 }
+
+// Many remote closes inside a few seconds are one burst, logged once; the same
+// number spread over minutes is not.
+func TestRemoteCloseBursts_DetectsSimultaneousClosesNotAScatter(t *testing.T) {
+	var lines []string
+	detector := &remoteCloseBurstDetector{emit: func(line string) { lines = append(lines, line) }}
+	base := time.Unix(5_000_000, 0)
+
+	for i := 0; i < remoteCloseBurstMin*3; i++ { // spread over ~4 minutes: never a burst
+		detector.note(base.Add(time.Duration(i) * 1600 * time.Millisecond))
+	}
+	if bursts, _ := func() (int64, int64) { return detector.bursts, detector.maxBurst }(); bursts != 0 || len(lines) != 0 {
+		t.Fatalf("a scatter was reported as a burst: bursts=%d lines=%v", bursts, lines)
+	}
+
+	burstStart := base.Add(time.Hour)
+	for i := 0; i < 80; i++ { // 80 closes inside 4 seconds
+		detector.note(burstStart.Add(time.Duration(i) * 50 * time.Millisecond))
+	}
+	if detector.bursts != 1 || detector.maxBurst != 80 {
+		t.Fatalf("burst accounting: bursts=%d largest=%d", detector.bursts, detector.maxBurst)
+	}
+	if len(lines) != 1 || !containsAll(lines[0], "mass disconnect") {
+		t.Fatalf("a burst must be logged once: %v", lines)
+	}
+	// a second burst a minute later is a second burst and logs again
+	second := burstStart.Add(2 * time.Minute)
+	for i := 0; i < remoteCloseBurstMin; i++ {
+		detector.note(second.Add(time.Duration(i) * 10 * time.Millisecond))
+	}
+	if detector.bursts != 2 || len(lines) != 2 {
+		t.Fatalf("second burst: bursts=%d lines=%d", detector.bursts, len(lines))
+	}
+}

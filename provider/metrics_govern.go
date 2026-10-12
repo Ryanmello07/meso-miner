@@ -106,6 +106,8 @@ func writeGovernMetrics(b *strings.Builder) {
 		}
 		fmt.Fprintf(b, "urnet_transport_session_lifetime_seconds_bucket{reason=\"%s\",le=\"+Inf\"} %d\nurnet_transport_session_lifetime_seconds_count{reason=\"%s\"} %d\n", reason, cumulative[len(cumulative)-1], reason, cumulative[len(cumulative)-1])
 	}
+	bursts, largestBurst := connect.RemoteCloseBurstsNow()
+	fmt.Fprintf(b, "# HELP urnet_transport_mass_disconnects_total Bursts of 50 or more transports closed by the platform or network within 10 seconds, the signature of a platform rollout cycling connections.\n# TYPE urnet_transport_mass_disconnects_total counter\nurnet_transport_mass_disconnects_total %d\n# HELP urnet_transport_mass_disconnect_largest The most transports closed within one 10 second window.\n# TYPE urnet_transport_mass_disconnect_largest gauge\nurnet_transport_mass_disconnect_largest %d\n", bursts, largestBurst)
 	fmt.Fprintf(b, "# HELP urnet_transfer_resend_depth_total Resends by how many times the item had already been sent.\n# TYPE urnet_transfer_resend_depth_total counter\n")
 	for i, label := range []string{"2", "3-4", "5-8", "9+"} {
 		fmt.Fprintf(b, "urnet_transfer_resend_depth_total{send=\"%s\"} %d\n", label, xs.ResendDepth[i])
