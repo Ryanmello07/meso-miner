@@ -7,9 +7,10 @@ import (
 )
 
 // The protection mode shared by the outage protections that ship on this line.
-// URNETWORK_GOVERN selects it; unset, empty and unrecognised values all mean
-// enforce, so a typo can never silently disable a protection. Only an explicit
-// off or shadow turns it down.
+// URNETWORK_GOVERN selects it. The shipped default is shadow: unset, empty and
+// unrecognised values observe and log what enforce would do without acting, so a
+// protection can be watched before it is relied on. Only an explicit enforce
+// acts, and an explicit off disables it.
 
 type governMode int32
 
@@ -18,7 +19,7 @@ const (
 	governOff governMode = iota
 	// governShadow: observe and report only, never refuse or delay.
 	governShadow
-	// governEnforce: the protections act. The default.
+	// governEnforce: the protections act. An explicit opt-in on this line.
 	governEnforce
 )
 
@@ -28,12 +29,12 @@ func init() { governModeValue.Store(int32(parseGovernMode(os.Getenv("URNETWORK_G
 
 func parseGovernMode(raw string) governMode {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "enforce", "on", "1", "true", "yes":
+		return governEnforce
 	case "off", "0", "false", "no":
 		return governOff
-	case "shadow":
-		return governShadow
 	}
-	return governEnforce
+	return governShadow
 }
 
 func currentGovernMode() governMode { return governMode(governModeValue.Load()) }
