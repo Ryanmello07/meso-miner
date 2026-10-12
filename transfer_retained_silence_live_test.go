@@ -2,6 +2,7 @@ package connect
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,12 +22,13 @@ import (
 func init() { MessagePoolReturn(MessagePoolGet(1)) }
 
 type retainedLiveRig struct {
-	seq     *SendSequence
-	wires   atomic.Int64
-	exited  chan struct{}
-	mu      sync.Mutex
-	results map[uint64][]error
-	items   map[uint64]*sendItem
+	seq      *SendSequence
+	wires    atomic.Int64
+	panicked atomic.Value
+	exited   chan struct{}
+	mu       sync.Mutex
+	results  map[uint64][]error
+	items    map[uint64]*sendItem
 }
 
 func (self *retainedLiveRig) failures(sequenceNumber uint64) []error {
@@ -132,10 +134,21 @@ func startRetainedLiveRig(
 		rig.seq.resendQueue.Add(item)
 	}
 
-	go HandleError(func() {
-		defer close(rig.exited)
-		rig.seq.Run()
+	// an unexpected panic in Run must fail the test, not look like a clean exit
+	t.Cleanup(func() {
+		if v := rig.panicked.Load(); v != nil {
+			t.Errorf("SendSequence.Run panicked: %v", v)
+		}
 	})
+	go func() {
+		defer close(rig.exited)
+		defer func() {
+			if r := recover(); r != nil {
+				rig.panicked.Store(fmt.Sprint(r))
+			}
+		}()
+		rig.seq.Run()
+	}()
 	return rig
 }
 
