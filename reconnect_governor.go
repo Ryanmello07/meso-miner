@@ -116,6 +116,9 @@ type attemptStats struct {
 	dials atomic.Int64
 	rx    atomic.Int64
 	tx    atomic.Int64
+	// done is set once the attempt has finished. Bytes on its connection after
+	// that are the session, not the handshake.
+	done atomic.Bool
 }
 
 type attemptStatsKey struct{}
@@ -265,6 +268,10 @@ func (self *connectGovernor) bucket() *govBucket {
 // recordAttempt records one finished connect attempt. Local teardown is not an
 // outcome and is dropped.
 func (self *connectGovernor) recordAttempt(class connectClass, stats *attemptStats) {
+	if stats != nil {
+		stats.done.Store(true)
+		recordConnectAttemptBytes(class, stats.rx.Load(), stats.tx.Load())
+	}
 	if class == connectCanceled {
 		return
 	}

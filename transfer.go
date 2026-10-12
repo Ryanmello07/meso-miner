@@ -1795,6 +1795,9 @@ type SendBuffer struct {
 	sendSequences              map[sendSequenceId]*SendSequence
 	sendSequencesByDestination map[TransferPath]map[*SendSequence]bool
 	sendSequenceDestinations   map[*SendSequence]map[TransferPath]bool
+
+	// destination -> *destinationYield, see transfer_dest_yield.go
+	yields sync.Map
 }
 
 func NewSendBuffer(ctx context.Context,
@@ -2773,6 +2776,8 @@ func resendBackoff(scaledRtt time.Duration, sendCount int, maxResendInterval tim
 }
 
 func (self *SendSequence) Run() {
+	exitReason := sendExitClosed
+	defer func() { recordSendSequenceExit(exitReason) }()
 	defer func() {
 		if r := recover(); r != nil {
 			self.log.Errorf("[s]%s->%s...%s s(%s) abnormal exit =  %s\n", self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId, r)
@@ -2805,7 +2810,7 @@ func (self *SendSequence) Run() {
 				}
 			}
 			if item.retainAfterAckTimeout {
-				self.retainedByteCount -= item.MessageByteCount()
+				self.releaseRetained(item)
 			}
 			// Settle the contract without crediting ackedByteCount — these
 			// bytes were never delivered (H1).
@@ -2817,6 +2822,7 @@ func (self *SendSequence) Run() {
 			safeAck(item.ackCallback, errors.New("Send sequence closed."))
 			item.messagePoolReturn()
 		}
+		transferMoreCounters.retainedBytes.Add(-int64(self.retainedByteCount))
 		self.retainedByteCount = 0
 
 		// close contract — after the drain above so unack()'s correction to
@@ -2947,6 +2953,7 @@ func (self *SendSequence) Run() {
 				itemAckTimeout := item.sendTime.Add(self.sendBufferSettings.AckTimeout).Sub(sendTime)
 				if itemAckTimeout <= 0 && !item.retainAfterAckTimeout {
 					self.log.V(1).Infof("[s]%s->%s...%s s(%s) exit ack timeout (%s)\n", self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId, self.sendBufferSettings.AckTimeout)
+					exitReason = sendExitAckTimeout
 					return
 				}
 				if !item.retainAfterAckTimeout && itemAckTimeout < timeout {
@@ -2977,6 +2984,7 @@ func (self *SendSequence) Run() {
 						// retained-byte budget, contract unack, error callback,
 						// and pool-return — all in one idempotent call.
 						self.dropItem(item, err)
+						exitReason = sendExitHeadError
 						return
 					}
 					// setHead succeeded — now safe to remove from resendQueue.
@@ -3078,6 +3086,7 @@ func (self *SendSequence) Run() {
 				}
 				if disposition.transportType != "" || disposition.unreliable || disposition.reliable {
 					self.observeCarrierWrite(item, disposition)
+					self.noteYieldSend(len(resendBytes))
 				}
 
 				recordTransferResend(len(resendBytes), item.sendCount+1)
@@ -3179,6 +3188,7 @@ func (self *SendSequence) Run() {
 			idleTimer.Reset(timeout)
 			select {
 			case <-self.ctx.Done():
+				exitReason = sendExitCancelled
 				return
 			case <-ackSnapshot.ackNotify:
 			case <-idleTimer.C:
@@ -3196,6 +3206,7 @@ func (self *SendSequence) Run() {
 					if done {
 						// close the sequence
 						self.log.V(2).Infof("[s]%s->%s...%s s(%s) exit idle timeout\n", self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId)
+						exitReason = sendExitIdle
 						return
 					}
 				}
@@ -3204,6 +3215,7 @@ func (self *SendSequence) Run() {
 			idleTimer.Reset(timeout)
 			select {
 			case <-self.ctx.Done():
+				exitReason = sendExitCancelled
 				return
 			case <-ackSnapshot.ackNotify:
 			case sendPack, ok := <-self.packs:
@@ -3221,6 +3233,7 @@ func (self *SendSequence) Run() {
 					self.log.Errorf("[s]%s->%s...%s s(%s) exit could not create contract.\n", self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId)
 					safeAck(sendPack.AckCallback, errors.New("No contract"))
 					MessagePoolReturn(sendPack.Frame.MessageBytes)
+					exitReason = sendExitNoContract
 					return
 				}
 			case <-idleTimer.C:
@@ -3238,6 +3251,7 @@ func (self *SendSequence) Run() {
 					if done {
 						// close the sequence
 						self.log.V(2).Infof("[s]%s->%s...%s s(%s) exit idle timeout\n", self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId)
+						exitReason = sendExitIdle
 						return
 					}
 				}
@@ -3741,6 +3755,8 @@ func (self *SendSequence) sendWithSetContract(
 	}
 	recordTransferFirstSend(len(item.transferFrameBytes))
 	if err == nil {
+		// a write that never reached a carrier says nothing about the destination
+		self.noteYieldSend(len(item.transferFrameBytes))
 		self.observeCarrierWrite(item, disposition)
 	}
 
@@ -3761,7 +3777,10 @@ func (self *SendSequence) sendWithSetContract(
 		// the Add so the invariant "charge ⇔ in queue" cannot desync.
 		if item.retainAfterAckTimeout {
 			retainCapByteCount := ByteCount(float64(self.sendBufferSettings.ResendQueueMaxByteCount) * 0.25)
-			if self.retainedByteCount+messageByteCount > retainCapByteCount {
+			// charged at what the queue holds (the wire frame), the same unit the
+			// cap is a fraction of
+			retainCharge := item.MessageByteCount()
+			if self.retainedByteCount+retainCharge > retainCapByteCount {
 				item.retainAfterAckTimeout = false
 				item.backstopDeadline = time.Time{}
 				// M3/L5: retention was denied by the R-5 cap. The item now
@@ -3781,7 +3800,9 @@ func (self *SendSequence) sendWithSetContract(
 						retainCapByteCount, item.sendCount))
 				}
 			} else {
-				self.retainedByteCount += messageByteCount
+				item.retainedCharge = retainCharge
+				self.retainedByteCount += retainCharge
+				transferMoreCounters.retainedBytes.Add(int64(retainCharge))
 			}
 		}
 		self.sendItems = append(self.sendItems, item)
@@ -3923,6 +3944,8 @@ func (self *SendSequence) receiveAck(messageId Id, selective bool, tag *protocol
 		if !item.selectiveAcked {
 			self.releaseUnreliableFlight(item)
 		}
+		// a selective ack proves the destination is receiving
+		self.noteYieldLive()
 		item.resendTime = time.Now().Add(self.sendBufferSettings.SelectiveAckTimeout)
 		item.sendTime = time.Now()
 		item.selectiveAcked = true
@@ -3987,7 +4010,7 @@ func (self *SendSequence) receiveAck(messageId Id, selective bool, tag *protocol
 		// A retained item acknowledged here leaves the queue permanently —
 		// release its share of the R-5 retained-byte budget.
 		if removed.retainAfterAckTimeout {
-			self.retainedByteCount -= removed.MessageByteCount()
+			self.releaseRetained(removed)
 			if v := self.log.V(1); v.Enabled() {
 				v.Infof("[s]%s->%s...%s s(%s) retain acked — retention saved %x (%dB held %s past ack timeout, sendCount=%d)\n",
 					self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId,
@@ -4022,13 +4045,14 @@ func (self *SendSequence) ackItem(item *sendItem) {
 	self.ackItemCounted(item, true)
 }
 
-// ackItemCounted settles an acknowledged item. countAck is false for a send that
-// asked for no acknowledgement and is settled locally: that is not the far end
-// confirming anything, so it earns no resend budget.
-func (self *SendSequence) ackItemCounted(item *sendItem, countAck bool) {
+// ackItemCounted settles an acknowledged item. countYield is false for a send
+// that asked for no acknowledgement and is settled locally: that is not the far
+// end confirming anything.
+func (self *SendSequence) ackItemCounted(item *sendItem, countYield bool) {
 	// the far end confirmed these bytes arrived; that is what earns resend budget
-	if countAck {
+	if countYield {
 		recordTransferAckedBytes(len(item.transferFrameBytes))
+		self.noteYieldAck(len(item.transferFrameBytes))
 	}
 	self.releaseUnreliableFlight(item)
 	if item.contractId != nil {
@@ -4084,7 +4108,7 @@ func (self *SendSequence) dropItem(item *sendItem, err error) {
 
 	// release retained byte budget
 	if item.retainAfterAckTimeout {
-		self.retainedByteCount -= item.MessageByteCount()
+		self.releaseRetained(item)
 	}
 
 	// settle contract bytes and fire the error callback + pool-return.
@@ -4484,6 +4508,13 @@ type sendItem struct {
 	// resend queue; dropping them at the ack deadline would lose the bytes
 	// permanently.
 	retainAfterAckTimeout bool
+	// retainedCharge is exactly what was added to the sequence's retained-byte
+	// budget when this item was admitted as retained, so exactly that is released
+	// later. The wire frame can change size (a head rewrite) and is larger than the
+	// payload, so releasing a recomputed size drifts the budget negative and
+	// loosens the cap.
+	retainedCharge   ByteCount
+	retainedReleased bool
 	// backstopDeadline is the absolute time after which a retained item is
 	// force-dropped even without a flow-teardown signal. Set to sendTime +
 	// 10*AckTimeout at creation. Prevents indefinite queue occupancy on dead
@@ -5159,6 +5190,14 @@ func (self *ReceiveSequence) Run() {
 					MessagePoolShareReadOnly(wrapped),
 					self.receiveBufferSettings.WriteTimeout,
 				)
+			}
+			ackWrite := c
+			c = func() error {
+				err := ackWrite()
+				if err == nil {
+					recordTransferAckSent(len(transferFrameBytes))
+				}
+				return err
 			}
 			if self.log.V(2).Enabled() {
 				TraceWithReturn(
@@ -7020,3 +7059,46 @@ func MessageByteCount(frames []*protocol.Frame) ByteCount {
 // 	}
 // 	return messages
 // }
+
+// noteYieldSend records a frame written to this sequence's destination.
+func (self *SendSequence) noteYieldSend(byteCount int) {
+	control := self.destination.IsControlDestination()
+	recordTransferDestinationSend(control, byteCount)
+	if self.sendBuffer == nil || control {
+		return
+	}
+	self.sendBuffer.yieldFor(self.destination.DestinationId).noteSend(byteCount, time.Now().UnixNano())
+}
+
+// noteYieldAck records a frame the destination acknowledged.
+func (self *SendSequence) noteYieldAck(byteCount int) {
+	if self.sendBuffer == nil || self.destination.IsControlDestination() {
+		return
+	}
+	self.sendBuffer.yieldFor(self.destination.DestinationId).noteAck(byteCount, time.Now().UnixNano())
+}
+
+// noteYieldLive records proof the destination is receiving without counting bytes.
+func (self *SendSequence) noteYieldLive() {
+	if self.sendBuffer == nil || self.destination.IsControlDestination() {
+		return
+	}
+	self.sendBuffer.yieldFor(self.destination.DestinationId).noteLive(time.Now().UnixNano())
+}
+
+// releaseRetained gives back exactly what admission charged for this item, once.
+// An item that was never charged through admission (built directly) releases its
+// current queue size, the historical behaviour.
+func (self *SendSequence) releaseRetained(item *sendItem) {
+	if item.retainedReleased {
+		return
+	}
+	item.retainedReleased = true
+	charge := item.retainedCharge
+	if charge == 0 {
+		charge = item.MessageByteCount()
+	}
+	item.retainedCharge = 0
+	self.retainedByteCount -= charge
+	transferMoreCounters.retainedBytes.Add(-int64(charge))
+}

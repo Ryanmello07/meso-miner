@@ -1084,6 +1084,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 					err := ws.WriteMessage(websocket.BinaryMessage, message)
 					MessagePoolReturn(message)
 					if err != nil {
+						recordTransportCloseCause(self.proxySourceLabel(), "h1", "write", err)
 						// note that for websocket a dealine timeout cannot be recovered
 						if ok, suppressed := shouldLogWriteErr(); ok {
 							if suppressed > 0 {
@@ -1111,6 +1112,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 								// note that for websocket a dealine timeout cannot be recovered
 								return
 							}
+							transportPingFrames.tx.Add(1)
 						case message, ok := <-controlSend:
 							if !ok {
 								return
@@ -1156,6 +1158,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 								// note that for websocket a dealine timeout cannot be recovered
 								return
 							}
+							transportPingFrames.tx.Add(1)
 						case message, ok := <-controlSend:
 							if !ok {
 								return
@@ -1196,6 +1199,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 					ws.SetReadDeadline(time.Now().Add(self.settings.ReadTimeout))
 					messageType, r, err := ws.NextReader()
 					if err != nil {
+						recordTransportCloseCause(self.proxySourceLabel(), "h1", "read", err)
 						self.log.V(2).Infof("[tr]%s<- error = %s\n", clientId, err)
 						if isClientLimitCloseError(err) {
 							self.noteClientLimitClose(TransportModeH1, auth.ProvideIntent, clientLimitResetGeneration)
@@ -1208,6 +1212,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 
 						message, err := MessagePoolReadAll(r)
 						if err != nil {
+							recordTransportCloseCause(self.proxySourceLabel(), "h1", "read", err)
 							self.log.V(2).Infof("[tr]%s<- error = %s\n", clientId, err)
 							return
 						}
@@ -1325,7 +1330,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 		// streak, so without this wait a slow backend that accepts the websocket
 		// and then drops it makes every proxy reconnect again immediately
 		lived := time.Since(sessionStart)
-		if flapWait := sessionEndWait(self.ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, true); 0 < flapWait {
+		if flapWait := sessionEndWait(self.ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, true, self.proxySourceLabel()); 0 < flapWait {
 			select {
 			case <-self.ctx.Done():
 				return
@@ -1371,7 +1376,11 @@ func (self *h3ConnStream) close() {
 // platform enforcing the client limit. countsAsHealth is false for an auxiliary
 // transport beside H1, which is never a health signal; it is still held back so it
 // cannot redial in a tight loop.
-func sessionEndWait(ctx context.Context, flaps *flapGuard, lived time.Duration, clientLimitClosed bool, clientId string, log Logger, countsAsHealth bool) time.Duration {
+func sessionEndWait(ctx context.Context, flaps *flapGuard, lived time.Duration, clientLimitClosed bool, clientId string, log Logger, countsAsHealth bool, proxySource string) time.Duration {
+	if countsAsHealth {
+		// only the main transport: an auxiliary H3 beside H1 would double count
+		recordSessionEnd(ctx, lived, clientLimitClosed, proxySource)
+	}
 	if countsAsHealth && flaps.isYoung(lived) && ctx.Err() == nil && !clientLimitClosed {
 		if flaps.everStable {
 			connectGov.recordProvenEarlyDeath()
@@ -2225,6 +2234,7 @@ func (self *PlatformTransport) runH3(ptMode TransportMode, initialTimeout time.D
 					}
 					message, err := framer.Read(stream)
 					if err != nil {
+						recordTransportCloseCause(self.proxySourceLabel(), "h3", "read", err)
 						self.log.Infof("[tr]%s<- error = %s\n", clientId, err)
 						if isClientLimitCloseError(err) {
 							noteClientLimitOnce()
@@ -2236,6 +2246,7 @@ func (self *PlatformTransport) runH3(ptMode TransportMode, initialTimeout time.D
 
 					if 0 == len(message) {
 						// ping
+						transportPingFrames.rx.Add(1)
 						self.log.V(2).Infof("[tr]ping %s<-\n", clientId)
 						MessagePoolReturn(message)
 						continue
@@ -2328,7 +2339,7 @@ func (self *PlatformTransport) runH3(ptMode TransportMode, initialTimeout time.D
 		}
 
 		lived := time.Since(sessionStart)
-		if flapWait := sessionEndWait(self.ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, !self.h3Gated()); 0 < flapWait {
+		if flapWait := sessionEndWait(self.ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, !self.h3Gated(), self.proxySourceLabel()); 0 < flapWait {
 			select {
 			case <-self.ctx.Done():
 				return

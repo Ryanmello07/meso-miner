@@ -514,6 +514,9 @@ type trackedConn struct {
 // byte count to the proxy's TotalRx.
 func (self *trackedConn) Read(b []byte) (n int, err error) {
 	n, err = self.Conn.Read(b)
+	if n > 0 {
+		recordSocketBytes(self.socketPhase(), false, n)
+	}
 	if n > 0 && self.bw != nil {
 		self.bw.TotalRx.Add(uint64(n))
 	}
@@ -527,6 +530,9 @@ func (self *trackedConn) Read(b []byte) (n int, err error) {
 // byte count to the proxy's TotalTx.
 func (self *trackedConn) Write(b []byte) (n int, err error) {
 	n, err = self.Conn.Write(b)
+	if n > 0 {
+		recordSocketBytes(self.socketPhase(), true, n)
+	}
 	if n > 0 && self.bw != nil {
 		self.bw.TotalTx.Add(uint64(n))
 	}
