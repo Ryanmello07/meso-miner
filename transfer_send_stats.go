@@ -18,6 +18,9 @@ var transferSendCounters struct {
 	resendFrames atomic.Int64
 	resendBytes  atomic.Int64
 	resendDepth  [transferResendDepthBuckets]atomic.Int64
+
+	deferredFrames atomic.Int64
+	deferredBytes  atomic.Int64
 }
 
 // TransferSendStats is a snapshot of the process-wide transfer send counters.
@@ -27,6 +30,10 @@ type TransferSendStats struct {
 	ResendFrames int64
 	ResendBytes  int64
 	ResendDepth  [transferResendDepthBuckets]int64
+
+	// ResendDeferred counts resends the retry budget refused to send yet.
+	ResendDeferredFrames int64
+	ResendDeferredBytes  int64
 }
 
 func TransferSendStatsNow() TransferSendStats {
@@ -38,12 +45,19 @@ func TransferSendStatsNow() TransferSendStats {
 	for i := range s.ResendDepth {
 		s.ResendDepth[i] = transferSendCounters.resendDepth[i].Load()
 	}
+	s.ResendDeferredFrames = transferSendCounters.deferredFrames.Load()
+	s.ResendDeferredBytes = transferSendCounters.deferredBytes.Load()
 	return s
 }
 
 func recordTransferFirstSend(byteCount int) {
 	transferSendCounters.firstFrames.Add(1)
 	transferSendCounters.firstBytes.Add(int64(byteCount))
+}
+
+func recordTransferResendDeferred(byteCount int) {
+	transferSendCounters.deferredFrames.Add(1)
+	transferSendCounters.deferredBytes.Add(int64(byteCount))
 }
 
 // recordTransferResend records a resend. sendNumber is which send this is for the
