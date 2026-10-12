@@ -119,6 +119,9 @@ type attemptStats struct {
 	// done is set once the attempt has finished. Bytes on its connection after
 	// that are the session, not the handshake.
 	done atomic.Bool
+	// targets records which address each dialled hostname resolved to, so a
+	// failed attempt can be charged to that address (see net_target_health.go)
+	targets attemptTargets
 }
 
 type attemptStatsKey struct{}
@@ -278,6 +281,7 @@ func (self *connectGovernor) recordAttempt(class connectClass, stats *attemptSta
 	if class == connectCanceled {
 		return
 	}
+	stats.recordTargetOutcome(class)
 	self.mu.Lock()
 	defer self.mu.Unlock()
 	b := self.bucket()
