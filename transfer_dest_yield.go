@@ -26,6 +26,11 @@ type destinationYield struct {
 	silentSinceNano atomic.Int64
 	lastAckNano     atomic.Int64
 	lastSendNano    atomic.Int64
+	// releasedAtNano is when this destination was last released (or, in shadow,
+	// would have been); zero once it has acknowledged since. releasedShadow tells
+	// the two apart.
+	releasedAtNano atomic.Int64
+	releasedShadow atomic.Bool
 }
 
 func (self *destinationYield) noteSend(byteCount int, nowNano int64) {
@@ -45,6 +50,9 @@ func (self *destinationYield) noteAck(byteCount int, nowNano int64) {
 // its length is the data the release thresholds should be chosen from.
 func (self *destinationYield) noteLive(nowNano int64) {
 	self.lastAckNano.Store(nowNano)
+	if released := self.releasedAtNano.Swap(0); released != 0 && released < nowNano {
+		recordReturnAfterRelease(self.releasedShadow.Load(), time.Duration(nowNano-released))
+	}
 	if since := self.silentSinceNano.Swap(0); since != 0 && since < nowNano {
 		recordRecoveredSilence(time.Duration(nowNano - since))
 	}
@@ -54,6 +62,15 @@ func (self *destinationYield) noteLive(nowNano int64) {
 // judged afresh rather than released again at once.
 func (self *destinationYield) reset() {
 	self.silentSinceNano.Store(0)
+}
+
+// markReleased remembers that this destination was released (or would have been,
+// in shadow), so that if it acknowledges again the time it took to come back is
+// recorded: a release followed by a quick return was a false release.
+func (self *destinationYield) markReleased(nowNano int64, shadow bool) {
+	self.releasedShadow.Store(shadow)
+	self.releasedAtNano.Store(nowNano)
+	self.reset()
 }
 
 // destinationYieldView is a point-in-time reading of one destination. Durations
@@ -122,11 +139,31 @@ func (self *SendBuffer) DestinationYields(now time.Time) []destinationYieldView 
 // yieldRetention is how long a destination with nothing outstanding is remembered.
 const yieldRetention = 15 * time.Minute
 
-// ResetDestinationYield forgets a destination's silence after releasing it.
-func (self *SendBuffer) ResetDestinationYield(destinationId Id) {
+// MarkDestinationReleased forgets a destination's silence after releasing it and
+// starts timing how long it takes to come back.
+func (self *SendBuffer) MarkDestinationReleased(destinationId Id, now time.Time, shadow bool) {
 	if existing, ok := self.yields.Load(destinationId); ok {
-		existing.(*destinationYield).reset()
+		existing.(*destinationYield).markReleased(now.UnixNano(), shadow)
 	}
+}
+
+// HeldBytes is the undelivered bytes queued for resend across every send
+// sequence to one destination.
+func (self *SendBuffer) HeldBytes(destinationId Id) int64 {
+	self.mutex.Lock()
+	sequences := []*SendSequence{}
+	for id, sendSequence := range self.sendSequences {
+		if id.Destination.DestinationId == destinationId {
+			sequences = append(sequences, sendSequence)
+		}
+	}
+	self.mutex.Unlock()
+	total := int64(0)
+	for _, sendSequence := range sequences {
+		_, byteCount, _, _ := sendSequence.ResendQueueSizeAndMessageTypes()
+		total += int64(byteCount)
+	}
+	return total
 }
 
 // CancelDestination cancels every send sequence to one destination and returns
@@ -276,6 +313,49 @@ func RecoveredSilenceHistogram() (boundsSeconds []float64, cumulative []int64) {
 		cumulative = append(cumulative, total)
 		if i < len(recoveredSilenceBounds) {
 			boundsSeconds = append(boundsSeconds, recoveredSilenceBounds[i].Seconds())
+		}
+	}
+	return boundsSeconds, cumulative
+}
+
+// returnAfterReleaseBounds are the upper bounds of the histogram of how long a
+// released destination took to acknowledge again; the last bucket is everything
+// longer. One histogram for enforce, one for shadow.
+var returnAfterReleaseBounds = []time.Duration{
+	30 * time.Second, time.Minute, 2 * time.Minute, 5 * time.Minute, 10 * time.Minute, 30 * time.Minute,
+}
+
+var returnAfterReleaseCounts [2][7]atomic.Int64
+
+func recordReturnAfterRelease(shadow bool, duration time.Duration) {
+	mode := 0
+	if shadow {
+		mode = 1
+	}
+	for i, bound := range returnAfterReleaseBounds {
+		if duration <= bound {
+			returnAfterReleaseCounts[mode][i].Add(1)
+			return
+		}
+	}
+	returnAfterReleaseCounts[mode][len(returnAfterReleaseBounds)].Add(1)
+}
+
+// ReturnAfterReleaseHistogram is, for enforce or shadow, how many released
+// destinations acknowledged again and how long they took (cumulative buckets,
+// bounds in seconds). Every count is a release that was wrong, or in shadow a
+// release that would have been.
+func ReturnAfterReleaseHistogram(shadow bool) (boundsSeconds []float64, cumulative []int64) {
+	mode := 0
+	if shadow {
+		mode = 1
+	}
+	total := int64(0)
+	for i := range returnAfterReleaseCounts[mode] {
+		total += returnAfterReleaseCounts[mode][i].Load()
+		cumulative = append(cumulative, total)
+		if i < len(returnAfterReleaseBounds) {
+			boundsSeconds = append(boundsSeconds, returnAfterReleaseBounds[i].Seconds())
 		}
 	}
 	return boundsSeconds, cumulative

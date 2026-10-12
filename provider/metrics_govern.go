@@ -57,6 +57,30 @@ func writeGovernMetrics(b *strings.Builder) {
 		fmt.Fprintf(b, "urnet_dead_client_recovered_silence_seconds_bucket{le=\"%g\"} %d\n", bound, cumulative[i])
 	}
 	fmt.Fprintf(b, "urnet_dead_client_recovered_silence_seconds_bucket{le=\"+Inf\"} %d\nurnet_dead_client_recovered_silence_seconds_count %d\n", cumulative[len(cumulative)-1], cumulative[len(cumulative)-1])
+	mx := connect.TransferMoreStatsNow()
+	fmt.Fprintf(b, "# HELP urnet_transfer_acked_bytes_total Frame bytes the far end acknowledged. Divide its rate by the send rates for the ack yield.\n# TYPE urnet_transfer_acked_bytes_total counter\nurnet_transfer_acked_bytes_total %d\n", xs.BudgetEarnedBytes)
+	fmt.Fprintf(b, "# HELP urnet_transfer_ack_sent_total Acknowledgement frames this node wrote to peers.\n# TYPE urnet_transfer_ack_sent_total counter\nurnet_transfer_ack_sent_total{unit=\"frames\"} %d\nurnet_transfer_ack_sent_total{unit=\"bytes\"} %d\n", mx.AckFrames, mx.AckBytes)
+	fmt.Fprintf(b, "# HELP urnet_transfer_destination_sent_total Frames that reached a carrier, first sends and resends, by destination class.\n# TYPE urnet_transfer_destination_sent_total counter\nurnet_transfer_destination_sent_total{dest=\"client\",unit=\"frames\"} %d\nurnet_transfer_destination_sent_total{dest=\"client\",unit=\"bytes\"} %d\nurnet_transfer_destination_sent_total{dest=\"control\",unit=\"frames\"} %d\nurnet_transfer_destination_sent_total{dest=\"control\",unit=\"bytes\"} %d\n", mx.ClientSentFrames, mx.ClientSentBytes, mx.ControlSentFrames, mx.ControlSentBytes)
+	fmt.Fprintf(b, "# HELP urnet_transfer_sequence_exits_total Send sequences that ended, by why.\n# TYPE urnet_transfer_sequence_exits_total counter\n")
+	for _, reason := range connect.SendSequenceExitReasons() {
+		fmt.Fprintf(b, "urnet_transfer_sequence_exits_total{reason=\"%s\"} %d\n", reason, mx.SequenceExits[reason])
+	}
+	fmt.Fprintf(b, "# HELP urnet_transfer_retained_bytes Undelivered provider return bytes held for retry right now across all send sequences.\n# TYPE urnet_transfer_retained_bytes gauge\nurnet_transfer_retained_bytes %d\n", mx.RetainedBytes)
+	fmt.Fprintf(b, "# HELP urnet_dead_client_released_held_bytes_total Undelivered bytes held for clients at the moment they were released, or in shadow would have been.\n# TYPE urnet_dead_client_released_held_bytes_total counter\nurnet_dead_client_released_held_bytes_total %d\n", mx.ReleasedHeldBytes)
+	for _, shadow := range []bool{false, true} {
+		mode := "enforce"
+		if shadow {
+			mode = "shadow"
+		}
+		rb, rc := connect.ReturnAfterReleaseHistogram(shadow)
+		if !shadow {
+			fmt.Fprintf(b, "# HELP urnet_dead_client_return_after_release_seconds Released clients that acknowledged again and how long they took. Every count is a release that was wrong.\n# TYPE urnet_dead_client_return_after_release_seconds histogram\n")
+		}
+		for i, bound := range rb {
+			fmt.Fprintf(b, "urnet_dead_client_return_after_release_seconds_bucket{mode=\"%s\",le=\"%g\"} %d\n", mode, bound, rc[i])
+		}
+		fmt.Fprintf(b, "urnet_dead_client_return_after_release_seconds_bucket{mode=\"%s\",le=\"+Inf\"} %d\nurnet_dead_client_return_after_release_seconds_count{mode=\"%s\"} %d\n", mode, rc[len(rc)-1], mode, rc[len(rc)-1])
+	}
 	fmt.Fprintf(b, "# HELP urnet_transfer_resend_depth_total Resends by how many times the item had already been sent.\n# TYPE urnet_transfer_resend_depth_total counter\n")
 	for i, label := range []string{"2", "3-4", "5-8", "9+"} {
 		fmt.Fprintf(b, "urnet_transfer_resend_depth_total{send=\"%s\"} %d\n", label, xs.ResendDepth[i])

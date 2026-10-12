@@ -31,6 +31,17 @@ func TestProviderMetrics_ExposeTheGovernor(t *testing.T) {
 		"urnet_govern_mode",
 		"urnet_transfer_send_frames_total", "urnet_transfer_resend_deferred_total",
 		"urnet_speedtest_total", "urnet_speedtest_echo_bytes_total",
+		// ack yield and the new transfer measurements
+		"urnet_transfer_acked_bytes_total", "urnet_transfer_ack_sent_total",
+		"urnet_transfer_destination_sent_total", "urnet_transfer_sequence_exits_total",
+		"urnet_transfer_retained_bytes", "urnet_transfer_resend_would_defer_total",
+		"urnet_transfer_budget_tokens",
+		// dead-client release
+		"urnet_dead_client_released_total", "urnet_dead_client_would_release_total",
+		"urnet_dead_client_reason_total", "urnet_dead_client_silent",
+		"urnet_dead_client_fleet_collapsed", "urnet_dead_client_fleet",
+		"urnet_dead_client_recovered_silence_seconds", "urnet_dead_client_return_after_release_seconds",
+		"urnet_dead_client_released_held_bytes_total",
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("metrics are missing %s", want)

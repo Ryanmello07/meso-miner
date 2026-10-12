@@ -242,7 +242,8 @@ func (self *deadClientSweeper) sweep() int {
 			// written to again starts a new silence and is counted again, which is
 			// exactly when enforce would have released it a second time.
 			deadClientCounters.wouldRelease.Add(1)
-			provider.client.sendBuffer.ResetDestinationYield(view.DestinationId)
+			transferMoreCounters.releasedHeldBytes.Add(provider.client.sendBuffer.HeldBytes(view.DestinationId))
+			provider.client.sendBuffer.MarkDestinationReleased(view.DestinationId, now, true)
 			if self.shouldLogShadow(view.DestinationId, now) {
 				self.emit(fmt.Sprintf(
 					"[govern] dead client %s silent %s (sent %.1f KiB, acked %.1f KiB; %d of %d active clients acking; %s); shadow, not released",
@@ -252,9 +253,11 @@ func (self *deadClientSweeper) sweep() int {
 			}
 			continue
 		}
+		heldBytes := provider.client.sendBuffer.HeldBytes(view.DestinationId)
 		sequences := provider.client.sendBuffer.CancelDestination(view.DestinationId)
 		flows := provider.localUserNat.CancelSource(view.DestinationId)
-		provider.client.sendBuffer.ResetDestinationYield(view.DestinationId)
+		provider.client.sendBuffer.MarkDestinationReleased(view.DestinationId, now, false)
+		transferMoreCounters.releasedHeldBytes.Add(heldBytes)
 		deadClientCounters.released.Add(1)
 		deadClientCounters.releasedFlows.Add(int64(flows))
 		deadClientCounters.releasedSequences.Add(int64(sequences))

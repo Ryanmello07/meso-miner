@@ -2702,6 +2702,8 @@ func resendBackoff(scaledRtt time.Duration, sendCount int, maxResendInterval tim
 }
 
 func (self *SendSequence) Run() {
+	exitReason := sendExitClosed
+	defer func() { recordSendSequenceExit(exitReason) }()
 	defer func() {
 		if r := recover(); r != nil {
 			self.log.Errorf("[s]%s->%s...%s s(%s) abnormal exit =  %s\n", self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId, r)
@@ -2735,6 +2737,7 @@ func (self *SendSequence) Run() {
 			}
 			if item.retainAfterAckTimeout {
 				self.retainedByteCount -= item.MessageByteCount()
+				transferMoreCounters.retainedBytes.Add(-int64(item.MessageByteCount()))
 			}
 			// Settle the contract without crediting ackedByteCount — these
 			// bytes were never delivered (H1).
@@ -2746,6 +2749,7 @@ func (self *SendSequence) Run() {
 			safeAck(item.ackCallback, errors.New("Send sequence closed."))
 			item.messagePoolReturn()
 		}
+		transferMoreCounters.retainedBytes.Add(-int64(self.retainedByteCount))
 		self.retainedByteCount = 0
 
 		// close contract — after the drain above so unack()'s correction to
@@ -2872,6 +2876,7 @@ func (self *SendSequence) Run() {
 				itemAckTimeout := item.sendTime.Add(self.sendBufferSettings.AckTimeout).Sub(sendTime)
 				if itemAckTimeout <= 0 && !item.retainAfterAckTimeout {
 					self.log.V(1).Infof("[s]%s->%s...%s s(%s) exit ack timeout (%s)\n", self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId, self.sendBufferSettings.AckTimeout)
+					exitReason = sendExitAckTimeout
 					return
 				}
 				if !item.retainAfterAckTimeout && itemAckTimeout < timeout {
@@ -2902,6 +2907,7 @@ func (self *SendSequence) Run() {
 						// retained-byte budget, contract unack, error callback,
 						// and pool-return — all in one idempotent call.
 						self.dropItem(item, err)
+						exitReason = sendExitHeadError
 						return
 					}
 					// setHead succeeded — now safe to remove from resendQueue.
@@ -3093,6 +3099,7 @@ func (self *SendSequence) Run() {
 			idleTimer.Reset(timeout)
 			select {
 			case <-self.ctx.Done():
+				exitReason = sendExitCancelled
 				return
 			case <-ackSnapshot.ackNotify:
 			case <-idleTimer.C:
@@ -3110,6 +3117,7 @@ func (self *SendSequence) Run() {
 					if done {
 						// close the sequence
 						self.log.V(2).Infof("[s]%s->%s...%s s(%s) exit idle timeout\n", self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId)
+						exitReason = sendExitIdle
 						return
 					}
 				}
@@ -3118,6 +3126,7 @@ func (self *SendSequence) Run() {
 			idleTimer.Reset(timeout)
 			select {
 			case <-self.ctx.Done():
+				exitReason = sendExitCancelled
 				return
 			case <-ackSnapshot.ackNotify:
 			case sendPack, ok := <-self.packs:
@@ -3135,6 +3144,7 @@ func (self *SendSequence) Run() {
 					self.log.Errorf("[s]%s->%s...%s s(%s) exit could not create contract.\n", self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId)
 					safeAck(sendPack.AckCallback, errors.New("No contract"))
 					MessagePoolReturn(sendPack.Frame.MessageBytes)
+					exitReason = sendExitNoContract
 					return
 				}
 			case <-idleTimer.C:
@@ -3152,6 +3162,7 @@ func (self *SendSequence) Run() {
 					if done {
 						// close the sequence
 						self.log.V(2).Infof("[s]%s->%s...%s s(%s) exit idle timeout\n", self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId)
+						exitReason = sendExitIdle
 						return
 					}
 				}
@@ -3698,6 +3709,7 @@ func (self *SendSequence) sendWithSetContract(
 				}
 			} else {
 				self.retainedByteCount += messageByteCount
+				transferMoreCounters.retainedBytes.Add(int64(messageByteCount))
 			}
 		}
 		self.sendItems = append(self.sendItems, item)
@@ -3906,6 +3918,7 @@ func (self *SendSequence) receiveAck(messageId Id, selective bool, tag *protocol
 		// release its share of the R-5 retained-byte budget.
 		if removed.retainAfterAckTimeout {
 			self.retainedByteCount -= removed.MessageByteCount()
+			transferMoreCounters.retainedBytes.Add(-int64(removed.MessageByteCount()))
 			if v := self.log.V(1); v.Enabled() {
 				v.Infof("[s]%s->%s...%s s(%s) retain acked — retention saved %x (%dB held %s past ack timeout, sendCount=%d)\n",
 					self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId,
@@ -4003,6 +4016,7 @@ func (self *SendSequence) dropItem(item *sendItem, err error) {
 	// release retained byte budget
 	if item.retainAfterAckTimeout {
 		self.retainedByteCount -= item.MessageByteCount()
+		transferMoreCounters.retainedBytes.Add(-int64(item.MessageByteCount()))
 	}
 
 	// settle contract bytes and fire the error callback + pool-return.
@@ -5077,6 +5091,14 @@ func (self *ReceiveSequence) Run() {
 					MessagePoolShareReadOnly(wrapped),
 					self.receiveBufferSettings.WriteTimeout,
 				)
+			}
+			ackWrite := c
+			c = func() error {
+				err := ackWrite()
+				if err == nil {
+					recordTransferAckSent(len(transferFrameBytes))
+				}
+				return err
 			}
 			if self.log.V(2).Enabled() {
 				TraceWithReturn(
@@ -6941,7 +6963,9 @@ func MessageByteCount(frames []*protocol.Frame) ByteCount {
 
 // noteYieldSend records a frame written to this sequence's destination.
 func (self *SendSequence) noteYieldSend(byteCount int) {
-	if self.sendBuffer == nil || self.destination.IsControlDestination() {
+	control := self.destination.IsControlDestination()
+	recordTransferDestinationSend(control, byteCount)
+	if self.sendBuffer == nil || control {
 		return
 	}
 	self.sendBuffer.yieldFor(self.destination.DestinationId).noteSend(byteCount, time.Now().UnixNano())
