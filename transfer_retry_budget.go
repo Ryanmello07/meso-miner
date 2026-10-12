@@ -83,6 +83,14 @@ func (self *transferRetryBudget) allow(byteCount int) bool {
 	return false
 }
 
+// refund returns tokens a failed resend never used, up to the burst cap.
+func (self *transferRetryBudget) refund(byteCount int) {
+	self.mu.Lock()
+	defer self.mu.Unlock()
+	self.refillLocked()
+	self.tokens = min(self.tokens+float64(byteCount), retryBudgetBurstBytes)
+}
+
 // balance reports the current tokens.
 func (self *transferRetryBudget) balance() float64 {
 	self.mu.Lock()
@@ -107,21 +115,35 @@ var transferResendBudget = newTransferRetryBudget(time.Now)
 // refuses when the budget cannot pay. Shadow sends anyway but counts and logs
 // what enforce would have refused, so a shadow canary measures the budget.
 // Off behaves as before the budget existed.
-func retryAllowed(byteCount int) bool {
+//
+// It also returns how many tokens it debited (zero when nothing was charged, as in
+// off mode or a shadow resend the budget could not pay for), so a caller whose
+// write then fails can give exactly those tokens back with refundRetry.
+func retryAllowed(byteCount int) (allowed bool, debited int) {
 	mode := currentGovernMode()
 	if mode == governOff {
-		return true
+		return true, 0
 	}
 	if transferResendBudget.allow(byteCount) {
-		return true
+		return true, byteCount
 	}
 	if mode == governEnforce {
 		retryBudgetReport.note(true, byteCount)
-		return false
+		return false, 0
 	}
 	recordTransferResendWouldDefer(byteCount)
 	retryBudgetReport.note(false, byteCount)
-	return true
+	return true, 0
+}
+
+// refundRetry gives back tokens debited for a resend whose write then failed: the
+// frame did not go out, so it must not use up budget meant for a resend that does.
+// The write does not report how much of a frame a failed write moved, so a failure
+// refunds the whole debit; a frame that was partly written is simply sent again.
+func refundRetry(byteCount int) {
+	if 0 < byteCount {
+		transferResendBudget.refund(byteCount)
+	}
 }
 
 // retryBudgetReportInterval is how often refusals are summarised in the log.

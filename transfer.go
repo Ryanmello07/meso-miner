@@ -2941,22 +2941,26 @@ func (self *SendSequence) Run() {
 				// waits behind: a frame lost once must always be recoverable, however
 				// busy the rest of the host is. Only the deep resends, which are where
 				// the amplification lives, are charged.
+				resendDebit := 0
 				if !promotingHead &&
-					!resendIsFree(item.sendCount, self.sendItems[0].sequenceNumber == item.sequenceNumber) &&
-					!retryAllowed(len(transferFrameBytes)) {
-					recordTransferResendDeferred(len(transferFrameBytes))
-					deferredTimeout := resendBackoff(
-						self.rttWindow.ScaledRtt(),
-						item.sendCount+1,
-						self.sendBufferSettings.MaxResendInterval,
-					)
-					if !item.retainAfterAckTimeout && itemAckTimeout <= deferredTimeout {
-						item.resendTime = sendTime.Add(itemAckTimeout)
-					} else {
-						item.resendTime = sendTime.Add(deferredTimeout)
+					!resendIsFree(item.sendCount, self.sendItems[0].sequenceNumber == item.sequenceNumber) {
+					allowed, debited := retryAllowed(len(transferFrameBytes))
+					if !allowed {
+						recordTransferResendDeferred(len(transferFrameBytes))
+						deferredTimeout := resendBackoff(
+							self.rttWindow.ScaledRtt(),
+							item.sendCount+1,
+							self.sendBufferSettings.MaxResendInterval,
+						)
+						if !item.retainAfterAckTimeout && itemAckTimeout <= deferredTimeout {
+							item.resendTime = sendTime.Add(itemAckTimeout)
+						} else {
+							item.resendTime = sendTime.Add(deferredTimeout)
+						}
+						self.resendQueue.Add(item)
+						continue
 					}
-					self.resendQueue.Add(item)
-					continue
+					resendDebit = debited
 				}
 
 				reliableOnlyResend := false
@@ -2975,10 +2979,10 @@ func (self *SendSequence) Run() {
 				resendBytes := transferFrameBytes
 				resendForceUnwrapped := item.forceUnwrapped
 				var disposition transferWriteDisposition
+				var resendWriteErr error
 				c := func() error {
-					var writeErr error
-					disposition, writeErr = self.writeMaybeWrappedBytes(resendBytes, resendPath, resendForceUnwrapped, reliableOnlyResend)
-					return writeErr
+					disposition, resendWriteErr = self.writeMaybeWrappedBytes(resendBytes, resendPath, resendForceUnwrapped, reliableOnlyResend)
+					return resendWriteErr
 				}
 				if self.log.V(2).Enabled() {
 					TraceWithReturn(
@@ -2997,6 +3001,10 @@ func (self *SendSequence) Run() {
 					if err != nil {
 						self.log.V(1).Infof("[s]resend drop = %s", err)
 					}
+				}
+				if resendWriteErr != nil {
+					// the frame did not go out: give back what it was charged
+					refundRetry(resendDebit)
 				}
 				if disposition.transportType != "" || disposition.unreliable || disposition.reliable {
 					self.observeCarrierWrite(item, disposition)
