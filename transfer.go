@@ -1780,6 +1780,9 @@ type SendBuffer struct {
 	sendSequences              map[sendSequenceId]*SendSequence
 	sendSequencesByDestination map[TransferPath]map[*SendSequence]bool
 	sendSequenceDestinations   map[*SendSequence]map[TransferPath]bool
+
+	// destination -> *destinationYield, see transfer_dest_yield.go
+	yields sync.Map
 }
 
 func NewSendBuffer(ctx context.Context,
@@ -2992,6 +2995,7 @@ func (self *SendSequence) Run() {
 				}
 				if disposition.transportType != "" || disposition.unreliable || disposition.reliable {
 					self.observeCarrierWrite(item, disposition)
+					self.noteYieldSend(len(resendBytes))
 				}
 
 				recordTransferResend(len(resendBytes), item.sendCount+1)
@@ -3651,6 +3655,8 @@ func (self *SendSequence) sendWithSetContract(
 	}
 	recordTransferFirstSend(len(item.transferFrameBytes))
 	if err == nil {
+		// a write that never reached a carrier says nothing about the destination
+		self.noteYieldSend(len(item.transferFrameBytes))
 		self.observeCarrierWrite(item, disposition)
 	}
 
@@ -3930,6 +3936,7 @@ func (self *SendSequence) receiveAck(messageId Id, selective bool, tag *protocol
 func (self *SendSequence) ackItem(item *sendItem) {
 	// the far end confirmed these bytes arrived; that is what earns resend budget
 	recordTransferAckedBytes(len(item.transferFrameBytes))
+	self.noteYieldAck(len(item.transferFrameBytes))
 	self.releaseUnreliableFlight(item)
 	if item.contractId != nil {
 		if itemSendContract, ok := self.openSendContracts[*item.contractId]; ok {
@@ -6920,3 +6927,19 @@ func MessageByteCount(frames []*protocol.Frame) ByteCount {
 // 	}
 // 	return messages
 // }
+
+// noteYieldSend records a frame written to this sequence's destination.
+func (self *SendSequence) noteYieldSend(byteCount int) {
+	if self.sendBuffer == nil || self.destination.IsControlDestination() {
+		return
+	}
+	self.sendBuffer.yieldFor(self.destination.DestinationId).noteSend(byteCount, time.Now().UnixNano())
+}
+
+// noteYieldAck records a frame the destination acknowledged.
+func (self *SendSequence) noteYieldAck(byteCount int) {
+	if self.sendBuffer == nil || self.destination.IsControlDestination() {
+		return
+	}
+	self.sendBuffer.yieldFor(self.destination.DestinationId).noteAck(byteCount, time.Now().UnixNano())
+}

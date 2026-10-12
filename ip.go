@@ -406,6 +406,24 @@ type LocalUserNat struct {
 
 	// receive callback
 	receiveCallbacks *CallbackList[ReceivePacketFunction]
+
+	// per-shard buffers register a source canceller so one client's flows can be
+	// released from outside the shard goroutines
+	sourceCancelMutex sync.Mutex
+	sourceCancels     []func(sourceId Id) int
+}
+
+// CancelSource cancels every UDP and TCP flow of one source client across all
+// shards and returns how many flows were cancelled.
+func (self *LocalUserNat) CancelSource(sourceId Id) int {
+	self.sourceCancelMutex.Lock()
+	cancels := slices.Clone(self.sourceCancels)
+	self.sourceCancelMutex.Unlock()
+	count := 0
+	for _, cancel := range cancels {
+		count += cancel(sourceId)
+	}
+	return count
 }
 
 func NewLocalUserNatWithDefaults(ctx context.Context, clientTag string, bw *ProxyBandwidth) *LocalUserNat {
@@ -607,6 +625,14 @@ func (self *LocalUserNat) runShard(shard int) {
 	tcp4Buffer := NewTcp4Buffer(self.ctx, self.receive, self.settings.TcpBufferSettings, self.bw)
 	tcp6Buffer := NewTcp6Buffer(self.ctx, self.receive, self.settings.TcpBufferSettings, self.bw)
 	shardCh := self.sendShards[shard]
+	func() {
+		self.sourceCancelMutex.Lock()
+		defer self.sourceCancelMutex.Unlock()
+		self.sourceCancels = append(self.sourceCancels, func(sourceId Id) int {
+			return udp4Buffer.CancelSource(sourceId) + udp6Buffer.CancelSource(sourceId) +
+				tcp4Buffer.CancelSource(sourceId) + tcp6Buffer.CancelSource(sourceId)
+		})
+	}()
 
 	for {
 		select {
@@ -888,6 +914,24 @@ type UdpBuffer[BufferId comparable] struct {
 
 	sequences       map[BufferId]*UdpSequence
 	sourceSequences map[TransferPath]map[BufferId]*UdpSequence
+}
+
+// CancelSource cancels every flow of one source client and returns how many. It
+// only cancels: each sequence's own exit path removes it from the maps.
+func (self *UdpBuffer[BufferId]) CancelSource(sourceId Id) int {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	count := 0
+	for source, sequences := range self.sourceSequences {
+		if source.SourceId != sourceId {
+			continue
+		}
+		for _, sequence := range sequences {
+			sequence.Cancel()
+			count += 1
+		}
+	}
+	return count
 }
 
 func newUdpBuffer[BufferId comparable](
@@ -1685,6 +1729,24 @@ type TcpBuffer[BufferId comparable] struct {
 
 	sequences       map[BufferId]*TcpSequence
 	sourceSequences map[TransferPath]map[BufferId]*TcpSequence
+}
+
+// CancelSource cancels every flow of one source client and returns how many. It
+// only cancels: each sequence's own exit path removes it from the maps.
+func (self *TcpBuffer[BufferId]) CancelSource(sourceId Id) int {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	count := 0
+	for source, sequences := range self.sourceSequences {
+		if source.SourceId != sourceId {
+			continue
+		}
+		for _, sequence := range sequences {
+			sequence.Cancel()
+			count += 1
+		}
+	}
+	return count
 }
 
 func newTcpBuffer[BufferId comparable](
@@ -3040,6 +3102,8 @@ func NewRemoteUserNatProvider(
 	userNatProvider.localUserNatUnsub = localUserNatUnsub
 	clientUnsub := client.AddReceiveCallback(userNatProvider.ClientReceive)
 	userNatProvider.clientUnsub = clientUnsub
+
+	go HandleError(newDeadClientSweeper(userNatProvider).run)
 
 	return userNatProvider
 }

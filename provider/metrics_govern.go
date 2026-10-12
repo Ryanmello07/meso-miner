@@ -44,6 +44,11 @@ func writeGovernMetrics(b *strings.Builder) {
 	fmt.Fprintf(b, "# HELP urnet_transfer_resend_would_defer_total Resends shadow mode sent anyway that enforce would have held back.\n# TYPE urnet_transfer_resend_would_defer_total counter\nurnet_transfer_resend_would_defer_total{unit=\"frames\"} %d\nurnet_transfer_resend_would_defer_total{unit=\"bytes\"} %d\n", xs.ResendWouldDeferFrames, xs.ResendWouldDeferBytes)
 	fmt.Fprintf(b, "# HELP urnet_transfer_budget_earned_bytes_total Acknowledged bytes credited to the resend budget.\n# TYPE urnet_transfer_budget_earned_bytes_total counter\nurnet_transfer_budget_earned_bytes_total %d\n", xs.BudgetEarnedBytes)
 	fmt.Fprintf(b, "# HELP urnet_transfer_budget_tokens Resend budget tokens (bytes) left right now.\n# TYPE urnet_transfer_budget_tokens gauge\nurnet_transfer_budget_tokens %.0f\n", connect.TransferRetryBudgetTokens())
+	dc := connect.DeadClientStatsNow()
+	fmt.Fprintf(b, "# HELP urnet_dead_client_released_total Clients released after acknowledging nothing for the silence window, with what was cancelled for them.\n# TYPE urnet_dead_client_released_total counter\nurnet_dead_client_released_total{unit=\"clients\"} %d\nurnet_dead_client_released_total{unit=\"nat_flows\"} %d\nurnet_dead_client_released_total{unit=\"send_sequences\"} %d\n", dc.Released, dc.ReleasedFlows, dc.ReleasedSequences)
+	fmt.Fprintf(b, "# HELP urnet_dead_client_would_release_total Clients shadow mode would have released.\n# TYPE urnet_dead_client_would_release_total counter\nurnet_dead_client_would_release_total %d\n", dc.WouldRelease)
+	fmt.Fprintf(b, "# HELP urnet_dead_client_silent Clients past the silence window at the latest sweep, released or held.\n# TYPE urnet_dead_client_silent gauge\nurnet_dead_client_silent %d\n", dc.Silent)
+	fmt.Fprintf(b, "# HELP urnet_dead_client_fleet_collapsed 1 when the latest sweep judged the backend, not the clients, at fault and held releases.\n# TYPE urnet_dead_client_fleet_collapsed gauge\nurnet_dead_client_fleet_collapsed %d\n", dc.FleetCollapsed)
 	fmt.Fprintf(b, "# HELP urnet_transfer_resend_depth_total Resends by how many times the item had already been sent.\n# TYPE urnet_transfer_resend_depth_total counter\n")
 	for i, label := range []string{"2", "3-4", "5-8", "9+"} {
 		fmt.Fprintf(b, "urnet_transfer_resend_depth_total{send=\"%s\"} %d\n", label, xs.ResendDepth[i])
