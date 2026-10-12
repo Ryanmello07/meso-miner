@@ -16,6 +16,10 @@ import (
 // synctest bubble against a drained gateway route, so every resend, ack and
 // deadline is on the virtual clock and nothing sleeps for real.
 
+// The message pool starts a background goroutine on first use; it must not
+// start inside a synctest bubble or the bubble reports a deadlock when it ends.
+func init() { MessagePoolReturn(MessagePoolGet(1)) }
+
 type retainedLiveRig struct {
 	seq     *SendSequence
 	wires   atomic.Int64
