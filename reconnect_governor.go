@@ -538,7 +538,7 @@ func (self *govReporter) budgetFields() string {
 	if self.waiting != nil {
 		out += fmt.Sprintf(" waiting=%d", self.waiting())
 	}
-	return out
+	return out + governFeedFields()
 }
 
 func govModeName(mode governMode) string {
