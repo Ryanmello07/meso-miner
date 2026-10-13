@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/urnetwork/connect"
@@ -64,6 +65,45 @@ type enforcementLog struct {
 	minuteAt   time.Time
 	minuteSeen map[string]int
 	suppressed int
+
+	// queue decouples the callers that emit events (the reconnect budget's
+	// dispatcher among them) from this log's file work: the sink only ever does a
+	// non-blocking send, and one worker does the flock, append and flush. A full
+	// queue drops the event and counts it. Nil until startAsync.
+	queue   chan connect.GovernEvent
+	dropped atomic.Int64
+	// writeErrors counts file operations that failed and were swallowed.
+	writeErrors atomic.Int64
+}
+
+// enforcementQueueLen is how many events can wait for the worker. Events are rare
+// (rate-limited at the source and per minute here), so this only fills when the
+// disk has stalled for a long time.
+const enforcementQueueLen = 1024
+
+// startAsync starts the worker that drains the queue into record.
+func (l *enforcementLog) startAsync() {
+	l.queue = make(chan connect.GovernEvent, enforcementQueueLen)
+	go func() {
+		for e := range l.queue {
+			l.record(e)
+		}
+	}()
+}
+
+// enqueue is the event sink. It never blocks: the governors emit from latency
+// sensitive goroutines, and a stalled disk must not stall them or make them look
+// stalled to their own watchdogs.
+func (l *enforcementLog) enqueue(e connect.GovernEvent) {
+	if l.queue == nil {
+		l.record(e)
+		return
+	}
+	select {
+	case l.queue <- e:
+	default:
+		l.dropped.Add(1)
+	}
 }
 
 func newEnforcementLog(dir string, now func() time.Time) *enforcementLog {
@@ -141,14 +181,17 @@ func (l *enforcementLog) record(e connect.GovernEvent) {
 func (l *enforcementLog) appendLocked(r enforcementRecord) {
 	b, err := json.Marshal(r)
 	if err != nil {
+		l.writeErrors.Add(1)
 		return
 	}
 	path := filepath.Join(l.dir, enforcementLogName)
 	if os.MkdirAll(l.dir, 0700) != nil {
+		l.writeErrors.Add(1)
 		return
 	}
 	release, err := acquireJWTStoreLock(path)
 	if err != nil {
+		l.writeErrors.Add(1)
 		return
 	}
 	defer release()
@@ -157,10 +200,13 @@ func (l *enforcementLog) appendLocked(r enforcementRecord) {
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
+		l.writeErrors.Add(1)
 		return
 	}
 	defer f.Close()
-	f.Write(append(b, '\n'))
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		l.writeErrors.Add(1)
+	}
 }
 
 // flushLocked merges the pending counts into the file under the lock: it
@@ -173,10 +219,12 @@ func (l *enforcementLog) flushLocked(now time.Time) {
 		return
 	}
 	if os.MkdirAll(l.dir, 0700) != nil {
+		l.writeErrors.Add(1)
 		return
 	}
 	release, err := acquireJWTStoreLock(l.dailyPath())
 	if err != nil {
+		l.writeErrors.Add(1)
 		return
 	}
 	defer release()
@@ -199,16 +247,19 @@ func (l *enforcementLog) flushLocked(now time.Time) {
 	}
 	b, err := json.Marshal(d)
 	if err != nil {
+		l.writeErrors.Add(1)
 		return
 	}
 	tmp, err := os.CreateTemp(l.dir, enforcementDailyName+".*.tmp")
 	if err != nil {
+		l.writeErrors.Add(1)
 		return
 	}
 	_, werr := tmp.Write(b)
 	cerr := tmp.Close()
 	if werr != nil || cerr != nil || os.Chmod(tmp.Name(), 0600) != nil || os.Rename(tmp.Name(), l.dailyPath()) != nil {
 		os.Remove(tmp.Name())
+		l.writeErrors.Add(1)
 		return
 	}
 	l.persisted = d
@@ -324,7 +375,8 @@ func initEnforcementLog() {
 	}
 	l := newEnforcementLog(dir, time.Now)
 	globalEnforcementLog = l
-	connect.SetGovernEventSink(l.record)
+	l.startAsync()
+	connect.SetGovernEventSink(l.enqueue)
 	go func() {
 		for range time.Tick(enforcementFlushInterval) {
 			l.flush()
@@ -350,4 +402,6 @@ func writeEnforcementMetrics(b *strings.Builder) {
 		fmt.Fprintf(b, "urnet_enforcement_events{kind=%q,mode=%q,window=%q} %d\n", c.Kind, c.Mode, c.Window, c.Count)
 	}
 	fmt.Fprintf(b, "# HELP urnet_enforcement_log_suppressed_total Event lines counted but not written because a kind exceeded the per-minute line limit.\n# TYPE urnet_enforcement_log_suppressed_total counter\nurnet_enforcement_log_suppressed_total %d\n", l.suppressedCount())
+	fmt.Fprintf(b, "# HELP urnet_enforcement_log_dropped_total Events dropped because the log's queue was full (the disk stalled).\n# TYPE urnet_enforcement_log_dropped_total counter\nurnet_enforcement_log_dropped_total %d\n", l.dropped.Load())
+	fmt.Fprintf(b, "# HELP urnet_enforcement_log_write_errors_total File operations of the enforcement log that failed and were swallowed. Non-zero means the durable record is incomplete.\n# TYPE urnet_enforcement_log_write_errors_total counter\nurnet_enforcement_log_write_errors_total %d\n", l.writeErrors.Load())
 }

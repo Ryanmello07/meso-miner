@@ -2909,6 +2909,10 @@ func runDegradedProxyReaper(ctx context.Context, proxyCancelMap map[string]conte
 func provide(opts docopt.Opts) {
 	connect.CritLogger = critLog
 	installScoutScorer()
+	// the durable enforcement log must exist before the governors emit their first
+	// events (restart_marker and crash_loop fire inside InitGovernState and
+	// NoteGovernStart), or those events never reach it
+	initEnforcementLog()
 	if home, err := os.UserHomeDir(); err == nil {
 		// a restart in the middle of a backend outage starts throttled
 		connect.InitGovernState(filepath.Join(home, ".urnetwork", "govern_outage"))
@@ -2971,8 +2975,6 @@ func provide(opts docopt.Opts) {
 			os.Exit(2)
 		}
 	}
-
-	initEnforcementLog()
 
 	if !isHotSwapCandidate {
 		finishIdentity := bannerPhase("Identity")
