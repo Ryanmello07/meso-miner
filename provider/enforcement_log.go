@@ -95,6 +95,11 @@ func (l *enforcementLog) startAsync() {
 // sensitive goroutines, and a stalled disk must not stall them or make them look
 // stalled to their own watchdogs.
 func (l *enforcementLog) enqueue(e connect.GovernEvent) {
+	// observations are never recorded; they must not take a slot an enforcement
+	// event needs
+	if e.Kind == connect.GovernKindObservation {
+		return
+	}
 	if l.queue == nil {
 		l.record(e)
 		return
@@ -149,7 +154,12 @@ func (l *enforcementLog) record(e connect.GovernEvent) {
 	if e.Kind == connect.GovernKindObservation {
 		return
 	}
+	// the time the event was emitted, not the time a queue behind a stalled disk
+	// got to it, so a backlog lands on the right minute and the right day
 	now := l.now().UTC()
+	if !e.At.IsZero() {
+		now = e.At.UTC()
+	}
 	key := e.Kind + "|" + e.Mode
 
 	l.mu.Lock()

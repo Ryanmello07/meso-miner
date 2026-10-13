@@ -1149,3 +1149,76 @@ func TestBudget_DoesNotCutDuringTheStartupGrace(t *testing.T) {
 		t.Fatal("after the grace the same failures must cut the rate")
 	}
 }
+
+// A log write or a marker write that blocks on a stalled disk must not stop the
+// dispatcher: a stale tick makes every parked waiter look stalled and releases
+// them all, at the moment the budget has just been cut for a failing backend.
+func TestBudget_BlockedSideEffectsDoNotStallTheDispatcher(t *testing.T) {
+	h := newBudgetHarness()
+	release := make(chan struct{})
+	started := make(chan struct{}, 8)
+	h.budget.emit = func(string) {
+		started <- struct{}{}
+		<-release // a stuck disk
+	}
+	h.budget.markerPath = t.TempDir() + "/govern_outage"
+	h.budget.ioProbe = func() { <-release }
+
+	h.attempts(connectTimeoutPlatform, 200)
+	done := make(chan struct{})
+	go func() {
+		h.budget.controlWith(h.budget.enqueueSide)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the control decision blocked on its side effects")
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the worker never ran the side effect")
+	}
+	// the dispatcher is free: ticks advance and the budget does not look stalled
+	h.advance(budgetTick)
+	h.budget.tick(h.budget.now())
+	if h.budget.stalled() {
+		t.Fatal("the dispatcher looks stalled while only its side effects are stuck")
+	}
+	if got := h.budget.currentRate(); got >= budgetCeilingRate {
+		t.Fatalf("the cut itself must still happen immediately, rate = %v", got)
+	}
+	close(release)
+	// let the worker finish its marker write before the temp dir is removed
+	drained := make(chan struct{})
+	h.budget.enqueueSide(func() { close(drained) })
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the worker never drained after the stall cleared")
+	}
+}
+
+func TestBudget_SideEffectQueueDropsAndCountsWhenFull(t *testing.T) {
+	h := newBudgetHarness()
+	release := make(chan struct{})
+	var ran atomic.Int64
+	started := make(chan struct{}, 1)
+	h.budget.enqueueSide(func() { started <- struct{}{}; <-release })
+	<-started // the worker is now stuck inside the first effect
+	for i := 0; i < budgetSideQueueLen+10; i++ {
+		h.budget.enqueueSide(func() { ran.Add(1) })
+	}
+	if got := h.budget.sideDropped.Load(); got != 10 {
+		t.Fatalf("dropped = %d, want 10", got)
+	}
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for ran.Load() < budgetSideQueueLen && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if ran.Load() != budgetSideQueueLen {
+		t.Fatalf("ran = %d, want the %d queued effects", ran.Load(), budgetSideQueueLen)
+	}
+}

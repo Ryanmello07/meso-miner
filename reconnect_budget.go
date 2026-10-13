@@ -209,11 +209,15 @@ type reconnectBudget struct {
 	// throttledSince is when the backend rate first fell below the ceiling, zero while open
 	throttledSince time.Time
 	// memHeld is true while memory pressure is holding the dispatch rate down
-	memHeld    bool
-	carry      float64
-	lastTick   time.Time
-	queue      []*admitWaiter
-	dispatched int
+	memHeld  bool
+	carry    float64
+	lastTick time.Time
+	// side effects of control decisions, run off the dispatcher goroutine
+	side        chan func()
+	sideOnce    sync.Once
+	sideDropped atomic.Int64
+	queue       []*admitWaiter
+	dispatched  int
 
 	// lastCut is when the rate was last cut for reason=bytes or reason=verdict,
 	// and probeIntervals counts no-evidence control intervals since the last
@@ -429,12 +433,47 @@ func (self *reconnectBudget) nextLocked() int {
 // control adjusts the rate from what recent attempts did. Cut hard on evidence
 // of failure, open fast on evidence of success, hold in between.
 func (self *reconnectBudget) control() {
+	self.controlWith(func(f func()) { f() })
+}
+
+// controlWith is control with the caller's choice of where the decision's side
+// effects (the [govern] log lines and the outage marker file) run. The dispatcher
+// goroutine uses enqueueSide: a log write or a marker write that blocks on a
+// stalled disk must not stop it ticking, because a stale tick makes every parked
+// waiter look stalled and releases them all, and the budget is cut at exactly the
+// moment the backend is failing.
+func (self *reconnectBudget) controlWith(run func(func())) {
 	recent := self.gov.snapshotWindow(budgetRecentWindow)
 	// the marker's file operation runs after the lock is released
 	if after := self.adjust(recent); after != nil {
-		after()
+		run(after)
 	}
 	self.controlCap(recent)
+}
+
+// budgetSideQueueLen bounds the side effects waiting for the worker. Decisions are
+// a few per control interval, so it only fills when the disk has been stuck for a
+// long time.
+const budgetSideQueueLen = 256
+
+// enqueueSide hands a side effect to the single worker without ever blocking. A
+// full queue drops it and counts: the marker write is repeated every
+// outageMarkerWriteEvery while throttled, and a dropped log line is better than a
+// stalled dispatcher.
+func (self *reconnectBudget) enqueueSide(f func()) {
+	self.sideOnce.Do(func() {
+		self.side = make(chan func(), budgetSideQueueLen)
+		go func() {
+			for f := range self.side {
+				f()
+			}
+		}()
+	})
+	select {
+	case self.side <- f:
+	default:
+		self.sideDropped.Add(1)
+	}
 }
 
 // adjust applies one control decision under the lock and returns the marker file
@@ -587,7 +626,7 @@ func emitGovernLine(line string) {
 	DefaultLogger().Infof("%s\n", line)
 	if sink := governEventSink.Load(); sink != nil {
 		kind, mode := ClassifyGovernLine(line)
-		(*sink)(GovernEvent{Kind: kind, Mode: mode, Line: line})
+		(*sink)(GovernEvent{Kind: kind, Mode: mode, Line: line, At: time.Now()})
 	}
 }
 
@@ -676,7 +715,7 @@ func (self *reconnectBudget) run(ctx context.Context) {
 		case now := <-tick.C:
 			self.tick(now)
 		case <-control.C:
-			self.control()
+			self.controlWith(self.enqueueSide)
 		}
 	}
 }
