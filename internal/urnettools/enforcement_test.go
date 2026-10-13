@@ -113,3 +113,32 @@ func TestReadEnforcementMissingFilesAreEmptyNotErrors(t *testing.T) {
 		t.Errorf("a corrupt file must be reported, got %v", err)
 	}
 }
+
+func TestEnforcementAbsentNoteOnlyWhenNoLogFilesExist(t *testing.T) {
+	dir := t.TempDir()
+	note := enforcementAbsentNote(dir)
+	if !strings.Contains(note, "No enforcement log found in "+dir) ||
+		!strings.Contains(note, "older than the version that records it") {
+		t.Fatalf("absent dir note = %q", note)
+	}
+	// Either file existing, even empty, means there is a log to show: the
+	// plain "no events yet" message must stay.
+	for _, name := range []string{enforcementLogFile, enforcementDailyFile} {
+		if err := os.WriteFile(filepath.Join(dir, name), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if got := enforcementAbsentNote(dir); got != "" {
+			t.Errorf("%s exists but note = %q", name, got)
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, enforcementLogFile), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := readEnforcementTail(dir, enforcementDefaultLimit)
+	if err != nil || renderEnforcementHistory(rows) != "No enforcement events recorded yet.\n" {
+		t.Errorf("empty existing log: rows = %v err = %v", rows, err)
+	}
+}
