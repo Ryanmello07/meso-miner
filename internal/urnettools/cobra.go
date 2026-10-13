@@ -37,6 +37,7 @@ Core Commands:
   dashboard               Status panel: state, settings, sources, warnings
   history [limit]         Show the provider's command audit trail
   autopilot log [limit]   Show the capacity decisions the provider made (OOM-aware cap, trim)
+  enforcement [history N] Show what the governors enforced (counts per day; or the newest N events)
   baseline [show|mark|compare]  Show this box's recorded behaviour, and compare an upgrade
 
 Performance & Tuning:
@@ -184,6 +185,7 @@ func buildRootCmd() *cobra.Command {
 		newGetCmd(),
 		newHistoryCmd(),
 		newAutopilotCmd(),
+		newEnforcementCmd(),
 		newBaselineCmd(),
 		newMetricsCmd(),
 		newSmartDialerCmd(),
