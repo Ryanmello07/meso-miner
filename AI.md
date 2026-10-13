@@ -141,7 +141,8 @@ Key variables:
 | `PROXY_URL` | Live proxy URL feed (comma-separated) |
 | `URNETWORK_HEALTH_INTERVAL` | Health heartbeat interval |
 | `URNETWORK_RAMLOGS` | `1` = log to /dev/shm |
-| `URNETWORK_SKIP_AUDIT` | `1` = skip startup system audit (disk speed, ulimit, conntrack checks) |
+| `URNETWORK_SKIP_AUDIT` | `1` = skip startup system audit (ulimit, conntrack checks, disk benchmark) |
+| `URNETWORK_DISK_BENCH` | startup disk benchmark (auto profile only): unset = bare metal/VM only, never in containers or on a busy disk; `1` = also in containers; `0` = never |
 | `URNETWORK_HOT_RESTART` | `1` = experimental client JWT reuse |
 | `URNETWORK_H3` | `on` (or `1`, `true`, `yes`) = run H3 (QUIC) beside H1 for the direct identity (beta, off by default); the `h3` control key overrides it live |
 
