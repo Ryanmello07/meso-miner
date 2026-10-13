@@ -98,7 +98,20 @@ func TestIsPublicUnicastRefusesSpecialUseIpv6(t *testing.T) {
 		{"3ffe::1", false},             // 6bone
 		{"fd00::1", false},             // ULA (already private)
 		{"fe80::1", false},             // link local
-		{"2606:4700:4700::1111", true}, // ordinary global unicast
+		// not globally reachable per the IANA special-purpose registry; the
+		// addresses just outside each range keep their existing behavior
+		{"2001:2::1", false},                               // benchmarking /48, first
+		{"2001:2:0:ffff:ffff:ffff:ffff:ffff", false},       // benchmarking /48, last
+		{"2001:2:1::1", true},                              // just past the benchmarking /48
+		{"2001:3::1", true},                                // AMT, globally reachable
+		{"3fff::1", false},                                 // documentation /20, first
+		{"3fff:fff:ffff:ffff:ffff:ffff:ffff:ffff", false},  // documentation /20, last
+		{"3fff:1000::1", true},                             // just past the /20
+		{"3ffd::1", true},                                  // just below 6bone 3ffe::/16
+		{"5f00::1", false},                                 // SRv6 SIDs /16, first
+		{"5f00:ffff:ffff:ffff:ffff:ffff:ffff:ffff", false}, // SRv6 SIDs /16, last
+		{"5f01::1", true},                                  // just past the /16
+		{"2606:4700:4700::1111", true},                     // ordinary global unicast
 		{"2a00:1450:4001:80b::200e", true},
 		{"2001:4860:4860::8888", true}, // next to 2001::/32 but outside it
 		{"2003::1", true},              // next to 2002::/16 but outside it
