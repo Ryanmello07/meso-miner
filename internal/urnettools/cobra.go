@@ -136,7 +136,7 @@ func buildRootCmd() *cobra.Command {
 
 	rootCmd.PersistentFlags().String("unit", "", "systemd unit, e.g. urnetwork-native.service")
 	rootCmd.PersistentFlags().String("user", "", "OS user, e.g. urnet")
-	rootCmd.PersistentFlags().String("network", "", "JWT network name, e.g. tacogonzalez3000")
+	rootCmd.PersistentFlags().String("network", "", "JWT network name, e.g. mynetwork")
 	rootCmd.PersistentFlags().String("network-id", "", "JWT network id")
 	rootCmd.PersistentFlags().String("state-dir", "", "state dir")
 	rootCmd.PersistentFlags().BoolP("force", "f", false, "skip confirm prompts ONLY")
@@ -245,7 +245,7 @@ func newStatusCmd() *cobra.Command {
 		return parseGlobal(args, func(force, dryRun bool, rest []string) error {
 			return cmdStatus(rest)
 		})
-	}), "Show detailed status for one provider: user, unit, binary, version, state dir, PID, running state, network identity, and JWT expiry. On Linux this reproduces `systemctl status <unit>`; on Windows and macOS it renders a status panel with a proxy summary. When the provider answers, a live block follows: state, throughput, clients, proxies, uptime, last restart reason, memory. With several providers and no target, prints one compact row per provider. Target a specific provider with --unit, --user, --network, --network-id, or --state-dir. --json prints the raw live snapshot for scripts.", "  urnet-tools status\n  urnet-tools status --network tacogonzalez3000\n  urnet-tools status --unit urnetwork-native.service\n  urnet-tools status --json")
+	}), "Show detailed status for one provider: user, unit, binary, version, state dir, PID, running state, network identity, and JWT expiry. On Linux this reproduces `systemctl status <unit>`; on Windows and macOS it renders a status panel with a proxy summary. When the provider answers, a live block follows: state, throughput, clients, proxies, uptime, last restart reason, memory. With several providers and no target, prints one compact row per provider. Target a specific provider with --unit, --user, --network, --network-id, or --state-dir. --json prints the raw live snapshot for scripts.", "  urnet-tools status\n  urnet-tools status --network mynetwork\n  urnet-tools status --unit urnetwork-native.service\n  urnet-tools status --json")
 }
 
 func newTopCmd() *cobra.Command {
@@ -253,7 +253,7 @@ func newTopCmd() *cobra.Command {
 		return parseGlobal(args, func(force, dryRun bool, rest []string) error {
 			return cmdTop(rest)
 		})
-	}), "Open a live, full-screen view of one provider: billable and total throughput graphs for the last 10 minutes, current and average rates, bytes moved this run, clients, proxy pool, memory and descriptors, and recent events such as restarts and state changes. Reads only the provider's control socket and changes nothing. Also available as `urtop`. Keys: q, Esc or Ctrl-C quit; Tab and Shift-Tab switch provider; - refreshes faster and + slower, like btop; w zooms the graphs to the last 15 seconds; g lists where the provider's goroutines are parked; m opens a menu for the color theme and graph style (braille, block or tty), which is remembered; ? shows help. When the provider is slow to answer the screen keeps the last data and shows SLOW; when it stops answering the screen stays up, shows DISCONNECTED with a countdown, and resumes by itself. Needs an interactive terminal; use `status` for scripts. Target a specific provider with --unit, --user, --network, --network-id, or --state-dir. --interval sets the refresh period (default 1s, minimum 100ms; the rate numbers and the newest graph column update at that rate, the full snapshot at most once a second).", "  urnet-tools top\n  urnet-tools top --network tacogonzalez3000\n  urnet-tools top --interval 500ms\n  urtop")
+	}), "Open a live, full-screen view of one provider: billable and total throughput graphs for the last 10 minutes, current and average rates, bytes moved this run, clients, proxy pool, memory and descriptors, and recent events such as restarts and state changes. Reads only the provider's control socket and changes nothing. Also available as `urtop`. Keys: q, Esc or Ctrl-C quit; Tab and Shift-Tab switch provider; - refreshes faster and + slower, like btop; w zooms the graphs to the last 15 seconds; g lists where the provider's goroutines are parked; m opens a menu for the color theme and graph style (braille, block or tty), which is remembered; ? shows help. When the provider is slow to answer the screen keeps the last data and shows SLOW; when it stops answering the screen stays up, shows DISCONNECTED with a countdown, and resumes by itself. Needs an interactive terminal; use `status` for scripts. Target a specific provider with --unit, --user, --network, --network-id, or --state-dir. --interval sets the refresh period (default 1s, minimum 100ms; the rate numbers and the newest graph column update at that rate, the full snapshot at most once a second).", "  urnet-tools top\n  urnet-tools top --network mynetwork\n  urnet-tools top --interval 500ms\n  urtop")
 }
 
 func newSnStatusCmd() *cobra.Command {
@@ -285,7 +285,7 @@ func newRestartCmd() *cobra.Command {
 		return parseGlobal(args, func(force, dryRun bool, rest []string) error {
 			return cmdRestart(rest, force, dryRun)
 		})
-	}), "Restart the provider's systemd unit. This is a production action, so it asks for a typed \"yes\" unless you pass -f/--force (or -y/--yes). Use -n/--dry-run to print the plan without acting.", "  urnet-tools restart --unit urnetwork-native.service\n  urnet-tools restart --network tacogonzalez3000 --force")
+	}), "Restart the provider's systemd unit. This is a production action, so it asks for a typed \"yes\" unless you pass -f/--force (or -y/--yes). Use -n/--dry-run to print the plan without acting.", "  urnet-tools restart --unit urnetwork-native.service\n  urnet-tools restart --network mynetwork --force")
 }
 
 func newUpdateCmd() *cobra.Command {
@@ -361,7 +361,7 @@ func newSummaryCmd() *cobra.Command {
 			return err
 		}
 		return cmdSimpleDelegation("summary", rest)
-	}), "Show a fleet-style activity and performance summary for one provider. This delegates to the provider binary's own proxy summary command, so it needs the provider binary to be reachable and running.", "  urnet-tools summary\n  urnet-tools summary --network tacogonzalez3000")
+	}), "Show a fleet-style activity and performance summary for one provider. This delegates to the provider binary's own proxy summary command, so it needs the provider binary to be reachable and running.", "  urnet-tools summary\n  urnet-tools summary --network mynetwork")
 }
 
 func newVersionCmd() *cobra.Command {
@@ -379,7 +379,7 @@ func newVersionCmd() *cobra.Command {
 func newDefaultCmd() *cobra.Command {
 	return withHelp(newCobraCmd("default", "persist a default provider target for this box", nil, func(cmd *cobra.Command, args []string) error {
 		return cmdDefault(args)
-	}), "Persist, show, or clear a default provider target for this box, so later commands with no explicit target resolve to it on multi-provider boxes. 'default set' requires exactly one of --unit, --user, --network, --network-id, or --state-dir; the default is stored per user and is ignored automatically if it becomes stale or ambiguous.", "  urnet-tools default set --network tacogonzalez3000\n  urnet-tools default show\n  urnet-tools default clear")
+	}), "Persist, show, or clear a default provider target for this box, so later commands with no explicit target resolve to it on multi-provider boxes. 'default set' requires exactly one of --unit, --user, --network, --network-id, or --state-dir; the default is stored per user and is ignored automatically if it becomes stale or ambiguous.", "  urnet-tools default set --network mynetwork\n  urnet-tools default show\n  urnet-tools default clear")
 }
 
 func newSessionCmd() *cobra.Command {
@@ -434,7 +434,7 @@ func newRamlogsCmd() *cobra.Command {
 		return parseGlobal(args, func(force, dryRun bool, rest []string) error {
 			return cmdTune("ramlogs", rest, force, dryRun)
 		})
-	}), "Show current RAM logging status, or turn it on/off. RAM logging writes provider logs to a RAM buffer instead of disk. This writes a systemd drop-in and restarts the provider unit, so it asks for a typed \\\"yes\\\" unless you pass -f/--force.", "  urnet-tools ramlogs\n  urnet-tools ramlogs on\n  urnet-tools ramlogs off --network tacogonzalez3000")
+	}), "Show current RAM logging status, or turn it on/off. RAM logging writes provider logs to a RAM buffer instead of disk. This writes a systemd drop-in and restarts the provider unit, so it asks for a typed \\\"yes\\\" unless you pass -f/--force.", "  urnet-tools ramlogs\n  urnet-tools ramlogs on\n  urnet-tools ramlogs off --network mynetwork")
 }
 
 func newOptimizeCmd() *cobra.Command {
