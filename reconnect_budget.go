@@ -564,9 +564,32 @@ func (self *reconnectBudget) probeLocked() {
 
 func rateString(rate float64) string { return fmt.Sprintf("%.1f/s", rate) }
 
+// governEventSink, when set, also receives every [govern] event line so the
+// embedding program can keep a durable record of enforcement (the ramlogs are
+// RAM and roll over within the hour). It must not block, and it is called from
+// emit sites that may hold the budget lock, so it must not call back into the
+// governor.
+var governEventSink atomic.Pointer[func(GovernEvent)]
+
+// SetGovernEventSink installs the durable sink for [govern] event lines; nil
+// removes it.
+func SetGovernEventSink(sink func(GovernEvent)) {
+	if sink == nil {
+		governEventSink.Store(nil)
+		return
+	}
+	governEventSink.Store(&sink)
+}
+
 // emitGovernLine writes a [govern] line to the log (the provider's important log
-// picks up every line that starts with it).
-func emitGovernLine(line string) { DefaultLogger().Infof("%s\n", line) }
+// picks up every line that starts with it) and hands it to the event sink.
+func emitGovernLine(line string) {
+	DefaultLogger().Infof("%s\n", line)
+	if sink := governEventSink.Load(); sink != nil {
+		kind, mode := ClassifyGovernLine(line)
+		(*sink)(GovernEvent{Kind: kind, Mode: mode, Line: line})
+	}
+}
 
 // writeOutageMarker leaves the marker file. Errors are ignored: the marker is a
 // courtesy to the next run, never a reason to fail.

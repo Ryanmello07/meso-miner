@@ -153,7 +153,7 @@ The former `[eco]` memory monitor lines are retired. Their host available RAM si
 
 ## 🎚️ Capacity Control: Trim, OOM Cap, Memory Headroom
 
-Every line here is mirrored to `/dev/shm/urnetwork-important.log` and to `~/.urnetwork/events.log` (1 MB, one rotation), so they survive a reboot and a full RAM buffer.
+Every line here is mirrored to the important log (`~/.urnetwork/important.log`, on disk, 10 MB plus one rotated `.1`; `urnet-tools logs -i`) and to `~/.urnetwork/events.log` (1 MB, one rotation), so they survive a reboot and a full RAM buffer.
 
 ```text
 [proxy][trim] received: cap=2000 (was none); 4127 running, 4127 desired, applying
