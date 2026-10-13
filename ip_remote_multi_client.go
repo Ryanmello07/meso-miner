@@ -310,7 +310,7 @@ type MultiClientSettings struct {
 	UdpCollapsePrevention bool
 
 	IngressSecurityPolicyGenerator func(*SecurityPolicyStatsCollector) SecurityPolicy
-	EgressSecurityPolicyGenerator  func(*SecurityPolicyStatsCollector) SecurityPolicy
+	EgressSecurityPolicyGenerator  func(context.Context, *SecurityPolicyStatsCollector) SecurityPolicy
 
 	// Log, when set, is used by this multi client and nested components.
 	// nil resolves to DefaultLogger().
@@ -519,7 +519,7 @@ func NewRemoteUserNatMultiClient(
 		log:                   log,
 		windows:               map[WindowType]*multiClientWindow{},
 		securityPolicyStats:   securityPolicyStats,
-		securityPolicy:        settings.EgressSecurityPolicyGenerator(securityPolicyStats),
+		securityPolicy:        settings.EgressSecurityPolicyGenerator(cancelCtx, securityPolicyStats),
 		ingressSecurityPolicy: settings.IngressSecurityPolicyGenerator(securityPolicyStats),
 		provideMode:           provideMode,
 		ip4PathUpdates:        map[Ip4Path]*multiClientChannelUpdate{},
@@ -1676,6 +1676,18 @@ func (self *RemoteUserNatMultiClient) clientReceivePacket(
 	// the flags are on the as-received path; Reverse drops them (see
 	// provenConnectPacket)
 	provenConnect := provenConnectPacket(ipPath)
+
+	if protocol.ProvideMode_Network != provideMode {
+		// keep the egress payload detector's flow clock fresh: this packet is
+		// the return direction of a flow the egress side may be tracking, and
+		// without the refresh a flow that is receiving but not (currently)
+		// sending would be reclaimed as idle. Network-mode packets bypass the
+		// detector entirely on the egress side, so no flow can exist for them.
+		if toucher, ok := self.securityPolicy.(dmcaIngressToucher); ok {
+			toucher.touchIngress(ipPath)
+		}
+	}
+
 	ipPath = ipPath.Reverse()
 
 	var abandonedClients []*multiClientChannel
