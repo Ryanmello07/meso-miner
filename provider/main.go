@@ -2964,6 +2964,8 @@ func provide(opts docopt.Opts) {
 		}
 	}
 
+	initEnforcementLog()
+
 	if !isHotSwapCandidate {
 		finishIdentity := bannerPhase("Identity")
 		host, _ := os.Hostname()
@@ -4540,6 +4542,9 @@ func provide(opts docopt.Opts) {
 
 	// All goroutines have finished. Log final status before exit.
 	tlog("[provider] exiting\n")
+	if globalEnforcementLog != nil {
+		globalEnforcementLog.flush()
+	}
 	critLog("PROVIDER EXIT: normal shutdown (code=0)")
 	// Explicitly close the DoH cache and flush retention events before
 	// os.Exit(0) since defers do not run on os.Exit. Both are idempotent —

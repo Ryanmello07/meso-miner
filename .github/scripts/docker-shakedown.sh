@@ -80,7 +80,7 @@ wait_cid_docker() {
     local cid
     cid=$(docker logs "$c" 2>&1 | grep -oE "client_id: [0-9a-fA-F-]+( \((new|reused)\))?" | tail -1 | awk '{print $2}')
     if [ -z "$cid" ]; then
-      cid=$(docker exec "$c" cat /dev/shm/urnetwork.log /dev/shm/urnetwork-important.log 2>/dev/null | grep -oE "client_id: [0-9a-fA-F-]+( \((new|reused)\))?" | tail -1 | awk '{print $2}')
+      cid=$(docker exec "$c" cat /dev/shm/urnetwork.log /root/.urnetwork/important.log /dev/shm/urnetwork-important.log 2>/dev/null | grep -oE "client_id: [0-9a-fA-F-]+( \((new|reused)\))?" | tail -1 | awk '{print $2}')
     fi
     if [ -n "$cid" ]; then echo "$cid"; return 0; fi
     if ! docker ps --format '{{.Names}}' | grep -qx "$c"; then return 1; fi

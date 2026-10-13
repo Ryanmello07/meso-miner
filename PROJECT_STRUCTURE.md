@@ -32,7 +32,7 @@ urnetwork-3.23-fix/
 │   ├── doh_cache.go                  # Persistent DNS-over-HTTPS cache with server-score persistence
 │   ├── net_http_doh.go               # DNS-over-HTTPS resolver (server scoring, serve-stale)
 │   ├── bandwidth_reporter.go         # Pushes periodic JSON telemetry to a configurable report URL
-│   ├── important_log.go              # Important-event log (/dev/shm/urnetwork-important.log)
+│   ├── important_log.go              # Important-event log (~/.urnetwork/important.log, disk)
 │   ├── oom_cap.go                    # OOM-aware start cap (shadow by default) + kill switch (oom-cap on|off|shadow)
 │   ├── action_ledger.go              # Audit ledger of capacity decisions (~/.urnetwork/autopilot.jsonl)
 │   ├── baseline.go                   # Local behaviour recorder (~/.urnetwork/baseline.jsonl) for upgrade comparison
