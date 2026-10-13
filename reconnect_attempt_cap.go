@@ -166,6 +166,13 @@ func (self *reconnectBudget) updateCapLocked(recent, minute govSnapshot, proxies
 // controlCap runs the attempt cap's control step and logs its transitions. The
 // proxy count and both snapshots are read before the budget lock is taken.
 func (self *reconnectBudget) controlCap(recent govSnapshot) {
+	self.controlCapWith(recent, runSideEffectNow)
+}
+
+// controlCapWith is controlCap with the caller's choice of where the log lines
+// run: the dispatcher goroutine hands them to the side-effect worker so a blocked
+// log write cannot stall it.
+func (self *reconnectBudget) controlCapWith(recent govSnapshot, run func(func()) bool) {
 	proxies := 0
 	if self.attemptCap.proxyCount != nil {
 		proxies = self.attemptCap.proxyCount()
@@ -177,11 +184,13 @@ func (self *reconnectBudget) controlCap(recent govSnapshot) {
 	minute := self.gov.snapshotWindow(govWindow)
 	self.mu.Lock()
 	events := self.updateCapLocked(recent, minute, proxies)
-	emit := self.emit
+	emit, at := self.emit, self.now()
 	self.mu.Unlock()
-	if emit != nil {
-		for _, line := range events {
-			emit(line)
-		}
+	if emit != nil && 0 < len(events) {
+		run(func() {
+			for _, line := range events {
+				self.emitDecision(emit, line, at)
+			}
+		})
 	}
 }

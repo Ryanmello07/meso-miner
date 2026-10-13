@@ -206,15 +206,19 @@ func (l *enforcementLog) appendLocked(r enforcementRecord) {
 	}
 	defer release()
 	if info, err := os.Stat(path); err == nil && l.maxBytes < info.Size() {
-		os.Rename(path, path+".1")
+		if os.Rename(path, path+".1") != nil {
+			l.writeErrors.Add(1)
+		}
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
 	if err != nil {
 		l.writeErrors.Add(1)
 		return
 	}
-	defer f.Close()
 	if _, err := f.Write(append(b, '\n')); err != nil {
+		l.writeErrors.Add(1)
+	}
+	if err := f.Close(); err != nil {
 		l.writeErrors.Add(1)
 	}
 }

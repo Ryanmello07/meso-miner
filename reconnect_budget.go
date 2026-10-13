@@ -216,8 +216,15 @@ type reconnectBudget struct {
 	side        chan func()
 	sideOnce    sync.Once
 	sideDropped atomic.Int64
-	queue       []*admitWaiter
-	dispatched  int
+	// markerResync is set when a side effect was dropped: the next decision
+	// re-applies the marker file state (write while throttled, remove otherwise)
+	// without waiting for the periodic refresh. Guarded by mu.
+	markerResync bool
+	// emitAt, when set, is used instead of emit for the budget's own decisions so
+	// a line keeps the time the decision was made even if its worker ran late.
+	emitAt     func(line string, at time.Time)
+	queue      []*admitWaiter
+	dispatched int
 
 	// lastCut is when the rate was last cut for reason=bytes or reason=verdict,
 	// and probeIntervals counts no-evidence control intervals since the last
@@ -231,7 +238,7 @@ type reconnectBudget struct {
 }
 
 func newReconnectBudget(gov *connectGovernor, now func() time.Time) *reconnectBudget {
-	b := &reconnectBudget{gov: gov, now: now, rate: budgetCeilingRate, memRate: budgetCeilingRate, lastTick: now(), pick: mathrand.Intn, memoryPressure: readMemoryPressure, emit: emitGovernLine}
+	b := &reconnectBudget{gov: gov, now: now, rate: budgetCeilingRate, memRate: budgetCeilingRate, lastTick: now(), pick: mathrand.Intn, memoryPressure: readMemoryPressure, emit: emitGovernLine, emitAt: emitGovernLineAt}
 	b.attemptCap.proxyCount = proxiedCount
 	return b
 }
@@ -433,7 +440,13 @@ func (self *reconnectBudget) nextLocked() int {
 // control adjusts the rate from what recent attempts did. Cut hard on evidence
 // of failure, open fast on evidence of success, hold in between.
 func (self *reconnectBudget) control() {
-	self.controlWith(func(f func()) { f() })
+	self.controlWith(runSideEffectNow)
+}
+
+// runSideEffectNow runs a side effect on the calling goroutine.
+func runSideEffectNow(f func()) bool {
+	f()
+	return true
 }
 
 // controlWith is control with the caller's choice of where the decision's side
@@ -442,13 +455,20 @@ func (self *reconnectBudget) control() {
 // stalled disk must not stop it ticking, because a stale tick makes every parked
 // waiter look stalled and releases them all, and the budget is cut at exactly the
 // moment the backend is failing.
-func (self *reconnectBudget) controlWith(run func(func())) {
+func (self *reconnectBudget) controlWith(run func(func()) bool) {
 	recent := self.gov.snapshotWindow(budgetRecentWindow)
 	// the marker's file operation runs after the lock is released
 	if after := self.adjust(recent); after != nil {
-		run(after)
+		if !run(after) {
+			// the effect was dropped (the worker's queue is full). Log lines may be
+			// lost, but the marker file must end up true to the budget, so the next
+			// decision re-applies whatever the marker should be.
+			self.mu.Lock()
+			self.markerResync = true
+			self.mu.Unlock()
+		}
 	}
-	self.controlCap(recent)
+	self.controlCapWith(recent, run)
 }
 
 // budgetSideQueueLen bounds the side effects waiting for the worker. Decisions are
@@ -460,7 +480,7 @@ const budgetSideQueueLen = 256
 // full queue drops it and counts: the marker write is repeated every
 // outageMarkerWriteEvery while throttled, and a dropped log line is better than a
 // stalled dispatcher.
-func (self *reconnectBudget) enqueueSide(f func()) {
+func (self *reconnectBudget) enqueueSide(f func()) bool {
 	self.sideOnce.Do(func() {
 		self.side = make(chan func(), budgetSideQueueLen)
 		go func() {
@@ -471,8 +491,10 @@ func (self *reconnectBudget) enqueueSide(f func()) {
 	})
 	select {
 	case self.side <- f:
+		return true
 	default:
 		self.sideDropped.Add(1)
+		return false
 	}
 }
 
@@ -566,11 +588,11 @@ func (self *reconnectBudget) adjust(recent govSnapshot) func() {
 	if len(events) == 0 {
 		return markerOp
 	}
-	emit := self.emit
+	emit, at := self.emit, self.now()
 	return func() {
 		if emit != nil {
 			for _, line := range events {
-				emit(line)
+				self.emitDecision(emit, line, at)
 			}
 		}
 		if markerOp != nil {
@@ -622,12 +644,25 @@ func SetGovernEventSink(sink func(GovernEvent)) {
 
 // emitGovernLine writes a [govern] line to the log (the provider's important log
 // picks up every line that starts with it) and hands it to the event sink.
-func emitGovernLine(line string) {
+func emitGovernLine(line string) { emitGovernLineAt(line, time.Now()) }
+
+// emitGovernLineAt is emitGovernLine for a decision made at the given time, which
+// the event keeps even if this call runs late (a worker behind a stalled disk).
+func emitGovernLineAt(line string, at time.Time) {
 	DefaultLogger().Infof("%s\n", line)
 	if sink := governEventSink.Load(); sink != nil {
 		kind, mode := ClassifyGovernLine(line)
-		(*sink)(GovernEvent{Kind: kind, Mode: mode, Line: line, At: time.Now()})
+		(*sink)(GovernEvent{Kind: kind, Mode: mode, Line: line, At: at})
 	}
+}
+
+// emitDecision emits one of the budget's lines with the time of its decision.
+func (self *reconnectBudget) emitDecision(emit func(string), line string, at time.Time) {
+	if self.emitAt != nil {
+		self.emitAt(line, at)
+		return
+	}
+	emit(line)
 }
 
 // writeOutageMarker leaves the marker file. Errors are ignored: the marker is a
@@ -656,14 +691,17 @@ func (self *reconnectBudget) planOutageMarkerLocked() func() {
 		return nil
 	}
 	path := self.markerPath
+	// a dropped side effect asks for the marker to be re-applied now
+	resync := self.markerResync
+	self.markerResync = false
 	if self.rate < budgetCeilingRate {
-		if outageMarkerWriteEvery <= self.now().Sub(self.lastMarkerWrite) {
+		if resync || outageMarkerWriteEvery <= self.now().Sub(self.lastMarkerWrite) {
 			self.lastMarkerWrite = self.now()
 			return func() { self.writeOutageMarker(path) }
 		}
 		return nil
 	}
-	if !self.lastMarkerWrite.IsZero() {
+	if !self.lastMarkerWrite.IsZero() || resync {
 		self.lastMarkerWrite = time.Time{}
 		return func() { self.removeOutageMarker(path) }
 	}

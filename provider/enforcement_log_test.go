@@ -361,3 +361,22 @@ func TestEnforcementLogIsInstalledBeforeTheGovernorsEmit(t *testing.T) {
 		t.Fatal("initEnforcementLog must be called exactly once")
 	}
 }
+
+// A rotation that cannot rename the old file is a swallowed file error and must be
+// counted, or the write-error metric understates what is lost.
+func TestEnforcementRotationFailureIsCounted(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	l := testEnforcementLog(t, dir, &now)
+	l.maxBytes = 1 // rotate on every append after the first
+	// a non-empty directory where the rotated file would go makes the rename fail
+	rotated := filepath.Join(dir, enforcementLogName+".1")
+	if err := os.MkdirAll(filepath.Join(rotated, "keep"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	l.record(ev("budget_cut", "enforce"))
+	l.record(ev("budget_cut", "shadow"))
+	if l.writeErrors.Load() == 0 {
+		t.Fatal("a failed rotation was not counted")
+	}
+}

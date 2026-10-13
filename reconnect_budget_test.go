@@ -1058,6 +1058,7 @@ func (e *budgetEvents) joined() string {
 func TestBudget_LogsEachCutAndTheReopenWithTheEvidence(t *testing.T) {
 	h := newBudgetHarness()
 	ev := &budgetEvents{}
+	h.budget.emitAt = nil
 	h.budget.emit = ev.emit
 	h.attempts(connectTimeoutPlatform, 60)
 	h.budget.control()
@@ -1081,6 +1082,7 @@ func TestBudget_LogsEachCutAndTheReopenWithTheEvidence(t *testing.T) {
 func TestBudget_ByteBreakerCutNamesItsReason(t *testing.T) {
 	h := newBudgetHarness()
 	ev := &budgetEvents{}
+	h.budget.emitAt = nil
 	h.budget.emit = ev.emit
 	h.failedBytes(connectOK, 100, 20_000)
 	h.failedBytes(connectTimeoutNoReply, 400, 20_000)
@@ -1093,6 +1095,7 @@ func TestBudget_ByteBreakerCutNamesItsReason(t *testing.T) {
 func TestBudget_LogsMemoryPressureStartAndEnd(t *testing.T) {
 	h := newBudgetHarness()
 	ev := &budgetEvents{}
+	h.budget.emitAt = nil
 	h.budget.emit = ev.emit
 	pressured := true
 	h.budget.memoryPressure = func() bool { return pressured }
@@ -1124,6 +1127,7 @@ func TestBudget_LogsAFoundRestartMarker(t *testing.T) {
 	}
 	h := newBudgetHarness()
 	ev := &budgetEvents{}
+	h.budget.emitAt = nil
 	h.budget.emit = ev.emit
 	h.budget.restoreOutageMarker(path, time.Now())
 	if got := ev.joined(); !strings.Contains(got, "[govern] restart marker found") || !strings.Contains(got, "starting at 2.0/s") {
@@ -1157,6 +1161,7 @@ func TestBudget_BlockedSideEffectsDoNotStallTheDispatcher(t *testing.T) {
 	h := newBudgetHarness()
 	release := make(chan struct{})
 	started := make(chan struct{}, 8)
+	h.budget.emitAt = nil
 	h.budget.emit = func(string) {
 		started <- struct{}{}
 		<-release // a stuck disk
@@ -1220,5 +1225,127 @@ func TestBudget_SideEffectQueueDropsAndCountsWhenFull(t *testing.T) {
 	}
 	if ran.Load() != budgetSideQueueLen {
 		t.Fatalf("ran = %d, want the %d queued effects", ran.Load(), budgetSideQueueLen)
+	}
+}
+
+// The attempt cap's transitions are logged from the same control step. They must
+// go through the side-effect worker too, or a blocked log write still stalls the
+// dispatcher.
+func TestBudget_AttemptCapLogLinesDoNotStallTheDispatcher(t *testing.T) {
+	h, _ := newCapHarness(4000)
+	release := make(chan struct{})
+	started := make(chan struct{}, 8)
+	h.budget.emit = func(string) {
+		started <- struct{}{}
+		<-release
+	}
+	storm := func() {
+		h.attempts(connectSocksFail, 1800)
+		h.attempts(connectOK, 200)
+		h.advance(30 * time.Second)
+		h.budget.controlWith(h.budget.enqueueSide)
+		h.advance(30 * time.Second)
+	}
+	done := make(chan struct{})
+	go func() {
+		storm()
+		storm() // the second sustained storm minute engages the cap and logs it
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the control step blocked on a log write")
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no log line ever reached the worker")
+	}
+	if h.budget.currentCap() == 0 {
+		t.Fatal("the cap must engage regardless of the log write")
+	}
+	close(release)
+	drained := make(chan struct{})
+	h.budget.enqueueSide(func() { close(drained) })
+	select {
+	case <-drained:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the worker never drained")
+	}
+}
+
+// A dropped side effect (full queue) must not leave a stale marker: the marker
+// file is state, not a log line, so the next decision re-applies it.
+func TestBudget_DroppedMarkerRemovalIsRetried(t *testing.T) {
+	path := t.TempDir() + "/govern_outage"
+	h := newBudgetHarness()
+	h.budget.markerPath = path
+	h.attempts(connectTimeoutPlatform, 200)
+	h.attempts(connectUpgradeFail, 5)
+	h.budget.control() // throttles and writes the marker
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("setup: the marker was not written: %v", err)
+	}
+
+	dropped := func(func()) bool { return false }
+	for i := 0; i < 30 && h.budget.throttled(); i++ {
+		h.advance(budgetControlInterval)
+		h.attempts(connectOK, 20)
+		h.budget.controlWith(dropped) // every effect is dropped, including the removal
+	}
+	if h.budget.throttled() {
+		t.Fatal("setup: the budget never reopened")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("setup: the removal should have been dropped, leaving the marker: %v", err)
+	}
+	// the next decision, with nothing else to report, removes it
+	h.advance(budgetControlInterval)
+	h.budget.control()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("the stale marker was never removed (stat err = %v)", err)
+	}
+}
+
+func TestBudget_DroppedMarkerWriteIsRetriedBeforeTheRefreshInterval(t *testing.T) {
+	path := t.TempDir() + "/govern_outage"
+	h := newBudgetHarness()
+	h.budget.markerPath = path
+	h.attempts(connectTimeoutPlatform, 200)
+	h.attempts(connectUpgradeFail, 5)
+	h.budget.controlWith(func(func()) bool { return false }) // the first write is dropped
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("setup: the write should have been dropped")
+	}
+	h.advance(time.Second) // far less than outageMarkerWriteEvery
+	h.attempts(connectTimeoutPlatform, 50)
+	h.budget.control()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("a throttled budget must have its marker after a dropped write: %v", err)
+	}
+}
+
+// A line keeps the time its decision was made, not the time a late worker got to it.
+func TestBudget_QueuedLinesKeepTheirDecisionTime(t *testing.T) {
+	h := newBudgetHarness()
+	var gotAt time.Time
+	var gotLine string
+	h.budget.emitAt = func(line string, at time.Time) { gotLine, gotAt = line, at }
+	h.attempts(connectTimeoutPlatform, 200)
+
+	var deferred func()
+	decided := h.budget.now()
+	h.budget.controlWith(func(f func()) bool { deferred = f; return true })
+	if deferred == nil {
+		t.Fatal("the decision produced no side effect")
+	}
+	h.advance(10 * time.Minute) // the worker runs late
+	deferred()
+	if gotLine == "" {
+		t.Fatal("no line emitted")
+	}
+	if !gotAt.Equal(decided) {
+		t.Fatalf("line stamped %v, want the decision time %v", gotAt, decided)
 	}
 }
