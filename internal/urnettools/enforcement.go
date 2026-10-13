@@ -167,6 +167,19 @@ func renderEnforcementHistory(rows []enforcementRow) string {
 	return b.String()
 }
 
+// enforcementAbsentNote returns the operator-facing note for a state dir that
+// holds neither enforcement log file, or "" when at least one exists. An empty
+// file is still a record (the provider creates the files it writes), so only a
+// completely absent log gets the note.
+func enforcementAbsentNote(stateDir string) string {
+	_, errLog := os.Stat(filepath.Join(stateDir, enforcementLogFile))
+	_, errDaily := os.Stat(filepath.Join(stateDir, enforcementDailyFile))
+	if errLog == nil || errDaily == nil {
+		return ""
+	}
+	return fmt.Sprintf("No enforcement log found in %s. The provider may be older than the version that records it, be using a different state dir, or be unable to write there.\n", stateDir)
+}
+
 // readEnforcementDaily reads the persisted counts; a missing file is empty.
 func readEnforcementDaily(stateDir string) (enforcementDaily, error) {
 	var d enforcementDaily
@@ -224,6 +237,10 @@ func cmdEnforcement(args []string) error {
 		return fmt.Errorf("provider %s has no resolvable state dir", providerLabel(p))
 	}
 	fmt.Printf("Governor enforcement for %s (%s)\n\n", providerLabel(p), p.StateDir)
+	if note := enforcementAbsentNote(p.StateDir); note != "" {
+		fmt.Print(note)
+		return nil
+	}
 	if sub == "history" {
 		rows, err := readEnforcementTail(p.StateDir, limit)
 		if err != nil {
