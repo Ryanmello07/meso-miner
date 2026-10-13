@@ -221,9 +221,12 @@ var specialUseIpv6 = func() []*net.IPNet {
 		"64:ff9b:1::/48", // NAT64 local-use prefix (RFC 8215)
 		"100::/64",       // discard-only (RFC 6666)
 		"2001::/32",      // Teredo
+		"2001:2::/48",    // benchmarking (RFC 5180), not globally reachable
 		"2001:db8::/32",  // documentation
 		"2002::/16",      // 6to4
+		"3fff::/20",      // documentation (RFC 9637)
 		"3ffe::/16",      // 6bone (retired)
+		"5f00::/16",      // SRv6 segment identifiers (RFC 9602), not globally reachable
 		"fec0::/10",      // site-local (deprecated)
 	}
 	nets := make([]*net.IPNet, 0, len(cidrs))
