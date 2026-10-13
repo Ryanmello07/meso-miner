@@ -798,6 +798,7 @@ func TestH3ConnectAttemptsFeedTheGovernorOnlyWhenNotAuxiliary(t *testing.T) {
 		transport.settings.QuicHandshakeTimeout = 50 * time.Millisecond
 		transport.settings.ReconnectTimeout = 10 * time.Second
 		switchH3Gate(t, true)
+		resetGovernorWindow(t)
 		before := connectGov.snapshot().Attempts
 		beforeStats := TransportModeStats().H3ConnectFailures
 		done := make(chan struct{})

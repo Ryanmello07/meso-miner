@@ -21,6 +21,22 @@ func newTestFlapGuard(stableAfter time.Duration, base time.Duration) *flapGuard 
 	return g
 }
 
+// The governor keeps its counts as a 60-second sliding window, so a
+// before/after diff of connectGov.snapshot() measures "what this test added
+// minus what earlier tests recorded up to a minute ago and then aged out". In
+// a wider -run set that subtraction shows up and can even go negative, which
+// is what made TestRunH1_FeedsTheGovernor flaky. A test that diffs the window
+// clears it first, so the diff is exactly what the test recorded. The ring is
+// written by packet loops under the same mutex, so the clear is race-clean.
+func resetGovernorWindow(t *testing.T) {
+	t.Helper()
+	connectGov.mu.Lock()
+	defer connectGov.mu.Unlock()
+	for i := range connectGov.ring {
+		connectGov.ring[i] = govBucket{}
+	}
+}
+
 func TestFlapGuard_StableSessionNeedsNoExtraWait(t *testing.T) {
 	g := newTestFlapGuard(60*time.Second, 5*time.Second)
 	if got := g.sessionEnded(2 * time.Hour); got != 0 {
@@ -235,6 +251,7 @@ func TestRunH1_FeedsTheGovernor(t *testing.T) {
 	server := flapServer(0, &accepts, &stamps)
 	defer server.Close()
 
+	resetGovernorWindow(t)
 	before := connectGov.snapshot()
 
 	settings := DefaultPlatformTransportSettings()
@@ -270,6 +287,7 @@ func TestRunH1_FailedAttemptsReachTheGovernor(t *testing.T) {
 	url := server.URL
 	server.Close() // nothing listens any more: every dial is refused
 
+	resetGovernorWindow(t)
 	before := connectGov.snapshot()
 
 	settings := DefaultPlatformTransportSettings()
@@ -310,6 +328,7 @@ func TestRunH1_LocalTeardownIsNotAnEarlyDeath(t *testing.T) {
 	settings.ReconnectTimeout = 20 * time.Millisecond
 	settings.FlapStableAfter = time.Hour // any session counts as young
 
+	resetGovernorWindow(t)
 	before := connectGov.snapshot()
 	transport := newFlapTestTransport(t, ctx, server.URL, settings)
 
@@ -356,6 +375,7 @@ func TestRunH1_ClientLimitCloseIsNotAnEarlyDeath(t *testing.T) {
 	settings.ReconnectTimeout = 20 * time.Millisecond
 	settings.FlapStableAfter = time.Hour // every session is young
 
+	resetGovernorWindow(t)
 	before := connectGov.snapshot()
 	transport := newFlapTestTransport(t, ctx, server.URL, settings)
 	defer transport.Close()
@@ -380,6 +400,7 @@ func TestSessionEnd_YoungSessionIsHeldAndCountedOnce(t *testing.T) {
 	flaps := newFlapGuard(time.Minute, time.Second)
 	flaps.jitter = func(d time.Duration) time.Duration { return d }
 	ctx := context.Background()
+	resetGovernorWindow(t)
 	before := connectGov.snapshot()
 	wait := sessionEndWait(ctx, flaps, 3*time.Second, false, "c", loggerOrDefault(nil), true, "url")
 	if wait != time.Second {
@@ -392,6 +413,7 @@ func TestSessionEnd_YoungSessionIsHeldAndCountedOnce(t *testing.T) {
 
 func TestSessionEnd_StableSessionHasNoWaitAndNoEarlyDeath(t *testing.T) {
 	flaps := newFlapGuard(time.Minute, time.Second)
+	resetGovernorWindow(t)
 	before := connectGov.snapshot()
 	if wait := sessionEndWait(context.Background(), flaps, 5*time.Minute, false, "c", loggerOrDefault(nil), true, "url"); wait != 0 {
 		t.Fatalf("stable session wait = %v, want 0", wait)
@@ -406,6 +428,7 @@ func TestSessionEnd_LocalTeardownAndAuxiliaryAreNotEarlyDeaths(t *testing.T) {
 	flaps.jitter = func(d time.Duration) time.Duration { return d }
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
+	resetGovernorWindow(t)
 	before := connectGov.snapshot()
 	sessionEndWait(cancelled, flaps, time.Second, false, "c", loggerOrDefault(nil), true, "url")
 	// an auxiliary H3 beside H1 is never a health signal, but is still held back
@@ -420,6 +443,7 @@ func TestSessionEnd_LocalTeardownAndAuxiliaryAreNotEarlyDeaths(t *testing.T) {
 func TestSessionEnd_ClientLimitCloseIsNotAnEarlyDeath(t *testing.T) {
 	flaps := newFlapGuard(time.Minute, time.Second)
 	flaps.jitter = func(d time.Duration) time.Duration { return d }
+	resetGovernorWindow(t)
 	before := connectGov.snapshot()
 	sessionEndWait(context.Background(), flaps, time.Second, true, "c", loggerOrDefault(nil), true, "url")
 	if got := connectGov.snapshot().Early - before.Early; got != 0 {
