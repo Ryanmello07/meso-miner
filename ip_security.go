@@ -189,6 +189,13 @@ var cgnat4 = net.IPNet{
 }
 
 func isPublicUnicast(ip net.IP) bool {
+	// an IPv4-mapped IPv6 address (::ffff:a.b.c.d) is dialed over IPv4, so it is
+	// judged as the IPv4 address it wraps
+	if ip4 := ip.To4(); ip4 != nil {
+		ip = ip4
+	} else if len(ip) == net.IPv6len && isSpecialUseIpv6(ip) {
+		return false
+	}
 	switch {
 	case ip.IsPrivate(),
 		ip.IsLoopback(),
@@ -200,6 +207,43 @@ func isPublicUnicast(ip net.IP) bool {
 	default:
 		return true
 	}
+}
+
+// specialUseIpv6 are IPv6 ranges that are not an ordinary public destination for
+// relayed traffic. Several of them embed an IPv4 address (NAT64, 6to4, Teredo,
+// IPv4-compatible): relaying to them on a host or network that translates them
+// reaches IPv4 space the IPv4 checks (private ranges, the CFAA blocklist) never
+// saw. They are refused outright.
+var specialUseIpv6 = func() []*net.IPNet {
+	cidrs := []string{
+		"::/96",          // IPv4-compatible (deprecated), also the unspecified address
+		"64:ff9b::/96",   // NAT64 well-known prefix (RFC 6052)
+		"64:ff9b:1::/48", // NAT64 local-use prefix (RFC 8215)
+		"100::/64",       // discard-only (RFC 6666)
+		"2001::/32",      // Teredo
+		"2001:db8::/32",  // documentation
+		"2002::/16",      // 6to4
+		"3ffe::/16",      // 6bone (retired)
+		"fec0::/10",      // site-local (deprecated)
+	}
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, cidr := range cidrs {
+		_, n, err := net.ParseCIDR(cidr)
+		if err != nil {
+			panic(err)
+		}
+		nets = append(nets, n)
+	}
+	return nets
+}()
+
+func isSpecialUseIpv6(ip net.IP) bool {
+	for _, n := range specialUseIpv6 {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 type SecurityPolicyStats = map[SecurityPolicyResult]map[SecurityDestination]uint64

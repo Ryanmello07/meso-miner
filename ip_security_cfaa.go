@@ -73,8 +73,8 @@ func newCfaaDetector(settings *CfaaSecurityPolicySettings) *cfaaDetector {
 }
 
 // inspect applies the static rules to a single endpoint (destination on egress,
-// source on ingress). version is the IP version (4 or 6); the blocklist is
-// currently IPv4 only.
+// source on ingress). version is the IP version (4 or 6); an IPv4-mapped IPv6
+// address is judged as IPv4.
 //
 // Port policy (see ip_security_cfaa_test.go for the exhaustive table):
 //   - bittorrent / abused ports                     -> drop
@@ -86,6 +86,14 @@ func newCfaaDetector(settings *CfaaSecurityPolicySettings) *cfaaDetector {
 func (self *cfaaDetector) inspect(ip net.IP, port int, protocol IpProtocol, version int) cfaaVerdict {
 	if !self.settings.Enabled {
 		return cfaaPass
+	}
+
+	// An IPv4-mapped IPv6 address (::ffff:a.b.c.d) is dialed over IPv4. Judge it
+	// as the IPv4 address it wraps, or the packet's IPv6 version sends it to the
+	// IPv6 table and an address on the IPv4 blocklist is reachable by writing it
+	// in mapped form.
+	if ip.To4() != nil {
+		version = 4
 	}
 
 	// Blocked-IP reputation takes precedence over the port policy.
