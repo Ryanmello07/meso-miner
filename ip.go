@@ -1560,9 +1560,21 @@ func (self *StreamState) DataPackets(payload []byte, n int, mtu int) ([][]byte, 
 		return nil, fmt.Errorf("mtu %d is too small for IP+UDP headers (%d bytes)", mtu, headerByteCount)
 	}
 	packetByteCount := mtu - headerByteCount
+	// the IPv6 payload length is 16 bits wide, so a UDP datagram larger than this
+	// cannot be represented at all; check it before either packetization branch
+	if self.ipVersion == 6 && 0xffff-UdpHeaderSize < n {
+		return nil, fmt.Errorf("udp payload of %d bytes exceeds the datagram limit", n)
+	}
 	if n <= packetByteCount {
 		self.singleDataPacket[0] = self.udpPacket(payload[0:n])
 		return self.singleDataPacket[:], nil
+	}
+	if self.ipVersion == 6 {
+		// splitting one UDP payload into several independent datagrams would
+		// corrupt application framing, so an oversized datagram is fragmented
+		// at the ip layer and reassembled by the source stack. The fragment
+		// sequence carries the full datagram's udp header and checksum once.
+		return fragmentIpv6Packet(self.udpPacket(payload[:n]), mtu)
 	}
 	packets := make([][]byte, 0, (n+packetByteCount-1)/packetByteCount)
 	for i := 0; i < n; {
