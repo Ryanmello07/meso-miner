@@ -259,3 +259,11 @@ The test file covers the two enabled rules. `prometheus.yml` lists `urnetwork.ym
 | `urnet_tcp_orphans` | gauge | | Orphaned TCP sockets (Linux) |
 | `urnet_goroutines` | gauge | | Goroutines |
 | `urnet_pool_latency_ms` | gauge | | Message pool average latency |
+| `urnet_enforcement_events_total` | counter | `kind`, `mode` | Governor events recorded in the durable enforcement log since it began, by kind and mode. Survives restarts; each kind counts events as the governors emit them, so `dead_client_release` is rate-limited per destination and `retry_budget` is an aggregate report |
+| `urnet_enforcement_events` | gauge | `kind`, `mode`, `window` | Governor events in the durable log over today, the last 7 and 30 UTC days (`window` is `today`, `7d` or `30d`) |
+| `urnet_enforcement_log_suppressed_total` | counter | | Event lines counted but not written because a kind exceeded the per-minute line limit |
+| `urnet_enforcement_log_dropped_total` | counter | | Events dropped because the enforcement log's queue was full (the disk stalled) |
+| `urnet_enforcement_log_write_errors_total` | counter | | Enforcement log file operations that failed and were swallowed. Non-zero means the durable record is incomplete |
+| `urnet_disk_write_mbps` | gauge | | Synchronous write speed measured by the startup disk benchmark, MB/s (auto profile only; absent until one has run) |
+| `urnet_disk_slow` | gauge | | 1 when the last disk benchmark judged the disk slow (under 50 MB/s) or it hung |
+| `urnet_disk_bench_age_seconds` | gauge | | Age of the last disk benchmark result |
