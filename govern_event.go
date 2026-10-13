@@ -1,6 +1,9 @@
 package connect
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // GovernEvent is one [govern] event line with what it means: which kind of
 // action it reports and which mode that action ran under. The embedding program
@@ -9,6 +12,9 @@ type GovernEvent struct {
 	Kind string
 	Mode string
 	Line string
+	// At is when the event was emitted. A sink that records it later (a queue
+	// behind a stalled disk) keeps the emit time instead of the time it got to it.
+	At time.Time
 }
 
 // Kinds that are not enforcement. They still pass through the sink so the

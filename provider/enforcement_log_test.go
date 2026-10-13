@@ -263,3 +263,120 @@ func TestEnforcementLogNeverPanicsOnUnwritableDir(t *testing.T) {
 	l.record(ev("budget_cut", "shadow")) // must not panic or block
 	l.flush()
 }
+
+// A stalled disk must not stall the goroutine that emits the event: the sink only
+// does a non-blocking send, and a full queue drops and counts.
+func TestEnforcementSinkNeverBlocksWhenTheWorkerIsStuck(t *testing.T) {
+	now := time.Now()
+	l := testEnforcementLog(t, t.TempDir(), &now)
+	l.queue = make(chan connect.GovernEvent, 2) // no worker: nothing drains it
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < 50; i++ {
+			l.enqueue(ev("budget_cut", "enforce"))
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("enqueue blocked while the queue was full")
+	}
+	if got := l.dropped.Load(); got != 48 {
+		t.Fatalf("dropped = %d, want 48 (50 sent, 2 queued)", got)
+	}
+}
+
+func TestEnforcementAsyncWorkerRecordsQueuedEvents(t *testing.T) {
+	now := time.Date(2026, 10, 12, 20, 0, 0, 0, time.UTC)
+	l := testEnforcementLog(t, t.TempDir(), &now)
+	l.startAsync()
+	l.enqueue(ev("restart_marker", "enforce"))
+	l.enqueue(ev("crash_loop", "enforce"))
+	deadline := time.Now().Add(2 * time.Second)
+	for totalOf(l, "restart_marker", "enforce")+totalOf(l, "crash_loop", "enforce") < 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("worker never recorded the queued events")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if l.dropped.Load() != 0 {
+		t.Fatalf("dropped = %d", l.dropped.Load())
+	}
+}
+
+// Without the worker (tests, a log built by hand) the sink falls back to a direct
+// write instead of losing the event.
+func TestEnforcementEnqueueWithoutWorkerWritesDirectly(t *testing.T) {
+	now := time.Now()
+	l := testEnforcementLog(t, t.TempDir(), &now)
+	l.enqueue(ev("budget_cut", "enforce"))
+	if totalOf(l, "budget_cut", "enforce") != 1 {
+		t.Fatal("event lost")
+	}
+}
+
+func TestEnforcementWriteFailuresAreCounted(t *testing.T) {
+	now := time.Now()
+	l := newEnforcementLog("/proc/definitely/not/writable", func() time.Time { return now })
+	l.record(ev("budget_cut", "enforce"))
+	l.flush()
+	if l.writeErrors.Load() < 2 {
+		t.Fatalf("writeErrors = %d, want the failed append and the failed flush counted", l.writeErrors.Load())
+	}
+	old := globalEnforcementLog
+	globalEnforcementLog = l
+	defer func() { globalEnforcementLog = old }()
+	var b strings.Builder
+	writeEnforcementMetrics(&b)
+	for _, want := range []string{"urnet_enforcement_log_write_errors_total ", "urnet_enforcement_log_dropped_total 0"} {
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("metrics missing %q", want)
+		}
+	}
+	if strings.Contains(b.String(), "urnet_enforcement_log_write_errors_total 0\n") {
+		t.Error("write errors exported as 0 after failures")
+	}
+}
+
+// restart_marker and crash_loop are emitted inside InitGovernState and
+// NoteGovernStart, so the sink has to exist before they run.
+func TestEnforcementLogIsInstalledBeforeTheGovernorsEmit(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(src)
+	init := strings.Index(s, "initEnforcementLog()")
+	state := strings.Index(s, "connect.InitGovernState(")
+	start := strings.Index(s, "connect.NoteGovernStart(")
+	if init < 0 || state < 0 || start < 0 {
+		t.Fatalf("call sites not found: %d %d %d", init, state, start)
+	}
+	if init > state || init > start {
+		t.Fatal("initEnforcementLog must be called before InitGovernState and NoteGovernStart")
+	}
+	if strings.Count(s, "initEnforcementLog()") != 1 {
+		t.Fatal("initEnforcementLog must be called exactly once")
+	}
+}
+
+// A rotation that cannot rename the old file is a swallowed file error and must be
+// counted, or the write-error metric understates what is lost.
+func TestEnforcementRotationFailureIsCounted(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	l := testEnforcementLog(t, dir, &now)
+	l.maxBytes = 1 // rotate on every append after the first
+	// a non-empty directory where the rotated file would go makes the rename fail
+	rotated := filepath.Join(dir, enforcementLogName+".1")
+	if err := os.MkdirAll(filepath.Join(rotated, "keep"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	l.record(ev("budget_cut", "enforce"))
+	l.record(ev("budget_cut", "shadow"))
+	if l.writeErrors.Load() == 0 {
+		t.Fatal("a failed rotation was not counted")
+	}
+}
