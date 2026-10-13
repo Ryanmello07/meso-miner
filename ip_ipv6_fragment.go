@@ -7,6 +7,7 @@ package connect
 // source stack reassembles. The receive-side reassembler is not ported.
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"sync/atomic"
@@ -51,12 +52,27 @@ func isIpv6ExtensionHeader(nextHeader byte) bool {
 	}
 }
 
-var ipv6FragmentIdentification atomic.Uint32
+// ipv6FragmentIdentificationFallback only runs if the system random source
+// fails, which should not happen; a predictable identification is still better
+// than failing the reply.
+var ipv6FragmentIdentificationFallback atomic.Uint32
 
+// nextIpv6FragmentIdentification returns a nonzero 32-bit identification that
+// is unpredictable and, over a 32-bit space, unlikely to repeat for a source and
+// destination within a reassembly window (RFC 7739 and RFC 8200 section 4.5 on
+// predictable identifications and their reuse). The fragments here travel inside
+// the tunnel to the client's stack, but the identification costs one random read
+// only on the rare oversized-reply path, so it is unpredictable regardless.
 func nextIpv6FragmentIdentification() uint32 {
+	var b [4]byte
 	for {
-		identification := ipv6FragmentIdentification.Add(1)
-		if identification != 0 {
+		if _, err := rand.Read(b[:]); err != nil {
+			if identification := ipv6FragmentIdentificationFallback.Add(1); identification != 0 {
+				return identification
+			}
+			continue
+		}
+		if identification := binary.BigEndian.Uint32(b[:]); identification != 0 {
 			return identification
 		}
 	}

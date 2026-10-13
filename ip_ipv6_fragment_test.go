@@ -103,3 +103,52 @@ func TestStreamStateDataPacketsFragmentsOversizedIpv6Datagram(t *testing.T) {
 		t.Fatalf("a %d byte payload must fragment into at least 3 pieces, got %d", len(big), len(packets))
 	}
 }
+
+// The identification must be nonzero and unpredictable: a counter would let an
+// attacker who can trigger fragmented replies guess the next one.
+func TestIpv6FragmentIdentificationIsUnpredictableAndNonzero(t *testing.T) {
+	const count = 256
+	ids := make([]uint32, count)
+	sequential := 0
+	for i := range ids {
+		ids[i] = nextIpv6FragmentIdentification()
+		if ids[i] == 0 {
+			t.Fatal("zero identification")
+		}
+		if 0 < i && ids[i] == ids[i-1]+1 {
+			sequential++
+		}
+	}
+	if sequential == count-1 {
+		t.Fatalf("every identification followed the previous by one: the counter is predictable")
+	}
+	seen := map[uint32]bool{}
+	dup := 0
+	for _, id := range ids {
+		if seen[id] {
+			dup++
+		}
+		seen[id] = true
+	}
+	if 1 < dup {
+		t.Fatalf("%d repeated identifications in %d draws", dup, count)
+	}
+}
+
+// A payload above the datagram limit is refused even when the mtu is large enough
+// that it would otherwise take the single-packet branch.
+func TestStreamStateDataPacketsRefusesAnUnrepresentableIpv6Datagram(t *testing.T) {
+	stream := newTestStreamState(6)
+	payload := make([]byte, 65528)
+	if _, err := stream.DataPackets(payload, len(payload), 70000); err == nil {
+		t.Fatal("a 65528 byte udp payload over a 70000 mtu was packetized instead of refused")
+	}
+	if _, err := stream.DataPackets(payload, len(payload), DefaultMtu); err == nil {
+		t.Fatal("a 65528 byte udp payload was fragmented instead of refused")
+	}
+	// the limit itself is representable
+	ok := make([]byte, 65527)
+	if _, err := stream.DataPackets(ok, len(ok), DefaultMtu); err != nil {
+		t.Fatalf("a 65527 byte payload is the largest representable one but got %v", err)
+	}
+}
