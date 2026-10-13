@@ -125,7 +125,15 @@ func TestSendSequence_ResendsToANonAckingPeerAreBudgeted(t *testing.T) {
 	transferResendBudget.reset(20_000)
 	before := TransferSendStatsNow()
 
-	go HandleError(func() { seq.Run() })
+	done := make(chan struct{})
+	go HandleError(func() { defer close(done); seq.Run() })
+	// stop the resend loop before this test ends: the tests that follow swap the
+	// shared budget's clock in and out, and a goroutine still inside
+	// retryAllowed would race those writes
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
 	time.Sleep(600 * time.Millisecond)
 
 	after := TransferSendStatsNow()
@@ -450,11 +458,15 @@ func TestSendSequence_FailedResendWriteRefundsTheBudget(t *testing.T) {
 		seq.resendQueue.Add(item)
 	}
 	before := TransferSendStatsNow()
-	go HandleError(func() { seq.Run() })
+	done := make(chan struct{})
+	go HandleError(func() { defer close(done); seq.Run() })
 	time.Sleep(400 * time.Millisecond)
 	// stop the loop and let any write still in flight fail and refund
 	cancel()
 	time.Sleep(150 * time.Millisecond)
+	// the loop has stopped: it must not read the budget while this test's
+	// deferred cleanup restores the clock it swapped
+	<-done
 
 	attempts := TransferSendStatsNow().ResendFrames - before.ResendFrames
 	if attempts == 0 {
