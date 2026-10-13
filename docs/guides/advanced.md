@@ -70,7 +70,7 @@ urnetwork auth                       # interactive, prompts for code
 ```
 
 > [!TIP]
-> **In Docker** the host's sysctls aren't visible inside the container, so the startup disk benchmark and conntrack checks may produce warnings. Set `URNETWORK_SKIP_AUDIT=1` to skip them.
+> **In Docker** the host's sysctls aren't visible inside the container, so the conntrack checks may produce warnings. Set `URNETWORK_SKIP_AUDIT=1` to skip them. The startup disk benchmark does not run inside containers at all unless you set `URNETWORK_DISK_BENCH=1`, so starting many containers at once cannot make them benchmark the same disk together.
 
 ### Hot-reload across the fleet
 
