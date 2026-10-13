@@ -350,3 +350,27 @@ func (self *PlatformTransport) runClientLimitWatch(
 		}
 	}
 }
+
+// ClientLimitBackoff returns the transport client limit hold.
+func (self *PlatformTransport) ClientLimitBackoff() *ClientLimitBackoff {
+	return self.clientLimitBackoff
+}
+
+// waitClientLimitHold parks a mode runner while a client limit hold is in force.
+// False means the transport is closing.
+func (self *PlatformTransport) waitClientLimitHold() bool {
+	for {
+		clientLimitStatus, clientLimitNotify := self.clientLimitHold()
+		if !clientLimitStatus.Exceeded {
+			return true
+		}
+		if self.settings.clientLimitHoldForTest != nil {
+			self.settings.clientLimitHoldForTest()
+		}
+		select {
+		case <-self.ctx.Done():
+			return false
+		case <-clientLimitNotify:
+		}
+	}
+}
