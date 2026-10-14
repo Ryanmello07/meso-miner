@@ -165,6 +165,12 @@ type ClientStrategySettings struct {
 
 	DohSettings *DohSettings
 
+	// InternalDohDomains are network-space domains whose exact host and
+	// subdomains resolve through the strategy's direct DoH cache before a
+	// control connection is dialed by raw IP (ported from the upstream
+	// internal-DoH leaf; nil disables the rule).
+	InternalDohDomains []string
+
 	HelloRetryTimeout time.Duration
 
 	MinNextConnectDelay time.Duration
@@ -179,6 +185,13 @@ type ClientStrategy struct {
 	log Logger
 
 	settings *ClientStrategySettings
+
+	// internalDohResolver exists only when InternalDohDomains are configured
+	// (see net_http_internal_doh.go; ported from upstream at 20b29f79).
+	internalDohResolver *internalDohResolver
+	// dohSettings is the strategy's current DoH settings, replaced live by
+	// SetInternalDohSettings (ported from upstream at 20b29f79).
+	dohSettings *DohSettings
 
 	mutex sync.Mutex
 	// dialers are only updated inside the mutex
@@ -224,6 +237,10 @@ func NewClientStrategyWithDefaults(ctx context.Context) *ClientStrategy {
 
 // extender udp 53 to platform extender
 func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *ClientStrategy {
+	// wire the internal DoH resolver when InternalDohDomains are configured
+	// (ported from upstream net_http.go at 20b29f79; inert when unset)
+	settings, internalDohResolver := clientStrategySettingsWithInternalDoh(settings)
+
 	// create dialers to match settings
 	dialers := map[*clientDialer]bool{}
 	resolvedExtenderIps := []netip.Addr{}
@@ -401,6 +418,8 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 		ctx:                 ctx,
 		log:                 loggerOrDefault(settings.Log),
 		settings:            settings,
+		internalDohResolver: internalDohResolver,
+		dohSettings:         settings.DohSettings,
 		dialers:             dialers,
 		resolvedExtenderIps: resolvedExtenderIps,
 		extenderIpSecrets:   map[netip.Addr]string{},

@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -303,12 +304,25 @@ type ConnectSettings struct {
 
 	DialContextSettings *DialContextSettings
 
+	// DialControl, when set, runs on every socket the default dialer creates,
+	// letting the caller bind egress or mark the socket (ported from upstream
+	// net.go at 20b29f79; nil is a no-op).
+	DialControl func(network string, address string, c syscall.RawConn) error
+	// DialNetworkHook, when set, is called at the top of DialContext with the
+	// network and address before any narrowing (ported from upstream; nil is a
+	// no-op).
+	DialNetworkHook func(network string, addr string)
+
 	DisableIpv4 bool
 	DisableIpv6 bool
 }
 
 type DialContextSettings struct {
 	DialContext DialContextFunction
+	// PacketConnFactory, when set, supplies the packet conn for udp dials so a
+	// pinned transport can bind its own family (ported from upstream at
+	// 20b29f79, inert here; nil keeps the existing behavior).
+	PacketConnFactory func(context.Context) (net.PacketConn, error)
 }
 
 // DialContext dials network/addr, applying the family policy from
@@ -319,6 +333,9 @@ type DialContextSettings struct {
 // configured, otherwise through a plain NetDialer. Dial results are logged
 // at V(2).
 func (self *ConnectSettings) DialContext(ctx context.Context, network string, addr string) (net.Conn, error) {
+	if hook := self.DialNetworkHook; hook != nil {
+		hook(network, addr)
+	}
 	if self.DisableIpv4 && self.DisableIpv6 {
 		return nil, fmt.Errorf("ipv4 and ipv6 are both disabled")
 	}
@@ -388,6 +405,7 @@ func (self *ConnectSettings) NetDialer() *net.Dialer {
 		Timeout:         self.ConnectTimeout,
 		KeepAlive:       self.KeepAliveTimeout,
 		KeepAliveConfig: self.KeepAliveConfig,
+		Control:         self.DialControl,
 		Resolver:        self.Resolver,
 	}
 }

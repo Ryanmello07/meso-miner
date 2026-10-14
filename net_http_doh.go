@@ -112,6 +112,9 @@ type DohSettings struct {
 	// MaxConcurrentResolutions bounds in-flight resolutions (DohCache.resolveSem) so a burst
 	// or flood of distinct names cannot fan out unbounded. 0 uses a sane default.
 	MaxConcurrentResolutions int
+	// MaxConcurrentHttpRequests hard-caps concurrent in-flight DoH HTTP requests (used by
+	// the ported internal-DoH leaf). 0 uses the library default.
+	MaxConcurrentHttpRequests int
 	// DohServerStagger delays launching each additional DoH server within a fan-out: the first
 	// server is queried immediately and each next one only if no answer has arrived within this
 	// interval, so a healthy primary answers before the redundant servers fire (saving tunnel
@@ -169,6 +172,9 @@ type DnsResolverSettings struct {
 	EnableLocalDoh    bool     `json:"enable_local_doh,omitempty"`
 	EnableRemoteDns   bool     `json:"enable_remote_dns,omitempty"`
 	EnableLocalDns    bool     `json:"enable_local_dns,omitempty"`
+	// DnsUpgradeMaskAddress is the plain-DNS destination advertised under the
+	// tunnel mask (ported from upstream net_http_doh.go at 20b29f79).
+	DnsUpgradeMaskAddress string `json:"dns_upgrade_mask_address,omitempty"`
 	RemoteDohUrlsIpv4 []string `json:"remote_doh_urls_ipv4,omitempty"`
 	RemoteDohUrlsIpv6 []string `json:"remote_doh_urls_ipv6,omitempty"`
 	LocalDohUrlsIpv4  []string `json:"local_doh_urls_ipv4,omitempty"`
@@ -1526,4 +1532,17 @@ func Punycode(domain string) (string, error) {
 		idna.Transitional(true),
 		idna.StrictDomainName(false),
 	).ToASCII(name)
+}
+
+const DefaultDnsUpgradeMaskAddress = "65.49.70.65"
+
+// CloseIdleConnections releases the cache's currently idle pooled DoH
+// connections while keeping the cache usable. Network changes and memory
+// pressure use this operation before a later query or warm re-dials.
+// (Adapted from upstream net_http_doh.go at 20b29f79: the fork keeps the two
+// HTTP clients directly on the cache instead of the remoteClient/localClient
+// wrappers.)
+func (self *DohCache) CloseIdleConnections() {
+	self.httpClient.CloseIdleConnections()
+	self.localHttpClient.CloseIdleConnections()
 }
