@@ -512,6 +512,9 @@ type evalResult struct {
 	dialer *clientDialer
 	wsConn *websocket.Conn
 	err    error
+	// materialize, when set, is run for the selected HTTP response (ported
+	// from upstream net_http.go at 20b29f79; nil is inert on the fork).
+	materialize func() error
 
 	httpResult
 }

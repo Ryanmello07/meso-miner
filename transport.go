@@ -157,6 +157,15 @@ type PlatformTransportSettings struct {
 	// H3 connection once it is registered, so a test can push messages into it.
 	sendRouteObserverForTest func(send chan []byte)
 
+	// AuthorizationClosed, when set, is called when a connection closes for an
+	// authorization reason (ported from upstream transport.go at 20b29f79;
+	// nil is a no-op).
+	AuthorizationClosed func(AuthorizationCloseCause)
+
+	// credentialRefusalHold is the shared credential-refusal hold object the
+	// ported refusal machinery reads (upstream 20b29f79; nil is inert).
+	credentialRefusalHold *credentialRefusalHold
+
 	ClientLimitBackoff     *ClientLimitBackoff
 	clientLimitHoldForTest func()
 }
@@ -211,6 +220,9 @@ type PlatformTransport struct {
 	auth atomic.Pointer[ClientAuth]
 
 	settings *PlatformTransportSettings
+	// credentialRefusalHold holds every mode runner's dials on a credential
+	// refusal (ported from upstream transport.go at 20b29f79; nil is inert).
+	credentialRefusalHold *credentialRefusalHold
 
 	stateLock sync.Mutex
 	// notified when availableModes changes. availableModes is a map, so it
