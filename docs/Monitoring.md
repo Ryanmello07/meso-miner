@@ -168,6 +168,34 @@ The test file covers the two enabled rules. `prometheus.yml` lists `urnetwork.ym
 
 **Panels are empty right after starting.** Rates need two scrapes, so allow about a minute.
 
+## Metrics and log lines for dual-stack platform transports
+
+The direct (native) identity runs the family group on hosts where global IPv6 works: one platform transport pinned to IPv4, one pinned to IPv6, and a parked family-agnostic standby that dials only if neither pin connects. Holding both families lets the platform see the provider as dual-stack. A proxied identity always stays on the single legacy transport, because a pinned dial through a proxy would prove the proxy's family, not the provider's. `URNETWORK_DUALSTACK=0` (or `off`, `false`, `no`) turns the group off; it is read at each identity launch, so a restart or hot restart applies a change.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `urnet_dualstack_mode` | gauge | `mode`, `reason` | Value 1 for the last launch decision: `mode="group"` (family group) or `mode="legacy"` (single transport), with the reason. The reason set is closed: `dualstack`, `kill-switch`, `proxied-identity`, `not-native`, `no-family-urls`, `connect-host-not-allowlisted`, `no-global-v6-address`, `no-v6-route`, `v6-source-not-global` |
+| `urnet_dualstack_transport_state` | gauge | `transport`, `state` | One series per group member (`ipv4`, `ipv6`, `standby`) while the group snapshot is published: 1 for the state the transport is in (`connected`, `connecting`, or a hold such as `disabled`). Absent on a legacy node |
+| `urnet_dualstack_standby_active` | gauge | | 1 while the standby is dialing because no pinned transport is connected |
+
+Log lines, written by the direct identity's launch and the status reporter:
+
+```text
+[ipv6] direct identity platform transports: dualstack group
+[ipv6] direct identity platform transports: legacy single (reason=proxied-identity)
+[ipv6] family transports v4=connected v6=connected standby=disabled active=false
+```
+
+The `direct identity platform transports` line is written once per identity launch; the `family transports` line only when the (v4, v6, standby) tuple changes, so a steady box stays quiet.
+
+### How to confirm v6 is really working
+
+1. The H3 connect line. When the direct identity runs H3 (`URNETWORK_H3=on`), each carrier dial logs its endpoint and local socket; a v6 pin logs a bracketed v6 endpoint with a `local=[::]` socket: `[c]h3 connect to [2001:db8::1]:443 (connect.example.net) local=[::]:39236 bound=false`. Read it with `grep -a 'h3 connect to' /dev/shm/urnetwork*.log` or `docker logs <container> 2>&1 | grep 'h3 connect to'`.
+2. A pin on H1 shows no such line. The `[c]h3 connect` line comes from the H3 connect path only, so an H1-only identity's v6 evidence is a TCP socket: `ss -t -n` shows an `ESTAB` connection to a connect-v6 address from the host's v6 source address.
+3. Socket tables. `ss -ua -n` lists the family's UDP sockets. The `-a` matters: QUIC sockets are unconnected, and plain `ss -u` hides them. Cross-check local ports against the `h3 connect` lines.
+
+What these show and what they do not: they show the provider holds a connection on each family. Whether the platform classifies the provider as dual-stack is a server-side decision these checks cannot see.
+
 ## Metrics reference
 
 | Metric | Type | Labels | Meaning |
