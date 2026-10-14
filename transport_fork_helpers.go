@@ -4,6 +4,7 @@ import (
 	"context"
 	mathrand "math/rand"
 	"net"
+	"sync/atomic"
 	"time"
 
 	quic "github.com/quic-go/quic-go"
@@ -193,3 +194,19 @@ func (self *PlatformTransport) isModeAvailable(mode TransportMode) bool {
 	defer self.stateLock.Unlock()
 	return self.availableModes[mode]
 }
+
+// h1MaxMessageSeen is the largest complete message any H1 transport has read,
+// exported as urnet_h1_max_message_bytes so the read limit rests on evidence.
+var h1MaxMessageSeen atomic.Int64
+
+func noteH1MessageSize(size int) {
+	for {
+		seen := h1MaxMessageSeen.Load()
+		if int64(size) <= seen || h1MaxMessageSeen.CompareAndSwap(seen, int64(size)) {
+			return
+		}
+	}
+}
+
+// H1MaxMessageSeen returns the largest complete message read on any H1 transport.
+func H1MaxMessageSeen() int64 { return h1MaxMessageSeen.Load() }

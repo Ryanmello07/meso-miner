@@ -780,8 +780,16 @@ func DefaultPlatformTransportSettings() *PlatformTransportSettings {
 		EnableH1Plus: true,
 		// the platform transport must carry the per-peer encryption handshake,
 		// so its framer max is the connect runtime minimum message length
-		FramerSettings:                            DefaultFramerSettings(int(DefaultClientSettings().MinimumMessageLenLimit())),
-		H1MaxMessageByteCount:                     DefaultClientSettings().MinimumMessageLenLimit(),
+		FramerSettings: DefaultFramerSettings(int(DefaultClientSettings().MinimumMessageLenLimit())),
+		// fork: 64 KiB - 1, not upstream's 4 KiB framer minimum. The native identity
+		// receives messages larger than 4 KiB from the platform (encrypted peer
+		// sessions carry TLS records of up to 16 KiB), and a 4 KiB read limit ended
+		// its sessions with "websocket: read limit exceeded" within seconds of
+		// connecting. 65535 is also the largest message the
+		// compact H1+ framing carries, so H1+ stays eligible. The old fork limit was
+		// 1 MiB; urnet_h1_max_message_bytes records the largest message seen so this
+		// can be tightened or raised on evidence.
+		H1MaxMessageByteCount:                     math.MaxUint16,
 		PlatformTransportBudget:                   DefaultPlatformTransportBudget(),
 		H1BudgetByteCount:                         MemoryScaledByteCount(kib(512), kib(256)),
 		H3BudgetByteCount:                         defaultH3BudgetByteCount(),
@@ -2874,6 +2882,9 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 						return
 					}
 					messageType, message, err := ReadH1PooledMessage(ws, self.h1MaxMessageByteCount())
+					if err == nil {
+						noteH1MessageSize(len(message))
+					}
 					if err != nil {
 						h1Progress.event("h1_read_error", nil, false, err)
 						recordTransportCloseCause(self.proxySourceLabel(), "h1", "read", err) // fork: close-cause metric
