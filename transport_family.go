@@ -857,6 +857,9 @@ func (self *PlatformTransport) openH3PacketConn(
 ) (net.PacketConn, net.Addr, bool, error) {
 	if self.settings.H3PacketConnFactory != nil {
 		packetConn, err := self.settings.H3PacketConnFactory(ctx)
+		if err == nil {
+			packetConn = self.countInjectedH3Conn(packetConn)
+		}
 		return packetConn, nil, false, err
 	}
 	// An extender-only strategy has no direct path, so reach the destination
