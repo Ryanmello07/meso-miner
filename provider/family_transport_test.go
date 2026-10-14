@@ -466,22 +466,22 @@ func TestIdentityLaunchBuildsPlatformTransportThroughFamilyDecision(t *testing.T
 	}
 }
 
-func TestDualstackControlKeyValidation(t *testing.T) {
+func TestIpVersionControlKeyValidation(t *testing.T) {
 	for _, good := range []string{"dual", "ipv4", "ipv6", "legacy", "v4", "v6"} {
-		if err := validateControlValue("dualstack", good); err != nil {
-			t.Errorf("dualstack=%q must be accepted: %v", good, err)
+		if err := validateControlValue("ip_version", good); err != nil {
+			t.Errorf("ip_version=%q must be accepted: %v", good, err)
 		}
 	}
 	for _, bad := range []string{"both", "single", "off", "auto", "ipv8", "yes"} {
-		if err := validateControlValue("dualstack", bad); err == nil {
-			t.Errorf("dualstack=%q must be rejected", bad)
+		if err := validateControlValue("ip_version", bad); err == nil {
+			t.Errorf("ip_version=%q must be rejected", bad)
 		}
 	}
-	if needsRestart("dualstack") {
+	if needsRestart("ip_version") {
 		t.Error("dualstack is live: needsRestart must be false")
 	}
 	// with no group running the value is only stored
-	if err := applyLiveSideEffect("dualstack", "v6"); err != nil {
+	if err := applyLiveSideEffect("ip_version", "v6"); err != nil {
 		t.Errorf("applying with no group must not fail: %v", err)
 	}
 }

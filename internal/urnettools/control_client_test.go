@@ -297,7 +297,7 @@ func TestControlClient_AllKeysCanonicalizationAndValidation(t *testing.T) {
 		{"h3", "h3", "on"},
 		{"h3-datagram", "h3_datagram", "on"},
 		{"h3-datagram-send", "h3_datagram_send", "on"},
-		{"dualstack", "dualstack", "v6"},
+		{"ip-version", "ip_version", "ipv6"},
 		{"oom-cap", "oom_cap", "shadow"},
 		{"metrics", "metrics", "on"},
 		{"metrics-listen", "metrics_listen", "auto"},

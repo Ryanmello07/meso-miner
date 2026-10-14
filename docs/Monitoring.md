@@ -170,14 +170,14 @@ The test file covers the two enabled rules. `prometheus.yml` lists `urnetwork.ym
 
 ## Metrics and log lines for dual-stack platform transports
 
-The direct (native) identity runs the family group on hosts where global IPv6 works: one platform transport pinned to IPv4, one pinned to IPv6, and a parked family-agnostic fallback that dials only if neither pin connects. A proxied identity always stays on the single legacy transport, because a pinned dial through a proxy would prove the proxy's family, not the provider's. Choose the families with `urnet-tools set dualstack dual|ipv4|ipv6|legacy` (live, no restart; `legacy` is the pre-dual-stack single transport).
+The direct (native) identity runs the family group on hosts where global IPv6 works: one platform transport pinned to IPv4, one pinned to IPv6, and a parked family-agnostic fallback that dials only if neither pin connects. A proxied identity always stays on the single legacy transport, because a pinned dial through a proxy would prove the proxy's family, not the provider's. Choose the families with `urnet-tools set ip-version dual|ipv4|ipv6|legacy` (live, no restart; `legacy` is the pre-dual-stack single transport).
 
 Every series below carries a closed label set: `family` is `ipv4`, `ipv6`, or `any` (a family-agnostic transport: the fallback, or the single transport in `legacy`), `mode` is the carrier (`h1`, `h3`), and `cause` is the close cause (`ws_normal`, `ws_going_away`, `ws_abnormal`, `ws_policy`, `ws_internal`, `ws_app`, `ws_other`, `timeout`, `reset`, `eof`, `closed_local`, `other`).
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `urnet_dualstack_mode` | gauge | `mode`, `reason` | Launch decision: `group` or `legacy` (single transport) with the reason (`dualstack`, `proxied-identity`, `not-native`, `no-family-urls`, `connect-host-not-allowlisted`, `no-global-v6-address`, `no-v6-route`, `v6-source-not-global`) |
-| `urnet_dualstack_stack_mode` | gauge | `mode` | The operator's choice (`dual`, `ipv4`, `ipv6`, `legacy`): 1 for the active one |
+| `urnet_ip_version` | gauge | `mode` | The operator's choice (`urnet-tools set ip-version`) (`dual`, `ipv4`, `ipv6`, `legacy`): 1 for the active one |
 | `urnet_dualstack_transport_state` | gauge | `transport`, `state` | One series per group member (`ipv4`, `ipv6`, `standby`): 1 for its state (`connected`, `connecting`, `disabled`, ...) |
 | `urnet_dualstack_standby_active` | gauge | | 1 while the fallback is dialing |
 | `urnet_dualstack_connect_attempts_total` | counter | `family`, `mode` | Connect attempts |
@@ -206,7 +206,7 @@ Log lines (all start with `[ipv6]`; one per event, connect failures throttled to
 [ipv6] pinned transports: connected again after 13s (v4=connected v6=connected standby=disabled)
 [ipv6] standby transport active: no pinned transport connected for 15s
 [ipv6] standby transport stood down after 40s: a pinned transport connected
-[ipv6] stack dual -> ipv6 (ipv4 transport false, ipv6 transport true, family-agnostic transport: off)
+[ipv6] ip-version dual -> ipv6 (ipv4 transport false, ipv6 transport true, family-agnostic transport: off)
 [ipv6] v6 h1 FAMILY MISMATCH: pinned ipv6 but connected to 192.0.2.10:443
 ```
 

@@ -1036,7 +1036,7 @@ type FamilyPlatformTransportGroupSettings struct {
 	// (sleeping or idle by policy) or its last dial failed because its
 	// hostname does not resolve. Any other failure waits out the delay.
 	StandbyDelay time.Duration
-	// Stack is the families the group starts with (the operator's `dualstack`
+	// Stack is the families the group starts with (the operator's `ip_version`
 	// choice); empty is dual stack. SetStack changes it live.
 	Stack FamilyStackMode
 }
@@ -2001,7 +2001,7 @@ func ParseFamilyStackMode(value string) (FamilyStackMode, error) {
 	case "legacy":
 		return FamilyStackLegacy, nil
 	}
-	return FamilyStackDual, fmt.Errorf("dualstack: must be dual, ipv4, ipv6 or legacy (got %q)", value)
+	return FamilyStackDual, fmt.Errorf("ip-version: must be dual, ipv4, ipv6 or legacy (got %q)", value)
 }
 
 // Stack is the current family choice.
@@ -2042,7 +2042,7 @@ func (self *FamilyPlatformTransportGroup) SetStack(mode FamilyStackMode) FamilyS
 		case FamilyStackLegacy:
 			agnostic = "the only transport"
 		}
-		self.log.Infof("[ipv6] stack %s -> %s (ipv4 transport %t, ipv6 transport %t, family-agnostic transport: %s)\n",
+		self.log.Infof("[ipv6] ip-version %s -> %s (ipv4 transport %t, ipv6 transport %t, family-agnostic transport: %s)\n",
 			previous, mode, wantV4, wantV6, agnostic)
 	}
 	// wake the group loop so it re-evaluates the standby now

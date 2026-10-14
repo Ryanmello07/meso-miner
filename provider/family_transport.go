@@ -16,7 +16,7 @@ package main
 // available to the direct group: each pinned transport opens a UDP socket of its
 // own family.
 //
-// The operator picks the families with the `dualstack` control key (dual, ipv4,
+// The operator picks the families with the `ip_version` control key (dual, ipv4,
 // ipv6 or legacy); legacy is the pre-dual-stack behavior, one family-agnostic
 // transport.
 
@@ -357,14 +357,14 @@ func writeFamilyTransportMetrics(b *strings.Builder) {
 	fmt.Fprintf(b, "urnet_dualstack_mode{mode=%s,reason=%s} 1\n", connect.PrometheusLabelValue(mode), connect.PrometheusLabelValue(decision.Reason))
 
 	if group := familyGroupLive.Load(); group != nil {
-		fmt.Fprintf(b, "# HELP urnet_dualstack_stack_mode The operator's family choice (control key dualstack): 1 for the active one of dual, ipv4, ipv6, legacy.\n")
-		fmt.Fprintf(b, "# TYPE urnet_dualstack_stack_mode gauge\n")
+		fmt.Fprintf(b, "# HELP urnet_ip_version The operator's family choice (control key ip_version, urnet-tools set ip-version): 1 for the active one of dual, ipv4, ipv6, legacy.\n")
+		fmt.Fprintf(b, "# TYPE urnet_ip_version gauge\n")
 		for _, mode := range []connect.FamilyStackMode{connect.FamilyStackDual, connect.FamilyStackIpv4, connect.FamilyStackIpv6, connect.FamilyStackLegacy} {
 			value := 0
 			if group.Stack() == mode {
 				value = 1
 			}
-			fmt.Fprintf(b, "urnet_dualstack_stack_mode{mode=%s} %d\n", connect.PrometheusLabelValue(string(mode)), value)
+			fmt.Fprintf(b, "urnet_ip_version{mode=%s} %d\n", connect.PrometheusLabelValue(string(mode)), value)
 		}
 	}
 
@@ -497,32 +497,32 @@ func writeFamilyStatsMetrics(b *strings.Builder) {
 	scalar("urnet_dualstack_standby_active_seconds_total", "counter", "Seconds the standby has been dialing.", fmt.Sprintf("%.3f", group.StandbyActiveSeconds))
 }
 
-// The running native identity's family group, for the live `dualstack` control
+// The running native identity's family group, for the live `ip_version` control
 // key and /metrics. Nil when the identity runs the single legacy transport.
 var familyGroupLive atomic.Pointer[connect.FamilyPlatformTransportGroup]
 
-// applyDualstackStack applies the `dualstack` control key (dual, ipv4, ipv6, legacy) to
+// applyIpVersion applies the `ip_version` control key (dual, ipv4, ipv6, legacy) to
 // the running group. With no group yet (the node is not dual-stack, or the
 // identity has not launched) the value is only stored; the launch reads it.
-func applyDualstackStack(value string) error {
+func applyIpVersion(value string) error {
 	mode, err := connect.ParseFamilyStackMode(value)
 	if err != nil {
 		return err
 	}
 	group := familyGroupLive.Load()
 	if group == nil {
-		tlog("⚙️ [control] dualstack=%s stored; no dual-stack group is running, it applies at the next identity launch\n", mode)
+		tlog("⚙️ [control] ip_version=%s stored; no dual-stack group is running, it applies at the next identity launch\n", mode)
 		return nil
 	}
 	previous := group.SetStack(mode)
-	tlog("⚙️ [control] applied dualstack=%s (was %s)\n", mode, previous)
+	tlog("⚙️ [control] applied ip_version=%s (was %s)\n", mode, previous)
 	return nil
 }
 
-// initialFamilyStack is the persisted `dualstack` choice for a freshly built group.
+// initialFamilyStack is the persisted `ip_version` choice for a freshly built group.
 func initialFamilyStack() connect.FamilyStackMode {
 	if globalControlState != nil {
-		if value, ok := globalControlState.get("dualstack"); ok {
+		if value, ok := globalControlState.get("ip_version"); ok {
 			if mode, err := connect.ParseFamilyStackMode(value); err == nil {
 				return mode
 			}
