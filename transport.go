@@ -3011,7 +3011,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 		// and then drops it makes every proxy reconnect again immediately. A held
 		// reconnect also gives up the reconnect fast path.
 		lived := time.Since(sessionStart)
-		self.familyNoteSessionEnded(familySessionH1, endCause.get())
+		self.familyNoteSessionEnded(familySessionH1, endCause.get(), endCause.getDetail())
 		if flapWait := sessionEndWait(self.ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, !self.pinned(), self.proxySourceLabel()); 0 < flapWait {
 			hadConnection = false
 			select {
@@ -4169,7 +4169,7 @@ func (self *PlatformTransport) runH3(
 		// a close the QUIC connection recorded (the platform's application error,
 		// an idle timeout) when no read or write error got there first
 		endCause.note(context.Cause(conn.Context()))
-		self.familyNoteSessionEnded(familySessionH3, endCause.get())
+		self.familyNoteSessionEnded(familySessionH3, endCause.get(), endCause.getDetail())
 		if flapWait := sessionEndWait(ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, !self.h3Gated() && !self.pinned(), self.proxySourceLabel()); 0 < flapWait {
 			hadConnection = false
 			select {

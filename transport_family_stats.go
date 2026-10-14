@@ -327,7 +327,7 @@ func (self *PlatformTransport) familyNoteConnected(mode TransportMode, local net
 
 // familyNoteSessionEnded closes the books on a session: lifetime, connected time,
 // the drop by cause, and one line.
-func (self *PlatformTransport) familyNoteSessionEnded(session familySession, cause string) {
+func (self *PlatformTransport) familyNoteSessionEnded(session familySession, cause string, detail string) {
 	if !session.tracked {
 		return
 	}
@@ -366,14 +366,15 @@ func (self *PlatformTransport) familyNoteSessionEnded(session familySession, cau
 		fs.modes[familyModeIndex(session.mode)].drops[causeIndex].Add(1)
 		fs.lastDropUnix.Store(now.Unix())
 	}
-	self.log.Infof("[ipv6] %s %s session ended lived=%s cause=%s drop=%t remote=%s\n",
-		familyLabel(index), session.mode, lived.Round(time.Second), cause, !local, session.remote)
+	self.log.Infof("[ipv6] %s %s session ended lived=%s cause=%s drop=%t remote=%s err=%q\n",
+		familyLabel(index), session.mode, lived.Round(time.Millisecond), cause, !local, session.remote, detail)
 }
 
 // familyEndCause remembers the first error that ended a session, as a close
 // cause name.
 type familyEndCause struct {
-	value atomic.Pointer[string]
+	value  atomic.Pointer[string]
+	detail atomic.Pointer[string]
 }
 
 func (self *familyEndCause) note(err error) {
@@ -381,7 +382,22 @@ func (self *familyEndCause) note(err error) {
 		return
 	}
 	name := transportCloseCauseNames[classifyTransportCloseCause(err)]
-	self.value.CompareAndSwap(nil, &name)
+	if self.value.CompareAndSwap(nil, &name) {
+		// the raw error of the first failure, so a cause of "other" can be read
+		text := err.Error()
+		if 200 < len(text) {
+			text = text[:200]
+		}
+		self.detail.Store(&text)
+	}
+}
+
+// getDetail is the raw error text behind the cause, or "".
+func (self *familyEndCause) getDetail() string {
+	if p := self.detail.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 func (self *familyEndCause) get() string {
