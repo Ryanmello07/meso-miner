@@ -3895,7 +3895,6 @@ func provide(opts docopt.Opts) {
 		})
 		defer unregCloser()
 		if familyGroup != nil {
-			familyGroup.SetStack(initialFamilyStack())
 			familyGroupLive.Store(familyGroup)
 			defer familyGroupLive.CompareAndSwap(familyGroup, nil)
 			// prompt teardown of the group's three transports and two strategies

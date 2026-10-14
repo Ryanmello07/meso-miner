@@ -1036,11 +1036,15 @@ type FamilyPlatformTransportGroupSettings struct {
 	// (sleeping or idle by policy) or its last dial failed because its
 	// hostname does not resolve. Any other failure waits out the delay.
 	StandbyDelay time.Duration
+	// Stack is the families the group starts with (the operator's `dualstack`
+	// choice); empty is dual stack. SetStack changes it live.
+	Stack FamilyStackMode
 }
 
 func DefaultFamilyPlatformTransportGroupSettings() *FamilyPlatformTransportGroupSettings {
 	return &FamilyPlatformTransportGroupSettings{
 		StandbyDelay: 15 * time.Second,
+		Stack:        FamilyStackDual,
 	}
 }
 
@@ -1147,10 +1151,18 @@ func NewFamilyPlatformTransportGroup(
 		}
 		return settings.AltUrl
 	}
+	startStack := groupSettings.Stack
+	if startStack == "" {
+		startStack = FamilyStackDual
+	}
+	group.stack = startStack
+	wantV4 := startStack == FamilyStackDual || startStack == FamilyStackIpv4
+	wantV6 := startStack == FamilyStackDual || startStack == FamilyStackIpv6
 	pinnedSettings := func(ipFamily int, platformUrlFamily string) *PlatformTransportSettings {
 		copied := *settings
 		copied.IpFamily = ipFamily
-		copied.StartDisabled = false
+		// a family the starting stack excludes never dials, not even once
+		copied.StartDisabled = (ipFamily == 4 && !wantV4) || (ipFamily == 6 && !wantV6)
 		copied.PlatformTransportBudgetPriority = PlatformTransportBudgetPriorityBackground
 		copied.AltUrl = familyAltUrl(platformUrlFamily)
 		return &copied
@@ -1184,7 +1196,7 @@ func NewFamilyPlatformTransportGroup(
 	standbySettings.IpFamily = 0
 	// with no pinned transport at all the group is the legacy single
 	// transport and the standby dials at once
-	standbySettings.StartDisabled = hasPinned
+	standbySettings.StartDisabled = hasPinned && startStack != FamilyStackLegacy
 	group.standbyTransport = NewPlatformTransportWithTargetMode(
 		cancelCtx,
 		clientStrategy,
@@ -1194,7 +1206,7 @@ func NewFamilyPlatformTransportGroup(
 		targetMode,
 		&standbySettings,
 	)
-	group.standbyActive = !hasPinned
+	group.standbyActive = !hasPinned || startStack == FamilyStackLegacy
 	group.standbyDueTime = time.Now().Add(groupSettings.StandbyDelay)
 
 	go HandleError(func() {

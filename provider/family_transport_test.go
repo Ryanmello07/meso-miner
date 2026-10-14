@@ -555,3 +555,57 @@ func TestFamilyGroupStackModes(t *testing.T) {
 		return s.Ipv4 == connected && s.Ipv6 == connected && !s.StandbyActive
 	})
 }
+
+// A group started in a fixed stack never dials the excluded family, not even once.
+func TestFamilyGroupStartsInTheChosenStack(t *testing.T) {
+	platform4 := newFamilyTestPlatform(t, "tcp4", "127.0.0.1:0")
+	platform6 := newFamilyTestPlatform(t, "tcp6", "[::1]:0")
+	if platform4 == nil || platform6 == nil {
+		t.Skip("needs IPv4 and IPv6 loopback")
+	}
+	for _, stack := range []connect.FamilyStackMode{connect.FamilyStackIpv6, connect.FamilyStackIpv4, connect.FamilyStackLegacy} {
+		before4, before6 := len(platform4.intents()), len(platform6.intents())
+		ctx, cancel := context.WithCancel(context.Background())
+		clientStrategySettings := connect.DefaultClientStrategySettings()
+		clientStrategy := connect.NewClientStrategy(ctx, clientStrategySettings)
+		settings := connect.DefaultPlatformTransportSettings()
+		settings.EnableH3 = false
+		groupSettings := groupSettingsFor(stack)
+		groupSettings.StandbyDelay = 200 * time.Millisecond
+		group := newProviderFamilyGroup(
+			ctx, clientStrategySettings, clientStrategy, connect.NewRouteManager(ctx, "test-start-stack"),
+			platform4.url(), platform4.url(), platform6.url(),
+			&connect.ClientAuth{ByJwt: "testing", InstanceId: connect.NewId(), AppVersion: "testing"},
+			settings, groupSettings,
+		)
+		if !familyTestWait(15*time.Second, group.IsConnected) {
+			t.Fatalf("%s: the group never connected: %+v", stack, group.Status())
+		}
+		time.Sleep(600 * time.Millisecond)
+		got4, got6 := len(platform4.intents())-before4, len(platform6.intents())-before6
+		switch stack {
+		case connect.FamilyStackIpv6:
+			if got4 != 0 || got6 == 0 {
+				t.Errorf("ipv6 stack: v4 platform saw %d connections, v6 saw %d", got4, got6)
+			}
+		case connect.FamilyStackIpv4:
+			if got6 != 0 || got4 == 0 {
+				t.Errorf("ipv4 stack: v4 platform saw %d connections, v6 saw %d", got4, got6)
+			}
+		case connect.FamilyStackLegacy:
+			// the family-agnostic transport dials the plain url (the v4 server here)
+			// and declares no family
+			if got6 != 0 || got4 == 0 {
+				t.Errorf("legacy stack: v4 platform saw %d connections, v6 saw %d", got4, got6)
+			}
+			for _, intent := range platform4.intents()[before4:] {
+				if intent != "" {
+					t.Errorf("legacy stack declared family %q", intent)
+				}
+			}
+		}
+		group.Close()
+		clientStrategy.Close()
+		cancel()
+	}
+}

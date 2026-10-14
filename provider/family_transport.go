@@ -238,7 +238,7 @@ func newProviderPlatformTransport(
 	group = newProviderFamilyGroup(
 		ctx, clientStrategySettings, clientStrategy, routeManager,
 		connectUrl, familyServiceUrl(connectUrl, 4), familyServiceUrl(connectUrl, 6),
-		auth, settings, connect.DefaultFamilyPlatformTransportGroupSettings(),
+		auth, settings, groupSettingsFor(initialFamilyStack()),
 	)
 	return group, nil, group
 }
@@ -529,4 +529,11 @@ func initialFamilyStack() connect.FamilyStackMode {
 		}
 	}
 	return connect.FamilyStackDual
+}
+
+// groupSettingsFor is the default group settings starting in the given stack.
+func groupSettingsFor(stack connect.FamilyStackMode) *connect.FamilyPlatformTransportGroupSettings {
+	groupSettings := connect.DefaultFamilyPlatformTransportGroupSettings()
+	groupSettings.Stack = stack
+	return groupSettings
 }
