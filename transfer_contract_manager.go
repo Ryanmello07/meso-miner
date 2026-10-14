@@ -1470,7 +1470,7 @@ func (self *ContractManager) Flush(resetUsedContractIds bool) []Id {
 		self.mutex.Lock()
 		defer self.mutex.Unlock()
 
-		self.client.log.V(1).Infof("[contract]flush %s %s\n", self.client.ClientId(), maps.Keys(self.destinationContracts))
+		self.client.log.V(1).Infof("[contract]flush %s %v\n", self.client.ClientId(), maps.Keys(self.destinationContracts))
 
 		contracts := []*protocol.Contract{}
 		for contractKey, contractQueue := range self.destinationContracts {
