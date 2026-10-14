@@ -524,6 +524,7 @@ func formatSets(p Provider, want string) error {
 		{"h3", "h3"},
 		{"h3-datagram", "h3_datagram"},
 		{"h3-datagram-send", "h3_datagram_send"},
+		{"dualstack", "dualstack"},
 		{"baseline", "baseline"},
 		{"proxy-audit", "proxy_audit"},
 	}

@@ -1080,6 +1080,11 @@ type FamilyPlatformTransportGroup struct {
 	stateLock      sync.Mutex
 	standbyActive  bool
 	standbyDueTime time.Time
+	// fork: dual-stack visibility
+	everPinnedConnected bool
+	pinnedWasDown       bool
+	// stack is the operator's choice of families (SetStack)
+	stack FamilyStackMode
 	// the group's current view, for the fan-in notify below
 	lastConnected bool
 }
@@ -1116,6 +1121,7 @@ func NewFamilyPlatformTransportGroup(
 	}
 	cancelCtx, cancel := context.WithCancel(ctx)
 	group := &FamilyPlatformTransportGroup{
+		stack:            FamilyStackDual,
 		ctx:              cancelCtx,
 		cancel:           cancel,
 		log:              loggerOrDefault(settings.Log),
@@ -1215,32 +1221,55 @@ func (self *FamilyPlatformTransportGroup) run() {
 
 			now := time.Now()
 			pinnedConnected := self.pinnedConnectedWithLock()
-			if pinnedConnected {
-				if self.standbyActive {
-					self.log.Infof("[t]standby transport stands down: a pinned transport connected\n")
-					self.standbyTransport.SetEnabled(false)
-					self.standbyActive = false
-				}
-				// the delay restarts from the moment the last pinned
-				// transport disconnects
-				self.standbyDueTime = time.Time{}
+			if self.stack != FamilyStackDual {
+				// the operator fixed one family (it never falls back to the other) or chose legacy
+				self.applyStackStandbyWithLock()
+				familyGroupPinnedReset()
+				self.pinnedWasDown = false
 			} else {
-				if self.standbyDueTime.IsZero() {
-					self.standbyDueTime = now.Add(self.settings.StandbyDelay)
+				// fork: dual-stack visibility. The pinned set going from some connected
+				// to none (after the first connect) is a down event with a duration.
+				if pinnedConnected {
+					if !self.everPinnedConnected {
+						self.everPinnedConnected = true
+					} else if self.pinnedWasDown {
+						familyGroupPinnedChanged(self.log, true, self.statusStringWithLock())
+					}
+					self.pinnedWasDown = false
+				} else if self.everPinnedConnected && !self.pinnedWasDown {
+					self.pinnedWasDown = true
+					familyGroupPinnedChanged(self.log, false, self.statusStringWithLock())
 				}
-				if !self.standbyActive {
-					if !now.Before(self.standbyDueTime) {
-						self.log.Infof("[t]standby transport dials: no pinned transport connected for %s\n", self.settings.StandbyDelay)
-						self.standbyTransport.SetEnabled(true)
-						self.standbyActive = true
-					} else if self.pinnedCannotConnectWithLock() {
-						self.log.Infof("[t]standby transport dials: no pinned transport can connect (hostname does not resolve, or held)\n")
-						self.standbyTransport.SetEnabled(true)
-						self.standbyActive = true
-					} else {
-						t := time.NewTimer(self.standbyDueTime.Sub(now))
-						timer = t.C
-						stopTimer = func() { t.Stop() }
+				if pinnedConnected {
+					if self.standbyActive {
+						self.log.Infof("[t]standby transport stands down: a pinned transport connected\n")
+						self.standbyTransport.SetEnabled(false)
+						self.standbyActive = false
+						familyGroupStandbyChanged(self.log, false, "a pinned transport connected")
+					}
+					// the delay restarts from the moment the last pinned
+					// transport disconnects
+					self.standbyDueTime = time.Time{}
+				} else {
+					if self.standbyDueTime.IsZero() {
+						self.standbyDueTime = now.Add(self.settings.StandbyDelay)
+					}
+					if !self.standbyActive {
+						if !now.Before(self.standbyDueTime) {
+							self.log.Infof("[t]standby transport dials: no pinned transport connected for %s\n", self.settings.StandbyDelay)
+							self.standbyTransport.SetEnabled(true)
+							self.standbyActive = true
+							familyGroupStandbyChanged(self.log, true, fmt.Sprintf("no pinned transport connected for %s", self.settings.StandbyDelay))
+						} else if self.pinnedCannotConnectWithLock() {
+							self.log.Infof("[t]standby transport dials: no pinned transport can connect (hostname does not resolve, or held)\n")
+							self.standbyTransport.SetEnabled(true)
+							self.standbyActive = true
+							familyGroupStandbyChanged(self.log, true, "no pinned transport can connect (hostname does not resolve, or held)")
+						} else {
+							t := time.NewTimer(self.standbyDueTime.Sub(now))
+							timer = t.C
+							stopTimer = func() { t.Stop() }
+						}
 					}
 				}
 			}
@@ -1913,4 +1942,119 @@ func (self *PlatformTransport) randomDnsTld() []byte {
 // connection reports, so quic's notion of the peer matches what arrives.
 func extenderPlaceholderUDPAddr(port int) *net.UDPAddr {
 	return &net.UDPAddr{IP: net.IPv4zero, Port: port}
+}
+
+// statusStringWithLock is the (v4, v6, standby) tuple for the dual-stack log lines.
+func (self *FamilyPlatformTransportGroup) statusStringWithLock() string {
+	v4, v6 := PlatformTransportState(-1), PlatformTransportState(-1)
+	if self.ipv4Transport != nil {
+		v4 = self.ipv4Transport.State()
+	}
+	if self.ipv6Transport != nil {
+		v6 = self.ipv6Transport.State()
+	}
+	return familyStatusString(v4, v6, self.standbyTransport.State())
+}
+
+// FamilyStackMode is the operator's choice of address families for the native
+// identity's platform transports.
+type FamilyStackMode string
+
+const (
+	// FamilyStackDual is the default: an IPv4 pin and an IPv6 pin, with the
+	// family-agnostic standby standing in only when neither connects.
+	FamilyStackDual FamilyStackMode = "dual"
+	// FamilyStackIpv4 holds only the IPv4 pin. The standby never dials, so the
+	// provider never appears on IPv6.
+	FamilyStackIpv4 FamilyStackMode = "ipv4"
+	// FamilyStackIpv6 holds only the IPv6 pin. The standby never dials, so the
+	// provider never appears on IPv4. There is no fallback: a host without
+	// working IPv6 stays disconnected.
+	FamilyStackIpv6 FamilyStackMode = "ipv6"
+	// FamilyStackLegacy is the behavior before the group existed: both pinned
+	// transports are dropped and the family-agnostic transport runs alone, so
+	// the OS picks the family and no family is declared to the platform.
+	FamilyStackLegacy FamilyStackMode = "legacy"
+)
+
+// ParseFamilyStackMode reads a control value.
+func ParseFamilyStackMode(value string) (FamilyStackMode, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "dual", "dualstack", "dual-stack":
+		return FamilyStackDual, nil
+	case "ipv4", "v4", "4":
+		return FamilyStackIpv4, nil
+	case "ipv6", "v6", "6":
+		return FamilyStackIpv6, nil
+	case "legacy":
+		return FamilyStackLegacy, nil
+	}
+	return FamilyStackDual, fmt.Errorf("dualstack: must be dual, ipv4, ipv6 or legacy (got %q)", value)
+}
+
+// Stack is the current family choice.
+func (self *FamilyPlatformTransportGroup) Stack() FamilyStackMode {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if self.stack == "" {
+		return FamilyStackDual
+	}
+	return self.stack
+}
+
+// SetStack changes the families live and returns the previous choice. Pins that
+// the choice does not use are disabled (they close their live connection and
+// stop dialing); the standby is managed by the group loop.
+func (self *FamilyPlatformTransportGroup) SetStack(mode FamilyStackMode) FamilyStackMode {
+	self.stateLock.Lock()
+	previous := self.stack
+	if previous == "" {
+		previous = FamilyStackDual
+	}
+	self.stack = mode
+	self.stateLock.Unlock()
+
+	wantV4 := mode == FamilyStackDual || mode == FamilyStackIpv4
+	wantV6 := mode == FamilyStackDual || mode == FamilyStackIpv6
+	if self.ipv4Transport != nil {
+		self.ipv4Transport.SetEnabled(wantV4)
+	}
+	if self.ipv6Transport != nil {
+		self.ipv6Transport.SetEnabled(wantV6)
+	}
+	if previous != mode {
+		agnostic := "off"
+		switch mode {
+		case FamilyStackDual:
+			agnostic = "fallback only"
+		case FamilyStackLegacy:
+			agnostic = "the only transport"
+		}
+		self.log.Infof("[ipv6] stack %s -> %s (ipv4 transport %t, ipv6 transport %t, family-agnostic transport: %s)\n",
+			previous, mode, wantV4, wantV6, agnostic)
+	}
+	// wake the group loop so it re-evaluates the standby now
+	for _, transport := range self.Transports() {
+		transport.connectedMonitor.NotifyAll()
+	}
+	return previous
+}
+
+// applyStackStandbyWithLock keeps the standby in line with a fixed stack: it
+// never dials for ipv4 or ipv6 alone, because a fallback would put the provider
+// on the family the operator excluded, and it always dials for legacy, where it
+// is the only transport.
+func (self *FamilyPlatformTransportGroup) applyStackStandbyWithLock() {
+	self.standbyDueTime = time.Time{}
+	if self.stack == FamilyStackLegacy {
+		if !self.standbyActive {
+			self.standbyTransport.SetEnabled(true)
+			self.standbyActive = true
+		}
+		return
+	}
+	if self.standbyActive {
+		self.standbyTransport.SetEnabled(false)
+		self.standbyActive = false
+	}
 }

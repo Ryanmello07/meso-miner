@@ -16,13 +16,14 @@ package main
 // available to the direct group: each pinned transport opens a UDP socket of its
 // own family.
 //
-// URNETWORK_DUALSTACK=0 turns the feature off.
+// The operator picks the families with the `dualstack` control key (dual, ipv4,
+// ipv6 or legacy); legacy is the pre-dual-stack behavior, one family-agnostic
+// transport.
 
 import (
 	"context"
 	"fmt"
 	"net"
-	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,19 +47,6 @@ var (
 	_ providerPlatformTransport = (*connect.PlatformTransport)(nil)
 	_ providerPlatformTransport = (*connect.FamilyPlatformTransportGroup)(nil)
 )
-
-// familyTransportKillEnv turns the dual-stack group off when set to 0, off,
-// false or no. Anything else, including unset, leaves it on. It is read on every
-// direct-identity launch, so a restart or hot restart applies a change.
-const familyTransportKillEnv = "URNETWORK_DUALSTACK"
-
-func familyTransportsKilled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(familyTransportKillEnv))) {
-	case "0", "off", "false", "no":
-		return true
-	}
-	return false
-}
 
 // familyServiceUrl is the family-pinned form of a platform service url: the
 // first host label gets a -v4 or -v6 suffix (connect becomes connect-v4). It
@@ -205,9 +193,6 @@ func familyTransportHostAllowed(connectUrl string) bool {
 // dual-stack group. The checks run in a fixed order so the reason is
 // deterministic.
 func useFamilyTransports(proxySettings *connect.ProxySettings, isNative bool, connectUrl string) (bool, string) {
-	if familyTransportsKilled() {
-		return false, "kill-switch"
-	}
 	if proxySettings != nil {
 		return false, "proxied-identity"
 	}
@@ -358,6 +343,7 @@ func startFamilyStatusReporter(ctx context.Context, group *connect.FamilyPlatfor
 // runs, each transport's state. The reason set is closed (see
 // useFamilyTransports) so label cardinality stays bounded.
 func writeFamilyTransportMetrics(b *strings.Builder) {
+	writeFamilyStatsMetrics(b)
 	decision := familyTransportDecisionLast.Load()
 	if decision == nil {
 		return
@@ -369,6 +355,18 @@ func writeFamilyTransportMetrics(b *strings.Builder) {
 	fmt.Fprintf(b, "# HELP urnet_dualstack_mode Direct identity platform transport mode, value always 1: group (v4 and v6 pins plus standby) or legacy (single), with the reason.\n")
 	fmt.Fprintf(b, "# TYPE urnet_dualstack_mode gauge\n")
 	fmt.Fprintf(b, "urnet_dualstack_mode{mode=%s,reason=%s} 1\n", connect.PrometheusLabelValue(mode), connect.PrometheusLabelValue(decision.Reason))
+
+	if group := familyGroupLive.Load(); group != nil {
+		fmt.Fprintf(b, "# HELP urnet_dualstack_stack_mode The operator's family choice (control key dualstack): 1 for the active one of dual, ipv4, ipv6, legacy.\n")
+		fmt.Fprintf(b, "# TYPE urnet_dualstack_stack_mode gauge\n")
+		for _, mode := range []connect.FamilyStackMode{connect.FamilyStackDual, connect.FamilyStackIpv4, connect.FamilyStackIpv6, connect.FamilyStackLegacy} {
+			value := 0
+			if group.Stack() == mode {
+				value = 1
+			}
+			fmt.Fprintf(b, "urnet_dualstack_stack_mode{mode=%s} %d\n", connect.PrometheusLabelValue(string(mode)), value)
+		}
+	}
 
 	snapshot := familyTransportLast.Load()
 	if snapshot == nil {
@@ -407,4 +405,128 @@ func familyGroupBudget() *connect.PlatformTransportBudget {
 		target = familyBudgetReferenceByteCount
 	}
 	return connect.NewPlatformTransportBudgetForMemoryTarget(3 * target)
+}
+
+// writeFamilyStatsMetrics exports the native identity's per-family counters
+// (connect/transport_family_stats.go). family is ipv4, ipv6, or any (a
+// family-agnostic transport: the standby, or the single legacy transport), mode
+// is the carrier (h1, h3) and cause is the close cause. Every label set is
+// closed. The series stay absent until the native identity has a transport.
+func writeFamilyStatsMetrics(b *strings.Builder) {
+	stats := connect.FamilyTransportStatsNow()
+	active := false
+	for _, family := range stats.Families {
+		if family.Modes[0].Attempts+family.Modes[1].Attempts+uint64(family.Up) != 0 {
+			active = true
+		}
+	}
+	if !active {
+		return
+	}
+	header := func(name string, kind string, help string) {
+		fmt.Fprintf(b, "# HELP %s %s\n# TYPE %s %s\n", name, help, name, kind)
+	}
+	perMode := func(name string, help string, value func(connect.FamilyModeSnapshot) uint64) {
+		header(name, "counter", help)
+		for _, family := range stats.Families {
+			for m, modeName := range stats.ModeNames {
+				fmt.Fprintf(b, "%s{family=%s,mode=%s} %d\n", name,
+					connect.PrometheusLabelValue(family.Family), connect.PrometheusLabelValue(modeName), value(family.Modes[m]))
+			}
+		}
+	}
+	perMode("urnet_dualstack_connect_attempts_total", "Platform connect attempts of the native identity's transports, by family and carrier.",
+		func(s connect.FamilyModeSnapshot) uint64 { return s.Attempts })
+	perMode("urnet_dualstack_connects_total", "Platform connects that authenticated, by family and carrier.",
+		func(s connect.FamilyModeSnapshot) uint64 { return s.Connects })
+	perMode("urnet_dualstack_connect_failures_total", "Platform connect attempts that failed, by family and carrier.",
+		func(s connect.FamilyModeSnapshot) uint64 { return s.Failures })
+
+	header("urnet_dualstack_drops_total", "counter", "Sessions that ended on their own (not our shutdown or the operator gate), by family, carrier and close cause.")
+	for _, family := range stats.Families {
+		for m, modeName := range stats.ModeNames {
+			for c, causeName := range stats.CauseNames {
+				fmt.Fprintf(b, "urnet_dualstack_drops_total{family=%s,mode=%s,cause=%s} %d\n",
+					connect.PrometheusLabelValue(family.Family), connect.PrometheusLabelValue(modeName),
+					connect.PrometheusLabelValue(causeName), family.Modes[m].Drops[c])
+			}
+		}
+	}
+	perFamily := func(name string, kind string, help string, value func(connect.FamilyTransportSnapshot) string) {
+		header(name, kind, help)
+		for _, family := range stats.Families {
+			fmt.Fprintf(b, "%s{family=%s} %s\n", name, connect.PrometheusLabelValue(family.Family), value(family))
+		}
+	}
+	perFamily("urnet_dualstack_sessions_up", "gauge", "Platform sessions up right now, by family.",
+		func(f connect.FamilyTransportSnapshot) string { return fmt.Sprintf("%d", f.Up) })
+	perFamily("urnet_dualstack_connected_seconds_total", "counter", "Seconds with at least one session up, by family (overlapping carriers count once).",
+		func(f connect.FamilyTransportSnapshot) string { return fmt.Sprintf("%.3f", f.ConnectedSeconds) })
+	perFamily("urnet_dualstack_last_connect_timestamp_seconds", "gauge", "Unix time of the last connect, by family; 0 if none yet.",
+		func(f connect.FamilyTransportSnapshot) string { return fmt.Sprintf("%d", f.LastConnectUnix) })
+	perFamily("urnet_dualstack_last_drop_timestamp_seconds", "gauge", "Unix time of the last session drop, by family; 0 if none yet.",
+		func(f connect.FamilyTransportSnapshot) string { return fmt.Sprintf("%d", f.LastDropUnix) })
+	perFamily("urnet_dualstack_family_mismatch_total", "counter", "Pinned transports that connected over the other family. Anything above 0 is a bug.",
+		func(f connect.FamilyTransportSnapshot) string { return fmt.Sprintf("%d", f.Mismatches) })
+
+	header("urnet_dualstack_session_lifetime_seconds", "histogram", "Lifetime of ended sessions, by family.")
+	for _, family := range stats.Families {
+		label := connect.PrometheusLabelValue(family.Family)
+		for i, bound := range stats.LifetimeBounds {
+			fmt.Fprintf(b, "urnet_dualstack_session_lifetime_seconds_bucket{family=%s,le=\"%d\"} %d\n", label, bound, family.LifetimeBuckets[i])
+		}
+		fmt.Fprintf(b, "urnet_dualstack_session_lifetime_seconds_bucket{family=%s,le=\"+Inf\"} %d\n", label, family.LifetimeBuckets[len(stats.LifetimeBounds)])
+		fmt.Fprintf(b, "urnet_dualstack_session_lifetime_seconds_sum{family=%s} %.3f\n", label, family.LifetimeSumSeconds)
+		fmt.Fprintf(b, "urnet_dualstack_session_lifetime_seconds_count{family=%s} %d\n", label, family.LifetimeCount)
+	}
+
+	group := stats.Group
+	scalar := func(name string, kind string, help string, value string) {
+		header(name, kind, help)
+		fmt.Fprintf(b, "%s %s\n", name, value)
+	}
+	down := 0
+	if group.PinnedDown {
+		down = 1
+	}
+	scalar("urnet_dualstack_pinned_down", "gauge", "1 while no pinned (IPv4 or IPv6) transport is connected, after the first connect.", fmt.Sprintf("%d", down))
+	scalar("urnet_dualstack_pinned_down_events_total", "counter", "Times every pinned transport was down at once.", fmt.Sprintf("%d", group.PinnedDownEvents))
+	scalar("urnet_dualstack_pinned_down_seconds_total", "counter", "Seconds with no pinned transport connected.", fmt.Sprintf("%.3f", group.PinnedDownSeconds))
+	scalar("urnet_dualstack_pinned_down_longest_seconds", "gauge", "Longest single stretch with no pinned transport connected.", fmt.Sprintf("%.3f", group.PinnedLongestSecond))
+	scalar("urnet_dualstack_standby_activations_total", "counter", "Times the family-agnostic standby started dialing.", fmt.Sprintf("%d", group.StandbyActivations))
+	scalar("urnet_dualstack_standby_active_seconds_total", "counter", "Seconds the standby has been dialing.", fmt.Sprintf("%.3f", group.StandbyActiveSeconds))
+}
+
+// The running native identity's family group, for the live `dualstack` control
+// key and /metrics. Nil when the identity runs the single legacy transport.
+var familyGroupLive atomic.Pointer[connect.FamilyPlatformTransportGroup]
+
+// applyDualstackStack applies the `dualstack` control key (dual, ipv4, ipv6, legacy) to
+// the running group. With no group yet (the node is not dual-stack, or the
+// identity has not launched) the value is only stored; the launch reads it.
+func applyDualstackStack(value string) error {
+	mode, err := connect.ParseFamilyStackMode(value)
+	if err != nil {
+		return err
+	}
+	group := familyGroupLive.Load()
+	if group == nil {
+		tlog("⚙️ [control] dualstack=%s stored; no dual-stack group is running, it applies at the next identity launch\n", mode)
+		return nil
+	}
+	previous := group.SetStack(mode)
+	tlog("⚙️ [control] applied dualstack=%s (was %s)\n", mode, previous)
+	return nil
+}
+
+// initialFamilyStack is the persisted `dualstack` choice for a freshly built group.
+func initialFamilyStack() connect.FamilyStackMode {
+	if globalControlState != nil {
+		if value, ok := globalControlState.get("dualstack"); ok {
+			if mode, err := connect.ParseFamilyStackMode(value); err == nil {
+				return mode
+			}
+		}
+	}
+	return connect.FamilyStackDual
 }

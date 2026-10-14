@@ -170,31 +170,53 @@ The test file covers the two enabled rules. `prometheus.yml` lists `urnetwork.ym
 
 ## Metrics and log lines for dual-stack platform transports
 
-The direct (native) identity runs the family group on hosts where global IPv6 works: one platform transport pinned to IPv4, one pinned to IPv6, and a parked family-agnostic standby that dials only if neither pin connects. Holding both families lets the platform see the provider as dual-stack. A proxied identity always stays on the single legacy transport, because a pinned dial through a proxy would prove the proxy's family, not the provider's. `URNETWORK_DUALSTACK=0` (or `off`, `false`, `no`) turns the group off; it is read at each identity launch, so a restart or hot restart applies a change.
+The direct (native) identity runs the family group on hosts where global IPv6 works: one platform transport pinned to IPv4, one pinned to IPv6, and a parked family-agnostic fallback that dials only if neither pin connects. A proxied identity always stays on the single legacy transport, because a pinned dial through a proxy would prove the proxy's family, not the provider's. Choose the families with `urnet-tools set dualstack dual|ipv4|ipv6|legacy` (live, no restart; `legacy` is the pre-dual-stack single transport).
+
+Every series below carries a closed label set: `family` is `ipv4`, `ipv6`, or `any` (a family-agnostic transport: the fallback, or the single transport in `legacy`), `mode` is the carrier (`h1`, `h3`), and `cause` is the close cause (`ws_normal`, `ws_going_away`, `ws_abnormal`, `ws_policy`, `ws_internal`, `ws_app`, `ws_other`, `timeout`, `reset`, `eof`, `closed_local`, `other`).
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `urnet_dualstack_mode` | gauge | `mode`, `reason` | Value 1 for the last launch decision: `mode="group"` (family group) or `mode="legacy"` (single transport), with the reason. The reason set is closed: `dualstack`, `kill-switch`, `proxied-identity`, `not-native`, `no-family-urls`, `connect-host-not-allowlisted`, `no-global-v6-address`, `no-v6-route`, `v6-source-not-global` |
-| `urnet_dualstack_transport_state` | gauge | `transport`, `state` | One series per group member (`ipv4`, `ipv6`, `standby`) while the group snapshot is published: 1 for the state the transport is in (`connected`, `connecting`, or a hold such as `disabled`). Absent on a legacy node |
-| `urnet_dualstack_standby_active` | gauge | | 1 while the standby is dialing because no pinned transport is connected |
+| `urnet_dualstack_mode` | gauge | `mode`, `reason` | Launch decision: `group` or `legacy` (single transport) with the reason (`dualstack`, `proxied-identity`, `not-native`, `no-family-urls`, `connect-host-not-allowlisted`, `no-global-v6-address`, `no-v6-route`, `v6-source-not-global`) |
+| `urnet_dualstack_stack_mode` | gauge | `mode` | The operator's choice (`dual`, `ipv4`, `ipv6`, `legacy`): 1 for the active one |
+| `urnet_dualstack_transport_state` | gauge | `transport`, `state` | One series per group member (`ipv4`, `ipv6`, `standby`): 1 for its state (`connected`, `connecting`, `disabled`, ...) |
+| `urnet_dualstack_standby_active` | gauge | | 1 while the fallback is dialing |
+| `urnet_dualstack_connect_attempts_total` | counter | `family`, `mode` | Connect attempts |
+| `urnet_dualstack_connects_total` | counter | `family`, `mode` | Connects that authenticated |
+| `urnet_dualstack_connect_failures_total` | counter | `family`, `mode` | Failed attempts |
+| `urnet_dualstack_drops_total` | counter | `family`, `mode`, `cause` | Sessions that ended on their own (not our shutdown or an operator change) |
+| `urnet_dualstack_sessions_up` | gauge | `family` | Sessions up now |
+| `urnet_dualstack_connected_seconds_total` | counter | `family` | Seconds with at least one session up |
+| `urnet_dualstack_last_connect_timestamp_seconds` / `urnet_dualstack_last_drop_timestamp_seconds` | gauge | `family` | Unix time, 0 if none yet |
+| `urnet_dualstack_session_lifetime_seconds` | histogram | `family` | Lifetime of ended sessions (buckets 10 s, 60 s, 5 min, 30 min, 2 h) |
+| `urnet_dualstack_family_mismatch_total` | counter | `family` | A pinned transport connected over the other family. Anything above 0 is a bug |
+| `urnet_dualstack_pinned_down` | gauge | | 1 while no pinned transport is connected (after the first connect) |
+| `urnet_dualstack_pinned_down_events_total`, `urnet_dualstack_pinned_down_seconds_total`, `urnet_dualstack_pinned_down_longest_seconds` | counter / gauge | | Stretches with no pinned transport connected |
+| `urnet_dualstack_standby_activations_total`, `urnet_dualstack_standby_active_seconds_total` | counter | | How often and how long the fallback dialed |
 
-Log lines, written by the direct identity's launch and the status reporter:
+Log lines (all start with `[ipv6]`; one per event, connect failures throttled to one a minute per family):
 
 ```text
 [ipv6] direct identity platform transports: dualstack group
-[ipv6] direct identity platform transports: legacy single (reason=proxied-identity)
 [ipv6] family transports v4=connected v6=connected standby=disabled active=false
+[ipv6] v6 h1 connected remote=[2001:db8:100::1]:443 local=[2001:db8:200::2]:51096 remote_family=ipv6 dial=412ms after_failures=0
+[ipv6] v4 h1 connected remote=192.0.2.10:443 local=198.51.100.7:40992 remote_family=ipv4 dial=380ms after_failures=0
+[ipv6] v6 h1 connect failed class=timeout_platform dial=15.002s consecutive=3 suppressed=0 err="Timeout. 2 dial(s) failed ..."
+[ipv6] v6 h1 session ended lived=12m3s cause=ws_abnormal drop=true remote=[2001:db8:100::1]:443
+[ipv6] pinned transports: none connected (v4=connecting v6=connecting standby=disabled)
+[ipv6] pinned transports: connected again after 13s (v4=connected v6=connected standby=disabled)
+[ipv6] standby transport active: no pinned transport connected for 15s
+[ipv6] standby transport stood down after 40s: a pinned transport connected
+[ipv6] stack dual -> ipv6 (ipv4 transport false, ipv6 transport true, family-agnostic transport: off)
+[ipv6] v6 h1 FAMILY MISMATCH: pinned ipv6 but connected to 192.0.2.10:443
 ```
-
-The `direct identity platform transports` line is written once per identity launch; the `family transports` line only when the (v4, v6, standby) tuple changes, so a steady box stays quiet.
 
 ### How to confirm v6 is really working
 
-1. The H3 connect line. When the direct identity runs H3 (`URNETWORK_H3=on`), each carrier dial logs its endpoint and local socket; a v6 pin logs a bracketed v6 endpoint with a `local=[::]` socket: `[c]h3 connect to [2001:db8::1]:443 (connect.example.net) local=[::]:39236 bound=false`. Read it with `grep -a 'h3 connect to' /dev/shm/urnetwork*.log` or `docker logs <container> 2>&1 | grep 'h3 connect to'`.
-2. A pin on H1 shows no such line. The `[c]h3 connect` line comes from the H3 connect path only, so an H1-only identity's v6 evidence is a TCP socket: `ss -t -n` shows an `ESTAB` connection to a connect-v6 address from the host's v6 source address.
-3. Socket tables. `ss -ua -n` lists the family's UDP sockets. The `-a` matters: QUIC sockets are unconnected, and plain `ss -u` hides them. Cross-check local ports against the `h3 connect` lines.
+1. The `connected` line. Each connect logs the remote and local address and `remote_family`; a v6 pin shows a bracketed v6 remote with `remote_family=ipv6`. It works for H1 and H3 alike. `urnet_dualstack_family_mismatch_total` must stay 0.
+2. Sockets. `ss -tn` shows an `ESTAB` connection from the host's v6 source address to a connect-v6 address. `ss -ua -n` lists the QUIC sockets (the `-a` matters: they are unconnected).
+3. Counters. `urnet_dualstack_sessions_up{family="ipv6"}` is 1 and `urnet_dualstack_connected_seconds_total{family="ipv6"}` grows.
 
-What these show and what they do not: they show the provider holds a connection on each family. Whether the platform classifies the provider as dual-stack is a server-side decision these checks cannot see.
+These show the provider holds a connection on each family. Whether the platform classifies the provider as dual-stack is a server-side decision these checks cannot see.
 
 ## Metrics reference
 

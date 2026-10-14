@@ -119,6 +119,7 @@ var controlKeys = map[string]bool{
 	"h3":                          true,
 	"h3_datagram":                 true,
 	"h3_datagram_send":            true,
+	"dualstack":                   true,
 	"oom_cap":                     true,
 }
 

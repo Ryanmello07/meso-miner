@@ -515,6 +515,12 @@ type PlatformTransportSettings struct {
 	// h3Auxiliary.
 	EnableH3 bool
 
+	// fork: FamilyEvents marks the native identity's platform transports (each
+	// pinned transport, the standby, or the single legacy transport). They keep
+	// per-family counters and write one log line per connect, failure and session
+	// end (transport_family_stats.go). Proxied identities leave it off.
+	FamilyEvents bool
+
 	// fork: FlapStableAfter is how long a platform session must live before the
 	// next reconnect is treated as a fresh start; a session that dies sooner holds
 	// the reconnect (transport_flap_guard.go). Zero uses the default.
@@ -2285,12 +2291,17 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 
 		var ws H1MessageConn
 		var err error
+		dialStart := time.Now()
+		self.familyNoteAttempt(TransportModeH1)
 		if self.log.V(2).Enabled() {
 			ws, err = TraceWithReturnError(fmt.Sprintf("[t]connect %s", clientId), connect)
 		} else {
 			ws, err = connect()
 		}
 		releaseReconnect()
+		if err != nil {
+			self.familyNoteConnectFailed(TransportModeH1, err, time.Since(dialStart))
+		}
 		// fork: governor feed for every attempt, success or failure
 		if !self.pinned() {
 			connectGov.recordAttempt(classifyConnectError(err, attemptStats), attemptStats)
@@ -2357,6 +2368,8 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 		}
 
 		// auth succeeded: the backend is reachable
+		familySessionH1 := self.familyNoteConnected(TransportModeH1, ws.UnderlyingConn().LocalAddr(), ws.UnderlyingConn().RemoteAddr(), time.Since(dialStart))
+		var endCause familyEndCause
 		self.noteDialSuccess()
 
 		c := func() {
@@ -2560,6 +2573,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 					MessagePoolReturn(message)
 					if err != nil {
 						recordTransportCloseCause(self.proxySourceLabel(), "h1", "write", err) // fork: close-cause metric
+						endCause.note(err)
 						// note that for websocket a dealine timeout cannot be recovered
 						if ok, suppressed := shouldLogWriteErr(); ok {
 							if suppressed > 0 {
@@ -2858,6 +2872,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 					if err != nil {
 						h1Progress.event("h1_read_error", nil, false, err)
 						recordTransportCloseCause(self.proxySourceLabel(), "h1", "read", err) // fork: close-cause metric
+						endCause.note(err)
 						if self.log.V(2).Enabled() {
 							self.log.Infof("[tr]%s<- error = %s\n", clientId, err)
 						}
@@ -2996,6 +3011,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 		// and then drops it makes every proxy reconnect again immediately. A held
 		// reconnect also gives up the reconnect fast path.
 		lived := time.Since(sessionStart)
+		self.familyNoteSessionEnded(familySessionH1, endCause.get())
 		if flapWait := sessionEndWait(self.ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, !self.pinned(), self.proxySourceLabel()); 0 < flapWait {
 			hadConnection = false
 			select {
@@ -3288,6 +3304,8 @@ func (self *PlatformTransport) runH3(
 
 		var connStream *ConnStream
 		var err error
+		dialStart := time.Now()
+		self.familyNoteAttempt(ptMode)
 		if self.log.V(2).Enabled() {
 			connStream, err = TraceWithReturnError(fmt.Sprintf("[t]connect %s", clientId), func() (*ConnStream, error) {
 				return connect(attemptCtx)
@@ -3296,6 +3314,9 @@ func (self *PlatformTransport) runH3(
 			connStream, err = connect(attemptCtx)
 		}
 		releaseReconnect()
+		if err != nil {
+			self.familyNoteConnectFailed(ptMode, err, time.Since(dialStart))
+		}
 		// fork: the governor reads the platform's health from every transport's
 		// connects; an auxiliary H3 beside H1 and a pinned transport are never a
 		// health signal. (H3 is UDP, so it never goes through a proxy and the
@@ -3429,6 +3450,8 @@ func (self *PlatformTransport) runH3(
 		counters.connects.Add(1)
 
 		conn := connStream.conn
+		familySessionH3 := self.familyNoteConnected(ptMode, conn.LocalAddr(), conn.RemoteAddr(), time.Since(dialStart))
+		var endCause familyEndCause
 		stream := connStream.stream
 		streamWriter := connStream.streamWriter
 
@@ -3811,6 +3834,7 @@ func (self *PlatformTransport) runH3(
 				return useStream, sendErr
 			}
 			logH3WriteError := func(err error) {
+				endCause.note(err)
 				if ok, suppressed := shouldLogWriteErr(); ok {
 					if suppressed > 0 {
 						self.log.Infof("[ts]%s-> error = %s (%d suppressed)\n", clientId, err, suppressed)
@@ -4088,6 +4112,7 @@ func (self *PlatformTransport) runH3(
 						message, err = framer.Read(stream)
 						if err != nil {
 							recordTransportCloseCause(self.proxySourceLabel(), "h3", "read", err) // fork: close-cause metric
+							endCause.note(err)
 							self.log.Infof("[tr]%s<- error = %s\n", clientId, err)
 							return
 						}
@@ -4141,6 +4166,10 @@ func (self *PlatformTransport) runH3(
 		// held back so it cannot redial in a tight loop, but a young session of it
 		// is no evidence about the platform.
 		lived := time.Since(sessionStart)
+		// a close the QUIC connection recorded (the platform's application error,
+		// an idle timeout) when no read or write error got there first
+		endCause.note(context.Cause(conn.Context()))
+		self.familyNoteSessionEnded(familySessionH3, endCause.get())
 		if flapWait := sessionEndWait(ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, !self.h3Gated() && !self.pinned(), self.proxySourceLabel()); 0 < flapWait {
 			hadConnection = false
 			select {

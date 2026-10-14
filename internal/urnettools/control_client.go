@@ -140,6 +140,10 @@ var controlKeyCanonical = map[string]string{
 	"h3-datagram":                 "h3_datagram",
 	"h3_datagram":                 "h3_datagram",
 	"h3-datagram-send":            "h3_datagram_send",
+	"dualstack":                   "dualstack",
+	"dual-stack":                  "dualstack",
+	"stack":                       "dualstack",
+	"ip-stack":                    "dualstack",
 	"h3_datagram_send":            "h3_datagram_send",
 	"proxy-audit":                 "proxy_audit",
 	"proxy_audit":                 "proxy_audit",
@@ -200,6 +204,12 @@ func validateControlValue(canonicalKey, value string) error {
 		case "none", "url", "all":
 		default:
 			return fmt.Errorf("%s: must be none, url, or all (got %q)", canonicalKey, value)
+		}
+	case "dualstack":
+		switch strings.ToLower(value) {
+		case "dual", "dualstack", "dual-stack", "ipv4", "v4", "4", "ipv6", "v6", "6", "legacy":
+		default:
+			return fmt.Errorf("dualstack: must be dual, ipv4, ipv6 or legacy (got %q)", value)
 		}
 	case "fast_auth", "proxy_self_heal", "proxy_audit", "smart_dialer", "baseline", "h3", "h3_datagram", "h3_datagram_send":
 		switch strings.ToLower(value) {

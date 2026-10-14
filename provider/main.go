@@ -3869,6 +3869,9 @@ func provide(opts docopt.Opts) {
 			bw = connect.RegisterProxyBandwidth(0)
 		}
 		platformSettings := platformTransportSettingsFor(proxySettings, isNative)
+		// the native identity's transports keep per-family counters and write the
+		// [ipv6] connect / session lines (connect/transport_family_stats.go)
+		platformSettings.FamilyEvents = isNative && proxySettings == nil
 		if platformSettings.EnableH3 {
 			tlog("[t]h3 eligible for the direct identity, currently %s (urnet-tools set h3 on|off or URNETWORK_H3): H3 runs beside H1 and falls back to H1 quietly\n",
 				onOff(resolveH3Setting(globalControlState, currentProxyResolution())))
@@ -3892,6 +3895,9 @@ func provide(opts docopt.Opts) {
 		})
 		defer unregCloser()
 		if familyGroup != nil {
+			familyGroup.SetStack(initialFamilyStack())
+			familyGroupLive.Store(familyGroup)
+			defer familyGroupLive.CompareAndSwap(familyGroup, nil)
 			// prompt teardown of the group's three transports and two strategies
 			defer familyGroup.Close()
 			stopFamilyStatus := startFamilyStatusReporter(proxyCtx, familyGroup)

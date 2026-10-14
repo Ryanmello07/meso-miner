@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -43,22 +44,6 @@ func TestFamilyServiceUrl(t *testing.T) {
 		if got := familyServiceUrl(c.in, c.ver); got != c.want {
 			t.Errorf("familyServiceUrl(%q, %d) = %q, want %q", c.in, c.ver, got, c.want)
 		}
-	}
-}
-
-func TestFamilyTransportKillSwitch(t *testing.T) {
-	for value, wantKilled := range map[string]bool{
-		"": false, "1": false, "on": false, "true": false, "yes": false, "dualstack": false,
-		"0": true, "off": true, "false": true, "no": true, " OFF ": true, "False": true,
-	} {
-		t.Setenv(familyTransportKillEnv, value)
-		if got := familyTransportsKilled(); got != wantKilled {
-			t.Errorf("%s=%q killed = %t, want %t", familyTransportKillEnv, value, got, wantKilled)
-		}
-	}
-	os.Unsetenv(familyTransportKillEnv)
-	if familyTransportsKilled() {
-		t.Errorf("an unset %s must leave the feature on", familyTransportKillEnv)
 	}
 }
 
@@ -118,7 +103,6 @@ func TestUseFamilyTransportsDecisionOrder(t *testing.T) {
 
 	defer func(saved func() (bool, string)) { hostIpv6Probe = saved }(hostIpv6Probe)
 	for name, c := range map[string]struct {
-		kill    string
 		proxy   *connect.ProxySettings
 		native  bool
 		url     string
@@ -126,17 +110,14 @@ func TestUseFamilyTransportsDecisionOrder(t *testing.T) {
 		wantUse bool
 		reason  string
 	}{
-		"all good": {"", nil, true, allowed, probeOk, true, "dualstack"},
-		// the kill switch wins over every other condition
-		"kill wins":   {"0", proxy, false, "wss://x", func() (bool, string) { return false, "no-v6-route" }, false, "kill-switch"},
-		"proxied":     {"", proxy, true, allowed, probeOk, false, "proxied-identity"},
-		"not native":  {"", nil, false, allowed, probeOk, false, "not-native"},
-		"ip literal":  {"", nil, true, "wss://127.0.0.1", probeOk, false, "no-family-urls"},
-		"custom host": {"", nil, true, "wss://connect.example.com", probeOk, false, "connect-host-not-allowlisted"},
-		"probe says no": {"", nil, true, allowed, func() (bool, string) { return false, "v6-source-not-global" },
+		"all good":    {nil, true, allowed, probeOk, true, "dualstack"},
+		"proxied":     {proxy, true, allowed, probeOk, false, "proxied-identity"},
+		"not native":  {nil, false, allowed, probeOk, false, "not-native"},
+		"ip literal":  {nil, true, "wss://127.0.0.1", probeOk, false, "no-family-urls"},
+		"custom host": {nil, true, "wss://connect.example.com", probeOk, false, "connect-host-not-allowlisted"},
+		"probe says no": {nil, true, allowed, func() (bool, string) { return false, "v6-source-not-global" },
 			false, "v6-source-not-global"},
 	} {
-		t.Setenv(familyTransportKillEnv, c.kill)
 		hostIpv6Probe = c.probe
 		use, reason := useFamilyTransports(c.proxy, c.native, c.url)
 		if use != c.wantUse || reason != c.reason {
@@ -288,6 +269,10 @@ func TestFamilyGroupLoopbackEndToEnd(t *testing.T) {
 	// H3 is on for the direct identity in production; the fake platform speaks
 	// only websocket, so keep the loopback test to H1
 	settings.EnableH3 = false
+	settings.FamilyEvents = true
+	logger := &familyTestLogger{}
+	settings.Log = logger
+	statsBefore := connect.FamilyTransportStatsNow()
 	groupSettings := connect.DefaultFamilyPlatformTransportGroupSettings()
 	groupSettings.StandbyDelay = time.Hour
 
@@ -341,11 +326,92 @@ func TestFamilyGroupLoopbackEndToEnd(t *testing.T) {
 		t.Error("the group must stay connected while the v4 pin is up")
 	}
 
+	// the per-family counters and the log lines saw both families connect and
+	// the v6 session end
+	if !familyTestWait(5*time.Second, func() bool {
+		after := connect.FamilyTransportStatsNow()
+		return statsBefore.Families[1].Modes[0].Connects < after.Families[1].Modes[0].Connects &&
+			statsBefore.Families[1].Modes[0].Drops == statsBefore.Families[1].Modes[0].Drops &&
+			sumDrops(statsBefore.Families[1]) < sumDrops(after.Families[1])
+	}) {
+		t.Errorf("the v6 pin's connect and drop were not counted: %+v", connect.FamilyTransportStatsNow().Families[1])
+	}
+	after := connect.FamilyTransportStatsNow()
+	if after.Families[0].Modes[0].Connects <= statsBefore.Families[0].Modes[0].Connects {
+		t.Error("the v4 pin's connect was not counted")
+	}
+	if after.Families[0].Mismatches != statsBefore.Families[0].Mismatches || after.Families[1].Mismatches != statsBefore.Families[1].Mismatches {
+		t.Error("a pinned transport reported connecting over the other family")
+	}
+	if after.Families[0].Up != 1 {
+		t.Errorf("the v4 pin should have one session up, has %d", after.Families[0].Up)
+	}
+	lines := strings.Join(logger.snapshot(), "")
+	for _, want := range []string{"[ipv6] v4 h1 connected remote=127.0.0.1:", "[ipv6] v6 h1 connected remote=[::1]:", "[ipv6] v6 h1 session ended lived="} {
+		if !strings.Contains(lines, want) {
+			t.Errorf("log is missing %q:\n%s", want, lines)
+		}
+	}
+	var b strings.Builder
+	writeFamilyTransportMetrics(&b)
+	if errs := promtext.Lint(b.String()); len(errs) != 0 {
+		t.Errorf("promtext lint: %v\n%s", errs, b.String())
+	}
+	for _, want := range []string{
+		`urnet_dualstack_connects_total{family="ipv6",mode="h1"}`,
+		`urnet_dualstack_drops_total{family="ipv6",mode="h1",cause=`,
+		`urnet_dualstack_session_lifetime_seconds_bucket{family="ipv4",le="+Inf"}`,
+		`urnet_dualstack_pinned_down_events_total`,
+		`urnet_dualstack_standby_activations_total`,
+	} {
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("metrics are missing %q", want)
+		}
+	}
+	t.Logf("sample log lines:\n%s", lines)
+
 	stop()
 	if familyTransportLast.Load() != nil {
 		t.Error("stopping the reporter must clear the published snapshot")
 	}
 }
+
+func sumDrops(f connect.FamilyTransportSnapshot) uint64 {
+	var total uint64
+	for _, mode := range f.Modes {
+		for _, n := range mode.Drops {
+			total += n
+		}
+	}
+	return total
+}
+
+// familyTestLogger records Infof lines from the transports' goroutines.
+type familyTestLogger struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *familyTestLogger) Info(_ ...any) {}
+func (l *familyTestLogger) Infof(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+}
+func (l *familyTestLogger) Warningf(string, ...any) {}
+func (l *familyTestLogger) Errorf(string, ...any)   {}
+func (l *familyTestLogger) V(int32) connect.Verbose { return familyTestVerbose{} }
+func (l *familyTestLogger) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
+}
+
+type familyTestVerbose struct{}
+
+func (familyTestVerbose) Enabled() bool        { return false }
+func (familyTestVerbose) Info(...any)          {}
+func (familyTestVerbose) Infof(string, ...any) {}
 
 func TestFamilyTransportMetricsLint(t *testing.T) {
 	familyTransportDecisionLast.Store(&familyTransportDecision{Use: true, Reason: "dualstack"})
@@ -370,11 +436,11 @@ func TestFamilyTransportMetricsLint(t *testing.T) {
 		t.Errorf("promtext lint: %v\n%s", errs, body)
 	}
 
-	familyTransportDecisionLast.Store(&familyTransportDecision{Use: false, Reason: "kill-switch"})
+	familyTransportDecisionLast.Store(&familyTransportDecision{Use: false, Reason: "proxied-identity"})
 	familyTransportLast.Store(nil)
 	b.Reset()
 	writeFamilyTransportMetrics(&b)
-	if !strings.Contains(b.String(), `urnet_dualstack_mode{mode="legacy",reason="kill-switch"} 1`) ||
+	if !strings.Contains(b.String(), `urnet_dualstack_mode{mode="legacy",reason="proxied-identity"} 1`) ||
 		strings.Contains(b.String(), "urnet_dualstack_transport_state") {
 		t.Errorf("legacy path metrics wrong:\n%s", b.String())
 	}
@@ -398,4 +464,94 @@ func TestIdentityLaunchBuildsPlatformTransportThroughFamilyDecision(t *testing.T
 	if strings.Contains(text, "connect.NewPlatformTransport(") {
 		t.Error("the identity launch must not build a single platform transport directly")
 	}
+}
+
+func TestDualstackControlKeyValidation(t *testing.T) {
+	for _, good := range []string{"dual", "ipv4", "ipv6", "legacy", "v4", "v6"} {
+		if err := validateControlValue("dualstack", good); err != nil {
+			t.Errorf("dualstack=%q must be accepted: %v", good, err)
+		}
+	}
+	for _, bad := range []string{"both", "single", "off", "auto", "ipv8", "yes"} {
+		if err := validateControlValue("dualstack", bad); err == nil {
+			t.Errorf("dualstack=%q must be rejected", bad)
+		}
+	}
+	if needsRestart("dualstack") {
+		t.Error("dualstack is live: needsRestart must be false")
+	}
+	// with no group running the value is only stored
+	if err := applyLiveSideEffect("dualstack", "v6"); err != nil {
+		t.Errorf("applying with no group must not fail: %v", err)
+	}
+}
+
+// The operator's family choice moves the live group between dual stack, ipv4
+// only, ipv6 only and legacy without a restart, and a fixed choice never
+// falls back to the other family.
+func TestFamilyGroupStackModes(t *testing.T) {
+	platform4 := newFamilyTestPlatform(t, "tcp4", "127.0.0.1:0")
+	platform6 := newFamilyTestPlatform(t, "tcp6", "[::1]:0")
+	if platform4 == nil || platform6 == nil {
+		t.Skip("needs IPv4 and IPv6 loopback")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clientStrategySettings := connect.DefaultClientStrategySettings()
+	clientStrategy := connect.NewClientStrategy(ctx, clientStrategySettings)
+	defer clientStrategy.Close()
+
+	settings := connect.DefaultPlatformTransportSettings()
+	settings.PinnedReconnectMaxTimeout = 200 * time.Millisecond
+	settings.EnableH3 = false
+	groupSettings := connect.DefaultFamilyPlatformTransportGroupSettings()
+	groupSettings.StandbyDelay = 300 * time.Millisecond
+	group := newProviderFamilyGroup(
+		ctx, clientStrategySettings, clientStrategy, connect.NewRouteManager(ctx, "test-stack"),
+		platform4.url(), platform4.url(), platform6.url(),
+		&connect.ClientAuth{ByJwt: "testing", InstanceId: connect.NewId(), AppVersion: "testing"},
+		settings, groupSettings,
+	)
+	defer group.Close()
+
+	waitStatus := func(what string, cond func(connect.FamilyPlatformTransportGroupStatus) bool) {
+		t.Helper()
+		if !familyTestWait(15*time.Second, func() bool { return cond(group.Status()) }) {
+			t.Fatalf("%s: status %+v", what, group.Status())
+		}
+	}
+	connected := connect.PlatformTransportStateConnected
+	disabled := connect.PlatformTransportStateDisabled
+
+	waitStatus("dual: both pins connected", func(s connect.FamilyPlatformTransportGroupStatus) bool {
+		return s.Ipv4 == connected && s.Ipv6 == connected && !s.StandbyActive
+	})
+	if group.Stack() != connect.FamilyStackDual {
+		t.Fatalf("a new group must start in dual, has %s", group.Stack())
+	}
+
+	group.SetStack(connect.FamilyStackIpv4)
+	waitStatus("v4 only", func(s connect.FamilyPlatformTransportGroupStatus) bool {
+		return s.Ipv4 == connected && s.Ipv6 == disabled && !s.StandbyActive
+	})
+
+	group.SetStack(connect.FamilyStackIpv6)
+	waitStatus("v6 only", func(s connect.FamilyPlatformTransportGroupStatus) bool {
+		return s.Ipv6 == connected && s.Ipv4 == disabled && !s.StandbyActive
+	})
+	// a fixed v6 must not fall back to the standby even with v6 held for a while
+	time.Sleep(2 * groupSettings.StandbyDelay)
+	if group.Status().StandbyActive {
+		t.Fatal("v6 only must never start the standby")
+	}
+
+	group.SetStack(connect.FamilyStackLegacy)
+	waitStatus("legacy: the family-agnostic transport alone", func(s connect.FamilyPlatformTransportGroupStatus) bool {
+		return s.Ipv4 == disabled && s.Ipv6 == disabled && s.StandbyActive && s.Standby == connected
+	})
+
+	group.SetStack(connect.FamilyStackDual)
+	waitStatus("dual again: both pins, standby stands down", func(s connect.FamilyPlatformTransportGroupStatus) bool {
+		return s.Ipv4 == connected && s.Ipv6 == connected && !s.StandbyActive
+	})
 }

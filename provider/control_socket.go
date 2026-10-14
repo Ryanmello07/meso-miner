@@ -315,6 +315,7 @@ var liveEffectKeys = map[string]bool{
 	"h3":                          true,
 	"h3_datagram":                 true,
 	"h3_datagram_send":            true,
+	"dualstack":                   true,
 	"baseline":                    true,
 	"proxy_self_heal":             true,
 	"proxy_audit":                 true,
@@ -368,6 +369,10 @@ func validateControlValue(key, value string) error {
 		case "none", "url", "all":
 		default:
 			return fmt.Errorf("%s: must be none, url, or all (got %q)", key, value)
+		}
+	case "dualstack":
+		if _, err := connect.ParseFamilyStackMode(value); err != nil {
+			return err
 		}
 	case "fast_auth", "proxy_self_heal", "proxy_audit", "smart_dialer", "baseline", "h3", "h3_datagram", "h3_datagram_send":
 		switch valLower {
@@ -470,6 +475,8 @@ var liveDefaults = map[string]string{
 	// off default; without the entry, clear reported success while the live
 	// dialer stayed enabled until restart.
 	"smart_dialer": "off",
+	// Clearing dualstack hands the families back to the default: dual stack.
+	"dualstack": "dual",
 	// Clearing h3_datagram_send stops sending datagrams: it is an experiment and
 	// its default is off, with no environment variable behind it.
 	"h3_datagram_send": "off",
@@ -1077,6 +1084,8 @@ func applyLiveSideEffect(key, value string) error {
 		enabled := strings.EqualFold(value, "on")
 		previous := connect.SetH3DatagramsEnabled(enabled)
 		tlog("⚙️ [control] applied h3_datagram=%s (was %s)\n", value, onOff(previous))
+	case "dualstack":
+		return applyDualstackStack(value)
 	case "h3_datagram_send":
 		// Read per message, so this takes effect at once with no reconnect. It
 		// only matters on an H3 connection where the server accepted DATAGRAM
@@ -1307,6 +1316,11 @@ func applyPersistedRuntimeTuning(state *controlState) {
 	}
 	if err := applyLiveSideEffect("h3_datagram_send", onOff(strings.EqualFold(sendValue, "on"))); err != nil {
 		tlog("[control] failed to apply h3_datagram_send: %s\n", err)
+	}
+	if v, ok := state.get("dualstack"); ok {
+		if err := applyLiveSideEffect("dualstack", v); err != nil {
+			tlog("[control] failed to apply persisted dualstack=%s: %s\n", v, err)
+		}
 	}
 	// h3 is replayed in BOTH directions, falling back to the startup default
 	// when the key was never set: a persisted off must beat the env var and the
