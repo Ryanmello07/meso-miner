@@ -140,6 +140,9 @@ var controlKeyCanonical = map[string]string{
 	"h3-datagram":                 "h3_datagram",
 	"h3_datagram":                 "h3_datagram",
 	"h3-datagram-send":            "h3_datagram_send",
+	"h1-plus":                     "h1_plus",
+	"h1_plus":                     "h1_plus",
+	"h1plus":                      "h1_plus",
 	"ip-version":                  "ip_version",
 	"ip_version":                  "ip_version",
 	"ip":                          "ip_version",
@@ -210,7 +213,7 @@ func validateControlValue(canonicalKey, value string) error {
 		default:
 			return fmt.Errorf("ip-version: must be dual, ipv4, ipv6 or legacy (got %q)", value)
 		}
-	case "fast_auth", "proxy_self_heal", "proxy_audit", "smart_dialer", "baseline", "h3", "h3_datagram", "h3_datagram_send":
+	case "fast_auth", "proxy_self_heal", "proxy_audit", "smart_dialer", "baseline", "h3", "h3_datagram", "h3_datagram_send", "h1_plus":
 		switch strings.ToLower(value) {
 		case "on", "off":
 		default:

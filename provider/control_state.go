@@ -120,6 +120,7 @@ var controlKeys = map[string]bool{
 	"h3_datagram":                 true,
 	"h3_datagram_send":            true,
 	"ip_version":                  true,
+	"h1_plus":                     true,
 	"oom_cap":                     true,
 }
 

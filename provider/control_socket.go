@@ -316,6 +316,7 @@ var liveEffectKeys = map[string]bool{
 	"h3_datagram":                 true,
 	"h3_datagram_send":            true,
 	"ip_version":                  true,
+	"h1_plus":                     true,
 	"baseline":                    true,
 	"proxy_self_heal":             true,
 	"proxy_audit":                 true,
@@ -374,7 +375,7 @@ func validateControlValue(key, value string) error {
 		if _, err := connect.ParseFamilyStackMode(value); err != nil {
 			return err
 		}
-	case "fast_auth", "proxy_self_heal", "proxy_audit", "smart_dialer", "baseline", "h3", "h3_datagram", "h3_datagram_send":
+	case "fast_auth", "proxy_self_heal", "proxy_audit", "smart_dialer", "baseline", "h3", "h3_datagram", "h3_datagram_send", "h1_plus":
 		switch valLower {
 		case "on", "off":
 		default:
@@ -477,6 +478,8 @@ var liveDefaults = map[string]string{
 	"smart_dialer": "off",
 	// Clearing ip_version hands the families back to the default: dual stack.
 	"ip_version": "dual",
+	// Clearing h1_plus restores the default: H1+ upgrades allowed.
+	"h1_plus": "on",
 	// Clearing h3_datagram_send stops sending datagrams: it is an experiment and
 	// its default is off, with no environment variable behind it.
 	"h3_datagram_send": "off",
@@ -1086,6 +1089,12 @@ func applyLiveSideEffect(key, value string) error {
 		tlog("⚙️ [control] applied h3_datagram=%s (was %s)\n", value, onOff(previous))
 	case "ip_version":
 		return applyIpVersion(value)
+	case "h1_plus":
+		// Read at each dial: new connections try (on) or skip (off) the H1+
+		// upgrade; live connections keep their carrier until they reconnect.
+		enabled := strings.EqualFold(value, "on")
+		connect.SetH1PlusDisabled(!enabled)
+		tlog("⚙️ [control] applied h1_plus=%s (takes effect on the next connect)\n", onOff(enabled))
 	case "h3_datagram_send":
 		// Read per message, so this takes effect at once with no reconnect. It
 		// only matters on an H3 connection where the server accepted DATAGRAM
@@ -1316,6 +1325,11 @@ func applyPersistedRuntimeTuning(state *controlState) {
 	}
 	if err := applyLiveSideEffect("h3_datagram_send", onOff(strings.EqualFold(sendValue, "on"))); err != nil {
 		tlog("[control] failed to apply h3_datagram_send: %s\n", err)
+	}
+	if v, ok := state.get("h1_plus"); ok {
+		if err := applyLiveSideEffect("h1_plus", v); err != nil {
+			tlog("[control] failed to apply persisted h1_plus=%s: %s\n", v, err)
+		}
 	}
 	if v, ok := state.get("ip_version"); ok {
 		if err := applyLiveSideEffect("ip_version", v); err != nil {

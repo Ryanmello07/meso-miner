@@ -773,10 +773,11 @@ func DefaultPlatformTransportSettings() *PlatformTransportSettings {
 		DnsTlds: [][]byte{[]byte("ur.xyz.")},
 		// servers are migrated on 2025-06-12. We can remove this and always use true.
 		V2H1Auth: true,
-		// fork: H1+ (the framed custom upgrade) is OFF. Upstream defaults it on; it
-		// is a new wire carrier that costs one extra upgrade probe per connect when
-		// the platform does not take it, and it is not validated on this line.
-		EnableH1Plus: false,
+		// H1+ is opt-out (H1PLUS.md). Each dial tries the authenticated custom
+		// upgrade first and falls back to a plain websocket on a capability miss;
+		// a miss is remembered per address for five minutes. fork: the provider
+		// can switch it off live (control key h1_plus) and exports its counters.
+		EnableH1Plus: true,
 		// the platform transport must carry the per-peer encryption handshake,
 		// so its framer max is the connect runtime minimum message length
 		FramerSettings:                            DefaultFramerSettings(int(DefaultClientSettings().MinimumMessageLenLimit())),
@@ -2368,7 +2369,11 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 		}
 
 		// auth succeeded: the backend is reachable
-		familySessionH1 := self.familyNoteConnected(TransportModeH1, ws.UnderlyingConn().LocalAddr(), ws.UnderlyingConn().RemoteAddr(), time.Since(dialStart))
+		carrier := "websocket"
+		if _, framed := unobservedH1MessageConn(ws).(*FramedMessageConn); framed {
+			carrier = "h1plus"
+		}
+		familySessionH1 := self.familyNoteConnected(TransportModeH1, carrier, ws.UnderlyingConn().LocalAddr(), ws.UnderlyingConn().RemoteAddr(), time.Since(dialStart))
 		var endCause familyEndCause
 		self.noteDialSuccess()
 
@@ -3450,7 +3455,7 @@ func (self *PlatformTransport) runH3(
 		counters.connects.Add(1)
 
 		conn := connStream.conn
-		familySessionH3 := self.familyNoteConnected(ptMode, conn.LocalAddr(), conn.RemoteAddr(), time.Since(dialStart))
+		familySessionH3 := self.familyNoteConnected(ptMode, "quic", conn.LocalAddr(), conn.RemoteAddr(), time.Since(dialStart))
 		var endCause familyEndCause
 		stream := connStream.stream
 		streamWriter := connStream.streamWriter

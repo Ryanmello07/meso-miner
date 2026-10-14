@@ -294,7 +294,7 @@ func (self *PlatformTransport) familyNoteConnectFailed(mode TransportMode, err e
 
 // familyNoteConnected records a session that came up, checks that a pinned
 // transport really connected over its family, and writes one line.
-func (self *PlatformTransport) familyNoteConnected(mode TransportMode, local net.Addr, remote net.Addr, dial time.Duration) familySession {
+func (self *PlatformTransport) familyNoteConnected(mode TransportMode, carrier string, local net.Addr, remote net.Addr, dial time.Duration) familySession {
 	if !self.familyTracked() {
 		return familySession{}
 	}
@@ -313,8 +313,8 @@ func (self *PlatformTransport) familyNoteConnected(mode TransportMode, local net
 		self.log.Infof("[ipv6] %s %s FAMILY MISMATCH: pinned ipv%d but connected to %s\n",
 			familyLabel(index), mode, self.ipFamily, addrString(remote))
 	}
-	self.log.Infof("[ipv6] %s %s connected remote=%s local=%s remote_family=ipv%d dial=%s after_failures=%d\n",
-		familyLabel(index), mode, addrString(remote), addrString(local), observed,
+	self.log.Infof("[ipv6] %s %s connected carrier=%s remote=%s local=%s remote_family=ipv%d dial=%s after_failures=%d\n",
+		familyLabel(index), mode, carrier, addrString(remote), addrString(local), observed,
 		dial.Round(time.Millisecond), self.ConsecutiveDialFailures())
 	return familySession{
 		started: now,

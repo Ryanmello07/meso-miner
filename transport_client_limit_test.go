@@ -799,6 +799,9 @@ func TestClientLimitCloseForSupersededIntentTakesNoHold(t *testing.T) {
 	defer server.Close()
 
 	settings := DefaultPlatformTransportSettings()
+	// this test counts raw accepts of a plain websocket server: the H1+ upgrade
+	// probe would be the first accept
+	settings.EnableH1Plus = false
 	settings.ReconnectTimeout = 5 * time.Millisecond
 	settings.ClientLimitBackoff = backoff
 	settings.clientLimitHoldForTest = func() {

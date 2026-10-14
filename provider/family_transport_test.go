@@ -346,7 +346,7 @@ func TestFamilyGroupLoopbackEndToEnd(t *testing.T) {
 		t.Errorf("the v4 pin should have one session up, has %d", after.Families[0].Up)
 	}
 	lines := strings.Join(logger.snapshot(), "")
-	for _, want := range []string{"[ipv6] v4 h1 connected remote=127.0.0.1:", "[ipv6] v6 h1 connected remote=[::1]:", "[ipv6] v6 h1 session ended lived="} {
+	for _, want := range []string{"[ipv6] v4 h1 connected carrier=websocket remote=127.0.0.1:", "[ipv6] v6 h1 connected carrier=websocket remote=[::1]:", "[ipv6] v6 h1 session ended lived="} {
 		if !strings.Contains(lines, want) {
 			t.Errorf("log is missing %q:\n%s", want, lines)
 		}

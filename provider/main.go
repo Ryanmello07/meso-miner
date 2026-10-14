@@ -3872,6 +3872,8 @@ func provide(opts docopt.Opts) {
 		// the native identity's transports keep per-family counters and write the
 		// [ipv6] connect / session lines (connect/transport_family_stats.go)
 		platformSettings.FamilyEvents = isNative && proxySettings == nil
+		// one H1+ collector for every identity, exported as urnet_h1plus_*
+		platformSettings.H1PlusStats = h1PlusProcessStats
 		if platformSettings.EnableH3 {
 			tlog("[t]h3 eligible for the direct identity, currently %s (urnet-tools set h3 on|off or URNETWORK_H3): H3 runs beside H1 and falls back to H1 quietly\n",
 				onOff(resolveH3Setting(globalControlState, currentProxyResolution())))
