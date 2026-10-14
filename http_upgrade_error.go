@@ -23,6 +23,13 @@ func httpUpgradeFallbackCauses(err error) []*HTTPUpgradeError {
 		if upgrade == nil || upgrade.Terminal {
 			return nil
 		}
+		// fork: a busy or failing server (429, 5xx except 501 Not Implemented, a real miss) is platform trouble, not a
+		// capability miss. A fresh websocket would add a second TCP, TLS and proxy
+		// dial per attempt exactly when the platform is struggling, and nothing
+		// caches the miss, so fail the attempt and let the backoff pace it.
+		if upgrade.Reason == "rejected" && (upgrade.StatusCode == 429 || (500 <= upgrade.StatusCode && upgrade.StatusCode != 501)) {
+			return nil
+		}
 		responseIo = responseIo || upgrade.Reason == "response-io"
 		upgradeTs = append(upgradeTs, upgrade)
 	}

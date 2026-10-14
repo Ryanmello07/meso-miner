@@ -627,6 +627,12 @@ func newEvalResultFromHttpResponse(response *http.Response, err error) *evalResu
 }
 
 func (self *evalResult) Close() {
+	// fork: an H1 dial (websocket or H1+) stores its connection in h1Conn; a
+	// losing parallel dial must close it, or its authenticated platform session
+	// stays open with no reader. (Upstream's Close does the same.)
+	if self.h1Conn != nil {
+		self.h1Conn.Close()
+	}
 	if self.wsConn != nil {
 		self.wsConn.Close()
 		// if wsConn is set, the response does not need to be closed

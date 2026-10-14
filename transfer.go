@@ -472,8 +472,13 @@ type ClientSettings struct {
 // their framer caps (and matching receive-side limits):
 //
 //	settings.FramerSettings.MaxMessageLen = max(yourValue, int(client.MinimumMessageLenLimit()))
+//
+// fork: 16 KiB, as upstream. The per-peer TLS handshake flights (X25519MLKEM768,
+// mTLS) are 4.9 KB in the lab and a production capture reached 9,124 bytes; at the
+// fork's old 4 KiB value the native identity's sessions ended with "websocket:
+// read limit exceeded" within seconds of connecting.
 func (self *ClientSettings) MinimumMessageLenLimit() ByteCount {
-	return ByteCount(4 * 1024)
+	return ByteCount(16 * 1024)
 }
 
 // note all callbacks are wrapped to check for nil and recover from errors

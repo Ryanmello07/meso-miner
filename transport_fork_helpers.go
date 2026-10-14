@@ -210,3 +210,14 @@ func noteH1MessageSize(size int) {
 
 // H1MaxMessageSeen returns the largest complete message read on any H1 transport.
 func H1MaxMessageSeen() int64 { return h1MaxMessageSeen.Load() }
+
+// noteFramedWriteError passes a framed batch write's result through, recording its
+// error in the close-cause metric and the session-ended text as the websocket
+// write path does.
+func noteFramedWriteError(transport *PlatformTransport, endCause *familyEndCause, open bool, err error) (bool, error) {
+	if err != nil {
+		recordTransportCloseCause(transport.proxySourceLabel(), "h1", "write", err)
+		endCause.note(err)
+	}
+	return open, err
+}

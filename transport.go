@@ -781,14 +781,14 @@ func DefaultPlatformTransportSettings() *PlatformTransportSettings {
 		// the platform transport must carry the per-peer encryption handshake,
 		// so its framer max is the connect runtime minimum message length
 		FramerSettings: DefaultFramerSettings(int(DefaultClientSettings().MinimumMessageLenLimit())),
-		// fork: 64 KiB - 1, not upstream's 4 KiB framer minimum. The native identity
-		// receives messages larger than 4 KiB from the platform (encrypted peer
-		// sessions carry TLS records of up to 16 KiB), and a 4 KiB read limit ended
-		// its sessions with "websocket: read limit exceeded" within seconds of
-		// connecting. 65535 is also the largest message the
-		// compact H1+ framing carries, so H1+ stays eligible. The old fork limit was
-		// 1 MiB; urnet_h1_max_message_bytes records the largest message seen so this
-		// can be tightened or raised on evidence.
+		// fork: 64 KiB - 1. The native identity receives messages larger than 4 KiB
+		// from the platform: the per-peer TLS handshake flights are 4.9 KB in the
+		// lab and 9,124 bytes in a production capture (see MinimumMessageLenLimit,
+		// now 16 KiB as upstream). A 4 KiB read limit ended its sessions with
+		// "websocket: read limit exceeded" seconds after connecting. 65535 is the compact framer's hard ceiling (uint16 length) and
+		// the largest value for which H1+ stays eligible; the old fork limit was 1
+		// MiB. urnet_h1_max_message_bytes records the largest message seen so this
+		// can change on evidence.
 		H1MaxMessageByteCount:                     math.MaxUint16,
 		PlatformTransportBudget:                   DefaultPlatformTransportBudget(),
 		H1BudgetByteCount:                         MemoryScaledByteCount(kib(512), kib(256)),
@@ -2643,13 +2643,14 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 					firstPriority bool,
 				) (sendOpen bool, err error) {
 					if framed, ok := unobservedH1MessageConn(ws).(*FramedMessageConn); ok {
-						return writeH1FramedReadyBatch(handleCtx, framed, send, ackPrioritySend, firstMessage, firstPriority, self.settings.WriteTimeout, func(byteCount int) {
+						framedOpen, framedErr := writeH1FramedReadyBatch(handleCtx, framed, send, ackPrioritySend, firstMessage, firstPriority, self.settings.WriteTimeout, func(byteCount int) {
 							writeCounter.Add(1)
 							h1ModeStats.addTx(byteCount) // fork: per-mode carried bytes
 							if self.settings.EnableH3 {
 								h1DirectStats.addTx(byteCount)
 							}
 						})
+						return noteFramedWriteError(self, &endCause, framedOpen, framedErr)
 					}
 					if writeBatchConn == nil {
 						if err := ws.SetWriteDeadline(time.Now().Add(self.settings.WriteTimeout)); err != nil {

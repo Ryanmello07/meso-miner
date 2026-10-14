@@ -8,6 +8,7 @@ package connect
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/netip"
 	"time"
@@ -63,7 +64,10 @@ func (self *ClientStrategy) H1DialContextWithDialer(ctx context.Context, address
 		}
 		return causes.track(&evalResult{h1Conn: conn, dialerInfo: info, err: err, terminal: terminal})
 	}
-	result, dialErr := self.parallelEvalErr(ctx, eval, false)
+	// singleRound true, as WsDialContext: during a platform outage one failed
+	// round ends the call instead of retrying every dialer until the request
+	// deadline
+	result, dialErr := self.parallelEvalErr(ctx, eval, true)
 	if result == nil {
 		return nil, nil, &h1DialError{dial: dialErr, causes: causes.exhausted(ctx, self.ctx)}
 	}
@@ -84,6 +88,13 @@ func (self *h1DialError) Error() string {
 		return self.dial.Error()
 	}
 	return self.causes.Error()
+}
+
+// AuthRejected reports that the platform refused this identity (401 or 403 on the
+// upgrade), so the connect governor files it as a refusal, not a backend failure.
+func (self *h1DialError) AuthRejected() bool {
+	var upgrade *HTTPUpgradeError
+	return errors.As(self, &upgrade) && (upgrade.StatusCode == 401 || upgrade.StatusCode == 403)
 }
 
 func (self *h1DialError) Unwrap() []error {
