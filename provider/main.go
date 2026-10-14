@@ -3874,13 +3874,29 @@ func provide(opts docopt.Opts) {
 				onOff(resolveH3Setting(globalControlState, currentProxyResolution())))
 		}
 		platformSettings.ClientLimitBackoff = clientLimitHoldWithContext(proxyCtx, clientId, time.Now())
-		platformTransport := connect.NewPlatformTransport(proxyCtx, clientStrategy, connectClient.RouteManager(), connectUrl, auth, platformSettings)
+		// Only the direct identity can hold a transport per address family (see
+		// family_transport.go); every proxied identity builds exactly the single
+		// transport it always has.
+		useFamily, familyReason := useFamilyTransports(proxySettings, isNative, connectUrl)
+		if isNative {
+			recordFamilyTransportDecision(useFamily, familyReason)
+		}
+		platformTransport, _, familyGroup := newProviderPlatformTransport(
+			proxyCtx, clientStrategySettings, clientStrategy, connectClient.RouteManager(),
+			connectUrl, auth, platformSettings, useFamily,
+		)
 		// Register coordinator closer so HotSwap yields the coordinator session cleanly during handoff.
 		// Defer unregister so proxy reloads or shutdowns don't leak stale closers (F-5).
 		unregCloser := RegisterCoordinatorCloser(func() {
 			platformTransport.Close()
 		})
 		defer unregCloser()
+		if familyGroup != nil {
+			// prompt teardown of the group's three transports and two strategies
+			defer familyGroup.Close()
+			stopFamilyStatus := startFamilyStatusReporter(proxyCtx, familyGroup)
+			defer stopFamilyStatus()
+		}
 
 		// This proxy now has a live transport; bracket it so systemd STATUS=
 		// reflects the real count. Paired with the defer so every early return

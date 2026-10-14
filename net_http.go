@@ -158,6 +158,10 @@ type ClientStrategySettings struct {
 	ExtenderHostnames []string
 	ReconnectTimeout  time.Duration
 	MaxExtenderCount  int
+	// DisableManualExtenders makes SetCustomExtenders a no-op. A strategy built
+	// for a family-pinned transport sets it: an extender's address family is its
+	// own, so it would prove the extender's family, not the provider's.
+	DisableManualExtenders bool
 	// extender minimum weight
 	ExtenderMinimumWeight float32
 	// drop dialers that have not had a successful connect in this timeout
@@ -430,6 +434,9 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 }
 
 func (self *ClientStrategy) SetCustomExtenders(extenderIpSecrets map[netip.Addr]string) {
+	if self.settings.DisableManualExtenders {
+		return
+	}
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 

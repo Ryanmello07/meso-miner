@@ -307,6 +307,7 @@ func providerExtraMetrics() string {
 	writeGovernMetrics(&b)
 	writeEnforcementMetrics(&b)
 	writeDiskBenchMetrics(&b)
+	writeFamilyTransportMetrics(&b)
 	writePeerKeyCrosscheckMetrics(&b)
 
 	fmt.Fprintf(&b, "# HELP urnet_info Provider identity: the version label, value always 1.\n")

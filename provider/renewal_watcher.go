@@ -61,7 +61,7 @@ type proxyJWTWatcherConfig struct {
 	ApiURL         string
 	ClientStrategy *connect.ClientStrategy
 	OOB            *connect.ApiOutOfBandControl
-	Transport      *connect.PlatformTransport
+	Transport      transportAuthSetter
 	// RenewNow is signaled by the OOB's 401 callback (and available for
 	// tests to drive the fast-path directly).
 	RenewNow chan struct{}
@@ -266,4 +266,12 @@ func runProxyJWTWatcher(ctx context.Context, cfg proxyJWTWatcherConfig) {
 			renewIfNeeded("401 fast-path")
 		}
 	}
+}
+
+// transportAuthSetter is what the renewal watcher needs of the platform
+// transport: the new JWT. It is an interface because the direct identity may run
+// a dual-stack transport group instead of one transport; both take the new auth.
+// The field must be left as a nil interface, never a typed nil, when unset.
+type transportAuthSetter interface {
+	SetAuth(auth *connect.ClientAuth)
 }

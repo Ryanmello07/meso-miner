@@ -2272,7 +2272,9 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 
 		// fork: while the backend is failing, a disconnected proxy waits its turn
 		// under the shared attempt budget; the direct path never waits
-		{
+		// (a family-pinned transport paces itself and is no evidence about the
+		// backend, so it neither waits on nor feeds the shared budget)
+		if !self.pinned() {
 			proxyIndex, proxied := self.proxyIndex()
 			if !admitConnect(self.ctx, !proxied || proxyIndex == 0, proxyIndex) {
 				releaseReconnect()
@@ -2290,7 +2292,9 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 		}
 		releaseReconnect()
 		// fork: governor feed for every attempt, success or failure
-		connectGov.recordAttempt(classifyConnectError(err, attemptStats), attemptStats)
+		if !self.pinned() {
+			connectGov.recordAttempt(classifyConnectError(err, attemptStats), attemptStats)
+		}
 		if err != nil {
 			// a definitive refusal of the credential holds it before the next
 			// dial; the backend answered, so it is no dial failure either
@@ -2308,8 +2312,9 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 			// client.Done.
 			if self.ctx.Err() == nil && refusal == 0 {
 				self.noteDialFailure()
-				// fork: the proxy health record (identity eviction, reaper)
-				if idx, ok := self.proxyIndex(); ok {
+				// fork: the proxy health record (identity eviction, reaper); a
+				// pinned transport's failure is about one family, not the identity
+				if idx, ok := self.proxyIndex(); ok && !self.pinned() {
 					RecordProxyAuthFailure(idx, err)
 				}
 			}
@@ -2494,17 +2499,10 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 			// fork: the H1 connection is the proxy health signal (scout, reaper,
 			// grade governor) and the [health] proxies=N count; the auxiliary H3
 			// transport never feeds either
-			atomic.AddInt64(&activeProxyConnections, 1)
-			if idx, ok := self.proxyIndex(); ok {
-				markProxyUp(idx)
-			}
+			self.noteIdentityTransportUp()
 
 			defer func() {
-				atomic.AddInt64(&activeProxyConnections, -1)
-				if idx, ok := self.proxyIndex(); ok {
-					markProxyDown(idx)
-					RecordProxyTransportDrop(idx, nil)
-				}
+				self.noteIdentityTransportDown()
 				self.setRegistered(false)
 				releaseH1ConnectionStats()
 				releaseExtenderIp()
@@ -2998,7 +2996,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 		// and then drops it makes every proxy reconnect again immediately. A held
 		// reconnect also gives up the reconnect fast path.
 		lived := time.Since(sessionStart)
-		if flapWait := sessionEndWait(self.ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, true, self.proxySourceLabel()); 0 < flapWait {
+		if flapWait := sessionEndWait(self.ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, !self.pinned(), self.proxySourceLabel()); 0 < flapWait {
 			hadConnection = false
 			select {
 			case <-self.ctx.Done():
@@ -3298,6 +3296,13 @@ func (self *PlatformTransport) runH3(
 			connStream, err = connect(attemptCtx)
 		}
 		releaseReconnect()
+		// fork: the governor reads the platform's health from every transport's
+		// connects; an auxiliary H3 beside H1 and a pinned transport are never a
+		// health signal. (H3 is UDP, so it never goes through a proxy and the
+		// attempt budget would exempt it as direct.)
+		if !self.h3Gated() && !self.pinned() {
+			connectGov.recordAttempt(classifyConnectError(err, nil), nil)
+		}
 		if err != nil {
 			attemptCanceled := attemptCtx.Err() != nil
 			releaseAttempt()
@@ -3330,7 +3335,7 @@ func (self *PlatformTransport) runH3(
 						auxBackoff = nextH3Backoff(auxBackoff, self.settings.ReconnectTimeout, h3AuxiliaryMaxBackoff)
 					} else {
 						self.noteDialFailure()
-						if idx, ok := self.proxyIndex(); ok {
+						if idx, ok := self.proxyIndex(); ok && !self.pinned() {
 							RecordProxyAuthFailure(idx, err)
 						}
 					}
@@ -4136,7 +4141,7 @@ func (self *PlatformTransport) runH3(
 		// held back so it cannot redial in a tight loop, but a young session of it
 		// is no evidence about the platform.
 		lived := time.Since(sessionStart)
-		if flapWait := sessionEndWait(ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, !self.h3Gated(), self.proxySourceLabel()); 0 < flapWait {
+		if flapWait := sessionEndWait(ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, !self.h3Gated() && !self.pinned(), self.proxySourceLabel()); 0 < flapWait {
 			hadConnection = false
 			select {
 			case <-ctx.Done():

@@ -1,6 +1,7 @@
 package connect
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -33,4 +34,56 @@ func shouldLogSelectErr() (bool, int64) { return selectErrThrottle.Allow(time.No
 // IsBackendDegraded is the exported form for use by the provider binary.
 func IsBackendDegraded() bool {
 	return isBackendDegraded()
+}
+
+// An identity can run several live H1 transports at once: the dual-stack group
+// holds a v4 pin and a v6 pin. The health registry and the proxies=N count are
+// per identity, not per transport, so an identity counts as up when its first
+// transport registers and as down when its last one goes, and a pin dropping
+// while its sibling is up is not a transport drop of the identity.
+var (
+	liveTransportsMu      sync.Mutex
+	liveTransportsByProxy = map[int]int{}
+)
+
+// noteIdentityTransportUp is called when an H1 transport registers.
+func (self *PlatformTransport) noteIdentityTransportUp() {
+	idx, ok := self.proxyIndex()
+	if !ok {
+		idx = -1
+	}
+	liveTransportsMu.Lock()
+	liveTransportsByProxy[idx] += 1
+	first := liveTransportsByProxy[idx] == 1
+	liveTransportsMu.Unlock()
+	if !first {
+		return
+	}
+	atomic.AddInt64(&activeProxyConnections, 1)
+	if ok {
+		markProxyUp(idx)
+	}
+}
+
+// noteIdentityTransportDown is the matching call when that H1 transport ends.
+func (self *PlatformTransport) noteIdentityTransportDown() {
+	idx, ok := self.proxyIndex()
+	if !ok {
+		idx = -1
+	}
+	liveTransportsMu.Lock()
+	liveTransportsByProxy[idx] -= 1
+	last := liveTransportsByProxy[idx] <= 0
+	if last {
+		delete(liveTransportsByProxy, idx)
+	}
+	liveTransportsMu.Unlock()
+	if !last {
+		return
+	}
+	atomic.AddInt64(&activeProxyConnections, -1)
+	if ok {
+		markProxyDown(idx)
+		RecordProxyTransportDrop(idx, nil)
+	}
 }

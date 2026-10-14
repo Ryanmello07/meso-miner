@@ -210,6 +210,49 @@ func udpAddrFamily(udpAddr *net.UDPAddr) int {
 	return 6
 }
 
+// NewDirectClientStrategy builds the client strategy a family-pinned platform
+// transport dials with: the caller's settings without extenders or a proxy, so
+// every dial is direct and the observed remote family is the family the provider
+// actually has, and with the pin enforced below name resolution. Each pinned
+// transport owns one, which also gives it connect pacing independent of the
+// process-wide strategy.
+//
+// The caller's settings are not mutated. An injected DialContextSettings
+// (headless hosts) is kept as the inner dial so a source-identity seam still
+// applies; a configured ProxySettings is dropped, because a pinned dial through
+// a proxy would prove the proxy's family, not the provider's. Extender discovery
+// is off, and the strategy refuses extenders a later `SetCustomExtenders` names
+// (`DisableManualExtenders`). fork: this tree has no VLESS servers or alt
+// carriers, so there is nothing further to drop than upstream does.
+func NewDirectClientStrategy(ctx context.Context, settings *ClientStrategySettings, ipFamily int) *ClientStrategy {
+	direct := *settings
+	direct.ExpandExtenderProfileCount = 0
+	direct.MaxExtenderCount = 0
+	direct.DisableManualExtenders = true
+	direct.ConnectSettings.ProxySettings = nil
+
+	ipFamily = normalizeIpFamily(ipFamily)
+	if ipFamily != 0 {
+		base := direct.ConnectSettings
+		base.DialContextSettings = nil
+		inner := func(ctx context.Context, network string, addr string) (net.Conn, error) {
+			return base.NetDialer().DialContext(ctx, network, addr)
+		}
+		var packetConnFactory func(context.Context) (net.PacketConn, error)
+		if injected := direct.ConnectSettings.DialContextSettings; injected != nil {
+			if injected.DialContext != nil {
+				inner = injected.DialContext
+			}
+			packetConnFactory = injected.PacketConnFactory
+		}
+		direct.ConnectSettings.DialContextSettings = &DialContextSettings{
+			DialContext:       pinnedDialContext(ipFamily, inner),
+			PacketConnFactory: packetConnFactory,
+		}
+	}
+	return NewClientStrategy(ctx, &direct)
+}
+
 // pinnedDialContext is the enforcement below name resolution: the network is
 // narrowed to the pin, a Force that contradicts the pin is an error (so a plain
 // ws:// dial, which bypasses the tls chain, still cannot connect against the
@@ -981,6 +1024,434 @@ func raceH3DialProgressive(
 			}
 			return nil, ctx.Err()
 		}
+	}
+}
+
+// FamilyPlatformTransportGroupSettings tunes the provider transport group.
+type FamilyPlatformTransportGroupSettings struct {
+	// StandbyDelay is how long neither pinned transport may be connected
+	// (since the group started, or since the last pinned disconnect) before
+	// the family-agnostic standby dials. The delay is skipped while no pinned
+	// transport can connect soon: every configured pinned transport is held
+	// (sleeping or idle by policy) or its last dial failed because its
+	// hostname does not resolve. Any other failure waits out the delay.
+	StandbyDelay time.Duration
+}
+
+func DefaultFamilyPlatformTransportGroupSettings() *FamilyPlatformTransportGroupSettings {
+	return &FamilyPlatformTransportGroupSettings{
+		StandbyDelay: 15 * time.Second,
+	}
+}
+
+// FamilyPlatformTransportGroupStatus is the per-transport readout for the sdk
+// and a developer screen.
+type FamilyPlatformTransportGroupStatus struct {
+	HasIpv4 bool
+	Ipv4    PlatformTransportState
+	HasIpv6 bool
+	Ipv6    PlatformTransportState
+	Standby PlatformTransportState
+	// StandbyActive is true while the standby is released to dial, whether
+	// or not it has connected yet.
+	StandbyActive bool
+}
+
+// FamilyPlatformTransportGroup runs a provider's v4-pinned, v6-pinned and
+// standby platform transports as one unit (A4). All three register on the
+// same route manager, so the platform may route over whichever is live.
+type FamilyPlatformTransportGroup struct {
+	ctx    context.Context
+	cancel context.CancelFunc
+	log    Logger
+	done   chan struct{}
+
+	settings *FamilyPlatformTransportGroupSettings
+
+	ipv4Transport    *PlatformTransport
+	ipv6Transport    *PlatformTransport
+	standbyTransport *PlatformTransport
+	// owned direct-only strategies, one per pinned transport
+	ipv4Strategy *ClientStrategy
+	ipv6Strategy *ClientStrategy
+
+	connectedMonitor *Monitor
+
+	stateLock      sync.Mutex
+	standbyActive  bool
+	standbyDueTime time.Time
+	// the group's current view, for the fan-in notify below
+	lastConnected bool
+}
+
+// NewFamilyPlatformTransportGroup starts the group. platformUrlV4 and
+// platformUrlV6 are the family urls (empty disables that pinned transport);
+// platformUrl is the family-agnostic url the standby dials with the caller's
+// full clientStrategy. clientStrategySettings seeds the direct-only strategies
+// the pinned transports own. settings is cloned per transport: the pinned
+// clones carry their family and background budget priority.
+func NewFamilyPlatformTransportGroup(
+	ctx context.Context,
+	clientStrategySettings *ClientStrategySettings,
+	clientStrategy *ClientStrategy,
+	routeManager *RouteManager,
+	platformUrl string,
+	platformUrlV4 string,
+	platformUrlV6 string,
+	auth *ClientAuth,
+	targetMode TransportMode,
+	settings *PlatformTransportSettings,
+	groupSettings *FamilyPlatformTransportGroupSettings,
+) *FamilyPlatformTransportGroup {
+	if groupSettings == nil {
+		groupSettings = DefaultFamilyPlatformTransportGroupSettings()
+	}
+	if settings.ClientLimitBackoff == nil {
+		// the three transports are one client to the platform, so a client
+		// limit close of any of them holds all of them. The caller's settings
+		// are never mutated.
+		copied := *settings
+		copied.ClientLimitBackoff = NewClientLimitBackoff()
+		settings = &copied
+	}
+	cancelCtx, cancel := context.WithCancel(ctx)
+	group := &FamilyPlatformTransportGroup{
+		ctx:              cancelCtx,
+		cancel:           cancel,
+		log:              loggerOrDefault(settings.Log),
+		done:             make(chan struct{}),
+		settings:         groupSettings,
+		connectedMonitor: NewMonitor(),
+	}
+
+	// each pinned transport dials the family alt name that pairs with its own
+	// family platform url, so alt-v4 goes with connect-v4 (L3). An alt url
+	// that is not the one the label rule derives from the family-agnostic
+	// platform url was set explicitly, and an override is passed through to
+	// every transport unchanged.
+	familyAltUrl := func(platformUrlFamily string) string {
+		if settings.AltUrl == "" {
+			return ""
+		}
+		if AltUrlFromPlatformUrl(platformUrl) != settings.AltUrl {
+			return settings.AltUrl
+		}
+		if altUrlFamily := AltUrlFromPlatformUrl(platformUrlFamily); altUrlFamily != "" {
+			return altUrlFamily
+		}
+		return settings.AltUrl
+	}
+	pinnedSettings := func(ipFamily int, platformUrlFamily string) *PlatformTransportSettings {
+		copied := *settings
+		copied.IpFamily = ipFamily
+		copied.StartDisabled = false
+		copied.PlatformTransportBudgetPriority = PlatformTransportBudgetPriorityBackground
+		copied.AltUrl = familyAltUrl(platformUrlFamily)
+		return &copied
+	}
+	if platformUrlV4 != "" {
+		group.ipv4Strategy = NewDirectClientStrategy(cancelCtx, clientStrategySettings, 4)
+		group.ipv4Transport = NewPlatformTransportWithTargetMode(
+			cancelCtx,
+			group.ipv4Strategy,
+			routeManager,
+			platformUrlV4,
+			auth,
+			targetMode,
+			pinnedSettings(4, platformUrlV4),
+		)
+	}
+	if platformUrlV6 != "" {
+		group.ipv6Strategy = NewDirectClientStrategy(cancelCtx, clientStrategySettings, 6)
+		group.ipv6Transport = NewPlatformTransportWithTargetMode(
+			cancelCtx,
+			group.ipv6Strategy,
+			routeManager,
+			platformUrlV6,
+			auth,
+			targetMode,
+			pinnedSettings(6, platformUrlV6),
+		)
+	}
+	hasPinned := group.ipv4Transport != nil || group.ipv6Transport != nil
+	standbySettings := *settings
+	standbySettings.IpFamily = 0
+	// with no pinned transport at all the group is the legacy single
+	// transport and the standby dials at once
+	standbySettings.StartDisabled = hasPinned
+	group.standbyTransport = NewPlatformTransportWithTargetMode(
+		cancelCtx,
+		clientStrategy,
+		routeManager,
+		platformUrl,
+		auth,
+		targetMode,
+		&standbySettings,
+	)
+	group.standbyActive = !hasPinned
+	group.standbyDueTime = time.Now().Add(groupSettings.StandbyDelay)
+
+	go HandleError(func() {
+		defer close(group.done)
+		group.run()
+	}, cancel)
+	return group
+}
+
+// run drives the standby from the pinned transports' connected state and fans
+// the three connected notifications into one.
+func (self *FamilyPlatformTransportGroup) run() {
+	for {
+		notifies := []chan struct{}{}
+		for _, transport := range self.Transports() {
+			notifies = append(notifies, transport.connectedMonitor.NotifyChannel())
+		}
+
+		var timer <-chan time.Time
+		var stopTimer func()
+		func() {
+			self.stateLock.Lock()
+			defer self.stateLock.Unlock()
+
+			now := time.Now()
+			pinnedConnected := self.pinnedConnectedWithLock()
+			if pinnedConnected {
+				if self.standbyActive {
+					self.log.Infof("[t]standby transport stands down: a pinned transport connected\n")
+					self.standbyTransport.SetEnabled(false)
+					self.standbyActive = false
+				}
+				// the delay restarts from the moment the last pinned
+				// transport disconnects
+				self.standbyDueTime = time.Time{}
+			} else {
+				if self.standbyDueTime.IsZero() {
+					self.standbyDueTime = now.Add(self.settings.StandbyDelay)
+				}
+				if !self.standbyActive {
+					if !now.Before(self.standbyDueTime) {
+						self.log.Infof("[t]standby transport dials: no pinned transport connected for %s\n", self.settings.StandbyDelay)
+						self.standbyTransport.SetEnabled(true)
+						self.standbyActive = true
+					} else if self.pinnedCannotConnectWithLock() {
+						self.log.Infof("[t]standby transport dials: no pinned transport can connect (hostname does not resolve, or held)\n")
+						self.standbyTransport.SetEnabled(true)
+						self.standbyActive = true
+					} else {
+						t := time.NewTimer(self.standbyDueTime.Sub(now))
+						timer = t.C
+						stopTimer = func() { t.Stop() }
+					}
+				}
+			}
+
+			connected := self.connectedWithLock()
+			if connected != self.lastConnected {
+				self.lastConnected = connected
+				self.connectedMonitor.NotifyAll()
+			}
+		}()
+
+		wake := make(chan struct{})
+		var wakeOnce sync.Once
+		for _, notify := range notifies {
+			go func(notify chan struct{}) {
+				select {
+				case <-notify:
+					wakeOnce.Do(func() { close(wake) })
+				case <-wake:
+				case <-self.ctx.Done():
+				}
+			}(notify)
+		}
+		select {
+		case <-self.ctx.Done():
+			wakeOnce.Do(func() { close(wake) })
+			if stopTimer != nil {
+				stopTimer()
+			}
+			return
+		case <-wake:
+			if stopTimer != nil {
+				stopTimer()
+			}
+		case <-timer:
+			wakeOnce.Do(func() { close(wake) })
+		}
+	}
+}
+
+func (self *FamilyPlatformTransportGroup) pinnedConnectedWithLock() bool {
+	return (self.ipv4Transport != nil && self.ipv4Transport.IsConnected()) ||
+		(self.ipv6Transport != nil && self.ipv6Transport.IsConnected())
+}
+
+// pinnedCannotConnectWithLock reports whether no pinned transport can connect
+// soon, which releases the standby before StandbyDelay: every configured
+// pinned transport is held (sleeping without a path of its family, or idle
+// under a contradicting Force) or its last dial failed because its hostname
+// does not resolve. A pinned transport that is plain connecting, whatever
+// its last error, keeps the delay.
+func (self *FamilyPlatformTransportGroup) pinnedCannotConnectWithLock() bool {
+	cannotConnect := func(transport *PlatformTransport) bool {
+		if transport == nil {
+			return true
+		}
+		switch transport.State() {
+		case PlatformTransportStateSleeping, PlatformTransportStateIdlePolicy:
+			return true
+		case PlatformTransportStateConnecting:
+			return transport.unresolvableHost()
+		default:
+			return false
+		}
+	}
+	return cannotConnect(self.ipv4Transport) && cannotConnect(self.ipv6Transport)
+}
+
+func (self *FamilyPlatformTransportGroup) connectedWithLock() bool {
+	return self.pinnedConnectedWithLock() || self.standbyTransport.IsConnected()
+}
+
+// Transports lists the live transports: v4, v6 (when configured) and standby.
+func (self *FamilyPlatformTransportGroup) Transports() []*PlatformTransport {
+	transports := []*PlatformTransport{}
+	if self.ipv4Transport != nil {
+		transports = append(transports, self.ipv4Transport)
+	}
+	if self.ipv6Transport != nil {
+		transports = append(transports, self.ipv6Transport)
+	}
+	transports = append(transports, self.standbyTransport)
+	return transports
+}
+
+func (self *FamilyPlatformTransportGroup) Ipv4Transport() *PlatformTransport {
+	return self.ipv4Transport
+}
+
+func (self *FamilyPlatformTransportGroup) Ipv6Transport() *PlatformTransport {
+	return self.ipv6Transport
+}
+
+func (self *FamilyPlatformTransportGroup) StandbyTransport() *PlatformTransport {
+	return self.standbyTransport
+}
+
+// IsConnected reports whether any transport in the group has routes.
+func (self *FamilyPlatformTransportGroup) IsConnected() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.connectedWithLock()
+}
+
+// ConnectedNotify closes on the next change of IsConnected. Capture it before
+// reading IsConnected.
+func (self *FamilyPlatformTransportGroup) ConnectedNotify() <-chan struct{} {
+	return self.connectedMonitor.NotifyChannel()
+}
+
+// Status is the per-transport readout.
+func (self *FamilyPlatformTransportGroup) Status() FamilyPlatformTransportGroupStatus {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	status := FamilyPlatformTransportGroupStatus{
+		Standby:       self.standbyTransport.State(),
+		StandbyActive: self.standbyActive,
+	}
+	if self.ipv4Transport != nil {
+		status.HasIpv4 = true
+		status.Ipv4 = self.ipv4Transport.State()
+	}
+	if self.ipv6Transport != nil {
+		status.HasIpv6 = true
+		status.Ipv6 = self.ipv6Transport.State()
+	}
+	return status
+}
+
+// SetAuth installs a new auth generation on every transport.
+func (self *FamilyPlatformTransportGroup) SetAuth(auth *ClientAuth) {
+	for _, transport := range self.Transports() {
+		transport.SetAuth(auth)
+	}
+}
+
+// Kick re-dials every transport now, as on a host network change.
+func (self *FamilyPlatformTransportGroup) Kick() {
+	for _, transport := range self.Transports() {
+		transport.Kick()
+	}
+}
+
+// IsWaitingForBudget reports whether the standby, the transport a policy
+// replacement is bounded by, is blocked on the aggregate budget.
+func (self *FamilyPlatformTransportGroup) IsWaitingForBudget() bool {
+	return self.standbyTransport.IsWaitingForBudget()
+}
+
+// CanMakeBeforeBreakFrom pairs each transport with its counterpart in the
+// group it replaces, so a policy migration keeps the old group alive until
+// the new one connects without a second full working set escaping the budget.
+func (self *FamilyPlatformTransportGroup) CanMakeBeforeBreakFrom(previous *FamilyPlatformTransportGroup) bool {
+	if self == nil || previous == nil {
+		return true
+	}
+	if !self.standbyTransport.CanMakeBeforeBreakFrom(previous.standbyTransport) {
+		return false
+	}
+	if self.ipv4Transport != nil && previous.ipv4Transport != nil &&
+		!self.ipv4Transport.CanMakeBeforeBreakFrom(previous.ipv4Transport) {
+		return false
+	}
+	if self.ipv6Transport != nil && previous.ipv6Transport != nil &&
+		!self.ipv6Transport.CanMakeBeforeBreakFrom(previous.ipv6Transport) {
+		return false
+	}
+	return true
+}
+
+// ClientLimitBackoff is the client limit hold every transport of the group
+// shares (transport_client_limit.go).
+func (self *FamilyPlatformTransportGroup) ClientLimitBackoff() *ClientLimitBackoff {
+	return self.standbyTransport.clientLimitBackoff
+}
+
+// Close stops every transport and the owned strategies. Nonblocking.
+func (self *FamilyPlatformTransportGroup) Close() {
+	self.cancel()
+	for _, transport := range self.Transports() {
+		transport.Close()
+	}
+	if self.ipv4Strategy != nil {
+		self.ipv4Strategy.Close()
+	}
+	if self.ipv6Strategy != nil {
+		self.ipv6Strategy.Close()
+	}
+}
+
+// Done closes after the controller and every transport have finished.
+func (self *FamilyPlatformTransportGroup) Done() <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		<-self.done
+		for _, transport := range self.Transports() {
+			<-transport.Done()
+		}
+		close(done)
+	}()
+	return done
+}
+
+// CloseAndWait closes and joins, bounded by ctx.
+func (self *FamilyPlatformTransportGroup) CloseAndWait(ctx context.Context) error {
+	self.Close()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-self.Done():
+		return nil
 	}
 }
 
