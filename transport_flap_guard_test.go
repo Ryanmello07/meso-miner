@@ -426,6 +426,44 @@ func TestRunH1_ClientLimitCloseIsNotAnEarlyDeath(t *testing.T) {
 	}
 }
 
+// The group stands the standby down the instant a pin connects, so a young
+// session can end because the owner disabled the transport. That is our own
+// teardown, not evidence about the platform, and must not feed the governor.
+func TestRunH1_DisabledTransportEndIsNotAnEarlyDeath(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var accepts atomic.Int64
+	var stamps flapStamps
+	server := flapServer(time.Hour, &accepts, &stamps) // holds the session open
+	defer server.Close()
+
+	settings := DefaultPlatformTransportSettings()
+	settings.ReconnectTimeout = 20 * time.Millisecond
+	settings.FlapStableAfter = time.Hour // any session counts as young
+
+	resetGovernorWindow(t)
+	before := connectGov.snapshot()
+	transport := newFlapTestTransport(t, ctx, server.URL, settings)
+
+	deadline := time.After(10 * time.Second)
+	for accepts.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("the transport never connected")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	transport.SetEnabled(false) // the owner stands it down mid-session
+	time.Sleep(500 * time.Millisecond)
+	transport.Close()
+
+	if got := connectGov.snapshot().Early - before.Early; got != 0 {
+		t.Fatalf("a disabled transport's young session end was counted as dying young (%d)", got)
+	}
+}
+
 // The end-of-session rules are shared by the H1 and H3 loops through one helper,
 // so that the two cannot drift apart.
 func TestSessionEnd_YoungSessionIsHeldAndCountedOnce(t *testing.T) {

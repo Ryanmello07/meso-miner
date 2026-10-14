@@ -505,6 +505,9 @@ func (self *PlatformTransport) refreshFamilyHold() {
 		// one line per transition, never per attempt: the hold exists so a
 		// family that cannot work is silent, not noisy
 		self.log.Infof("[t]ipv%d transport %s -> %s\n", self.ipFamily, previous, hold)
+		// fork: wake the group loop so a pin that can no longer connect releases
+		// the standby now, not at the end of the standby delay
+		self.connectedMonitor.NotifyAll()
 	}
 	self.updateHold()
 }

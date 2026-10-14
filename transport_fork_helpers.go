@@ -122,7 +122,9 @@ func (self *h3ConnStream) close() {
 //
 // A session that dies young is evidence about the platform, but only if it was not
 // cut short by our own teardown (a reload, the reaper, shutdown) and was not the
-// platform enforcing the client limit. countsAsHealth is false for an auxiliary
+// platform enforcing the client limit. countsAsHealth is false for a transport its
+// owner disabled (the group standing the standby down is our own teardown, not
+// evidence about the platform) and for an auxiliary
 // transport beside H1, which is never a health signal; it is still held back so it
 // cannot redial in a tight loop.
 func sessionEndWait(ctx context.Context, flaps *flapGuard, lived time.Duration, clientLimitClosed bool, clientId string, log Logger, countsAsHealth bool, proxySource string) time.Duration {

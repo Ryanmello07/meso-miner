@@ -337,7 +337,12 @@ func (self *PlatformTransport) familyNoteSessionEnded(session familySession, cau
 	lived := now.Sub(session.started)
 	// connected time is the time with at least one session up, so an H1 and an H3
 	// session overlapping on one family count once
-	if fs.up.Add(-1) <= 0 {
+	if n := fs.up.Add(-1); n <= 0 {
+		// an unpaired end can only come from a bug upstream of here, but a
+		// negative counter would suppress every connected-time close after it
+		if n < 0 {
+			fs.up.Add(-n)
+		}
 		if since := fs.liveSince.Swap(0); 0 < since {
 			fs.connectedNanos.Add(now.UnixNano() - since)
 		}

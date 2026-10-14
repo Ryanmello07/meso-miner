@@ -3012,7 +3012,7 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 		// reconnect also gives up the reconnect fast path.
 		lived := time.Since(sessionStart)
 		self.familyNoteSessionEnded(familySessionH1, endCause.get(), endCause.getDetail())
-		if flapWait := sessionEndWait(self.ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, !self.pinned(), self.proxySourceLabel()); 0 < flapWait {
+		if flapWait := sessionEndWait(self.ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, !self.pinned() && self.enabled.Load(), self.proxySourceLabel()); 0 < flapWait {
 			hadConnection = false
 			select {
 			case <-self.ctx.Done():
@@ -4170,7 +4170,7 @@ func (self *PlatformTransport) runH3(
 		// an idle timeout) when no read or write error got there first
 		endCause.note(context.Cause(conn.Context()))
 		self.familyNoteSessionEnded(familySessionH3, endCause.get(), endCause.getDetail())
-		if flapWait := sessionEndWait(ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, !self.h3Gated() && !self.pinned(), self.proxySourceLabel()); 0 < flapWait {
+		if flapWait := sessionEndWait(ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, !self.h3Gated() && !self.pinned() && self.enabled.Load(), self.proxySourceLabel()); 0 < flapWait {
 			hadConnection = false
 			select {
 			case <-ctx.Done():

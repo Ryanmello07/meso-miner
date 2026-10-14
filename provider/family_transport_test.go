@@ -331,7 +331,6 @@ func TestFamilyGroupLoopbackEndToEnd(t *testing.T) {
 	if !familyTestWait(5*time.Second, func() bool {
 		after := connect.FamilyTransportStatsNow()
 		return statsBefore.Families[1].Modes[0].Connects < after.Families[1].Modes[0].Connects &&
-			statsBefore.Families[1].Modes[0].Drops == statsBefore.Families[1].Modes[0].Drops &&
 			sumDrops(statsBefore.Families[1]) < sumDrops(after.Families[1])
 	}) {
 		t.Errorf("the v6 pin's connect and drop were not counted: %+v", connect.FamilyTransportStatsNow().Families[1])
