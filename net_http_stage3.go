@@ -9,6 +9,7 @@ package connect
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/netip"
 	"time"
@@ -56,7 +57,7 @@ func (self *ClientStrategy) H1DialContextWithDialer(ctx context.Context, address
 	eval := func(handleCtx context.Context, dialer *clientDialer) *evalResult {
 		info := self.dialerInfo(dialer)
 		startDial := time.Now()
-		conn, err := dialH1MessagesWithinDeadline(handleCtx, address, requestHeader, dialer.WsDialer(self.settings), H1FramerProtocol, maximum, enabled, stats)
+		conn, err := dialH1MessagesWithinDeadline(handleCtx, address, requestHeader, dialer.WsDialer(self.settings), H1FramerProtocol, maximum, enabled, stats, upgradeRouteScope(dialer))
 		terminal, refusalOnly := httpUpgradeTerminalCauses(err)
 		if !refusalOnly {
 			dialer.Update(handleCtx, err, time.Since(startDial))
@@ -72,6 +73,13 @@ func (self *ClientStrategy) H1DialContextWithDialer(ctx context.Context, address
 		return nil, nil, &h1DialError{dial: dialErr, causes: causes.exhausted(ctx, self.ctx)}
 	}
 	return result.h1Conn, result.dialerInfo, result.err
+}
+
+// upgradeRouteScope names the route one dialer takes, for the framed-upgrade
+// rejection cache (see framedUpgradeCacheKey). The strategy's dialers are cached
+// and reused, so the dialer's identity is stable for the life of the route.
+func upgradeRouteScope(dialer *clientDialer) string {
+	return fmt.Sprintf("route-%p", dialer)
 }
 
 // h1DialError is the error of an H1 dial that produced no result. It reads as the

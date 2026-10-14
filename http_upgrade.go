@@ -381,19 +381,23 @@ func DialH1Messages(ctx context.Context, address string, header http.Header, dia
 		ctx, cancel = context.WithTimeout(ctx, dialer.HandshakeTimeout)
 		defer cancel()
 	}
-	return dialH1MessagesWithinDeadline(ctx, address, header, dialer, protocol, maximum, enabled, stats)
+	return dialH1MessagesWithinDeadline(ctx, address, header, dialer, protocol, maximum, enabled, stats, "")
 }
 
 // The strategy already owns the total request/preferred-route deadline. Do
 // not shrink it to one handshake's budget: a supported provider takes one
 // handshake, but an old provider needs a full new WS handshake after rejection.
 // Each native handshake remains bounded and neither can outlive ctx.
-func dialH1MessagesWithinDeadline(ctx context.Context, address string, header http.Header, dialer *websocket.Dialer, protocol string, maximum int, enabled bool, stats *H1PlusStats) (H1MessageConn, error) {
+//
+// scope names the route the dial takes (see framedUpgradeCacheKey). A caller with
+// one route per dialer passes that dialer's identity so a rejection seen through
+// one route never decides for another.
+func dialH1MessagesWithinDeadline(ctx context.Context, address string, header http.Header, dialer *websocket.Dialer, protocol string, maximum int, enabled bool, stats *H1PlusStats, scope string) (H1MessageConn, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	var upgradeErr error
-	if enabled && FramedUpgradePermitted(address, protocol) {
+	if enabled && framedUpgradePermittedFor(scope, address, protocol) {
 		start := time.Now()
 		conn, err := DialFramedUpgrade(ctx, address, header, dialer, protocol)
 		RecordH1PlusSelection(stats, time.Since(start), err)
@@ -407,7 +411,7 @@ func dialH1MessagesWithinDeadline(ctx context.Context, address string, header ht
 		if !HTTPUpgradeAllowsFallback(err) {
 			return nil, err
 		}
-		RecordFramedUpgradeFailure(address, protocol, err)
+		recordFramedUpgradeFailureFor(scope, address, protocol, err)
 		upgradeErr = err
 	}
 	ws, response, err := dialH1WebSocket(ctx, address, header, dialer)
@@ -506,12 +510,22 @@ var framedUpgradeCache = struct {
 	until map[string]time.Time
 }{until: map[string]time.Time{}}
 
-func framedUpgradeCacheKey(address, protocol string) string {
+// framedUpgradeCacheKey is the cache key of one platform address and protocol on
+// one route. The scope names the route: a rejection of the framed upgrade is
+// evidence about the path it was seen on (a proxy or middlebox in front of the
+// platform rejects it where a direct path does not), so with one process-wide key
+// a single proxy's rejection turned H1+ off for every other proxy and the direct
+// path for the next five minutes. An empty scope is the one shared route, which is
+// what a caller with a single path (the direct case) wants.
+func framedUpgradeCacheKey(scope, address, protocol string) string {
 	u, err := url.Parse(address)
 	if err != nil {
 		return ""
 	}
 	key := strings.ToLower(u.Scheme+"://"+u.Host) + " " + protocol
+	if scope != "" {
+		key = scope + " " + key
+	}
 	if len(key) > 512 {
 		return ""
 	}
@@ -519,10 +533,14 @@ func framedUpgradeCacheKey(address, protocol string) string {
 }
 
 func FramedUpgradePermitted(address, protocol string) bool {
+	return framedUpgradePermittedFor("", address, protocol)
+}
+
+func framedUpgradePermittedFor(scope, address, protocol string) bool {
 	if !H1PlusAvailable() {
 		return false
 	}
-	key := framedUpgradeCacheKey(address, protocol)
+	key := framedUpgradeCacheKey(scope, address, protocol)
 	if key == "" {
 		return true
 	}
@@ -537,6 +555,10 @@ func FramedUpgradePermitted(address, protocol string) bool {
 }
 
 func RecordFramedUpgradeFailure(address, protocol string, err error) {
+	recordFramedUpgradeFailureFor("", address, protocol, err)
+}
+
+func recordFramedUpgradeFailureFor(scope, address, protocol string, err error) {
 	upgradeTs := httpUpgradeFallbackCauses(err)
 	if len(upgradeTs) == 0 {
 		return
@@ -554,7 +576,7 @@ func RecordFramedUpgradeFailure(address, protocol string, err error) {
 			return
 		}
 	}
-	key := framedUpgradeCacheKey(address, protocol)
+	key := framedUpgradeCacheKey(scope, address, protocol)
 	if key == "" {
 		return
 	}
