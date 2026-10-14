@@ -494,3 +494,16 @@ func canonicalKeyValuesForTest() map[string]bool {
 	}
 	return out
 }
+
+func TestValidateH3Values(t *testing.T) {
+	for _, ok := range []string{"off", "direct", "on", "all", "ALL", "1", "16", "64"} {
+		if err := validateControlValue("h3", ok); err != nil {
+			t.Fatalf("h3=%q must be accepted: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"maybe", "-1", "+4", "04", "1.5", "true", "16 proxies"} {
+		if err := validateControlValue("h3", bad); err == nil {
+			t.Fatalf("h3=%q must be rejected", bad)
+		}
+	}
+}

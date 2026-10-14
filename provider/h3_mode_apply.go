@@ -7,11 +7,10 @@ import (
 	"github.com/urnetwork/connect"
 )
 
-// h3AppliedMode is the mode last applied through the h3 control key, or -1 before
-// the first application (the startup replay), which must not restart anything.
-var h3AppliedMode atomic.Int32
-
-func init() { h3AppliedMode.Store(-1) }
+// h3AppliedSetting is the setting last applied through the h3 control key, nil
+// before the first application (the startup replay), which must not restart
+// anything.
+var h3AppliedSetting atomic.Pointer[h3Setting]
 
 // activeProxyReloader is the running provider's reloader, for the few control
 // changes that must relaunch the direct identity.
@@ -26,17 +25,19 @@ func h3DefaultModeName() string {
 	return h3ModeDirectName
 }
 
-// applyH3Mode applies an h3 mode to the running provider. The runtime gate follows
-// the mode at once. The transport mode policy is fixed when an identity builds its
-// transport, so a change of mode relaunches the direct identity (the only one the
-// mode affects) to pick up the new policy.
-func applyH3Mode(mode h3Mode) (previous h3Mode, relaunch bool) {
-	connect.SetH3Enabled(mode == h3ModeOn)
-	prev := h3Mode(h3AppliedMode.Swap(int32(mode)))
-	if prev < 0 {
-		return mode, false
+// applyH3Mode applies an h3 setting to the running provider. The runtime gate
+// follows it at once. The transport mode policy is fixed when an identity builds
+// its transport, so a change relaunches the direct identity, and relaunches the
+// proxies whose eligibility changed (relaunchH3ProxiesNow), to pick up the new
+// policy.
+func applyH3Mode(setting h3Setting) (previous h3Setting, relaunch bool) {
+	connect.SetH3Enabled(setting.Mode == h3ModeOn)
+	prev := h3AppliedSetting.Swap(&setting)
+	rerankH3(setting)
+	if prev == nil {
+		return setting, false
 	}
-	return prev, prev != mode
+	return *prev, prev.directPolicy() != setting.directPolicy()
 }
 
 // restartDirect relaunches the native [direct] identity so it rebuilds its

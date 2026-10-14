@@ -124,12 +124,12 @@ func TestH3ControlKeyDrivesTheLiveGate(t *testing.T) {
 	if needsRestart("h3") {
 		t.Fatal("h3 is live: needsRestart must be false")
 	}
-	for _, bad := range []string{"maybe", "", "1", "true"} {
+	for _, bad := range []string{"maybe", "", "-1", "true"} {
 		if err := validateControlValue("h3", bad); err == nil {
 			t.Fatalf("h3=%q must be rejected", bad)
 		}
 	}
-	for _, ok := range []string{"on", "off", "ON", "direct"} {
+	for _, ok := range []string{"on", "off", "ON", "direct", "all", "16"} {
 		if err := validateControlValue("h3", ok); err != nil {
 			t.Fatalf("h3=%q: %v", ok, err)
 		}

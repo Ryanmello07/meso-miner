@@ -383,7 +383,7 @@ func validateControlValue(key, value string) error {
 		}
 	case "h3":
 		if strings.TrimSpace(value) == "" {
-			return fmt.Errorf("h3: must be off, direct or on (got an empty value)")
+			return fmt.Errorf("h3: must be off, direct, on, a positive proxy count, or all (got an empty value)")
 		}
 		if _, err := parseH3Mode(value); err != nil {
 			return err
@@ -1084,14 +1084,17 @@ func applyLiveSideEffect(key, value string) error {
 		// The mode (see h3Mode) is read when an identity builds its transport. The
 		// beside-H1 gate follows it at once; a changed mode relaunches the direct
 		// identity, the only one it affects, so the new policy takes hold.
-		mode, err := parseH3Mode(value)
+		setting, err := parseH3Mode(value)
 		if err != nil {
 			return err
 		}
-		previous, relaunch := applyH3Mode(mode)
-		tlog("⚙️ [control] applied h3=%s (was %s)\n", mode, previous)
+		previous, relaunch := applyH3Mode(setting)
+		tlog("⚙️ [control] applied h3=%s (was %s)\n", setting, previous)
 		if relaunch {
 			go connect.HandleError(restartDirectIdentity)
+		}
+		if previous != setting {
+			go connect.HandleError(func() { relaunchH3ProxiesNow(setting) })
 		}
 	case "h3_datagram":
 		// The offer is made when H3 dials, so a change closes the live H3

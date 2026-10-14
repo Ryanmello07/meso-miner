@@ -52,14 +52,24 @@ func h3Eligible(proxySettings *connect.ProxySettings, isNative bool) bool {
 }
 
 // platformTransportSettingsFor returns the platform transport settings for an
-// identity under the current h3 mode (see h3Mode): the engine defaults plus the
-// transport mode policy. Only the direct identity gets more than H1, and only it
-// can be the beside-H1 auxiliary (EnableH3).
+// identity under the current h3 setting (see h3Mode): the engine defaults plus the
+// transport mode policy. The direct identity gets the fallbacks in every mode but
+// off, and is the only one that can be the beside-H1 auxiliary (EnableH3). A
+// proxied identity gets them only when the setting admits it, and then its QUIC
+// is relayed through its proxy (H3PacketConnFactory), never opened on the host.
 func platformTransportSettingsFor(proxySettings *connect.ProxySettings, isNative bool) *connect.PlatformTransportSettings {
 	settings := connect.DefaultPlatformTransportSettings()
-	mode := resolveH3Mode(globalControlState, currentProxyResolution())
+	setting := resolveH3Mode(globalControlState, currentProxyResolution())
 	direct := h3Eligible(proxySettings, isNative)
-	settings.ModePreferences = h3ModePreferences(mode, direct)
-	settings.EnableH3 = direct && mode == h3ModeOn
+	proxyEligible := false
+	if proxySettings != nil {
+		proxyEligible = h3ProxyEligible(setting, proxySettings.Key())
+		recordH3Launch(proxySettings.Key(), proxyEligible)
+		if proxyEligible {
+			settings.H3PacketConnFactory = newH3PacketConnFactory(proxySettings)
+		}
+	}
+	settings.ModePreferences = h3ModePreferences(setting, direct, proxyEligible)
+	settings.EnableH3 = direct && setting.Mode == h3ModeOn
 	return settings
 }

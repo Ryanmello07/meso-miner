@@ -1021,6 +1021,14 @@ func (r *ProxyReloader) reload() {
 	for _, s := range desiredSet {
 		desiredValues = append(desiredValues, s)
 	}
+	// a count setting ranks over the proxies this provider runs; when the ranked
+	// set moved, relaunch the proxies that joined or left it
+	// (the candidates are noted under every setting, so a later switch to a count
+	// ranks over the real set at once)
+	setting := resolveH3Mode(globalControlState, currentProxyResolution())
+	if noteH3Candidates(desiredValues, setting) {
+		go connect.HandleError(func() { r.relaunchH3Proxies(r.parentCtx, setting) })
+	}
 	adoptLegacyProxyState(r.state, desiredValues)
 	if globalClientJWTStore != nil {
 		globalClientJWTStore.AdoptLegacy(desiredValues)

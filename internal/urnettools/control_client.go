@@ -213,11 +213,20 @@ func validateControlValue(canonicalKey, value string) error {
 		default:
 			return fmt.Errorf("ip-version: must be dual, ipv4, ipv6 or legacy (got %q)", value)
 		}
-	case "fast_auth", "proxy_self_heal", "proxy_audit", "smart_dialer", "baseline", "h3", "h3_datagram", "h3_datagram_send", "h1_plus":
+	case "fast_auth", "proxy_self_heal", "proxy_audit", "smart_dialer", "baseline", "h3_datagram", "h3_datagram_send", "h1_plus":
 		switch strings.ToLower(value) {
 		case "on", "off":
 		default:
 			return fmt.Errorf("%s: must be on or off (got %q)", canonicalKey, value)
+		}
+	case "h3":
+		// must match parseH3Mode in the provider: a positive proxy count or a word
+		switch v := strings.ToLower(strings.TrimSpace(value)); v {
+		case "off", "direct", "on", "all":
+		default:
+			if n, err := strconv.Atoi(v); err != nil || n < 0 || strconv.Itoa(n) != v {
+				return fmt.Errorf("h3: must be off, direct, on, a positive proxy count, or all (got %q)", value)
+			}
 		}
 	case "oom_cap":
 		switch strings.ToLower(value) {

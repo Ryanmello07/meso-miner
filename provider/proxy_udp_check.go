@@ -422,7 +422,7 @@ func logProxyUDPResult(settings *connect.ProxySettings, previous *proxyUDPResult
 	if previous != nil && previous.Status == result.Status {
 		return
 	}
-	index := parseProxyIndex(settings.Key())
+	index := settings.Index
 	switch result.Status {
 	case proxyUDPOK:
 		tlog("[proxy][udp] proxy[%d] (%s) udp relay ok, exit %s matches tcp; h3 allowed\n", index, settings.Address, result.UDPExit)
