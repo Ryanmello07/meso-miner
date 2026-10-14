@@ -106,11 +106,13 @@ func H3DatagramsEnabled() bool {
 	return h3DatagramGate.get()
 }
 
-// waitH3Enabled blocks until the gate is on. It returns false if the transport
-// is closed first. A transport that is not gated (the explicit H3 target mode
-// is the sole transport) never waits.
-func (self *PlatformTransport) waitH3Enabled() bool {
-	if !self.h3Gated() {
+// waitH3EnabledFor blocks until the gate is on for a carrier running mode. It
+// returns false if the transport is closed first. Only the plain H3 carrier of a
+// gated transport waits: the dns carriers are automatic fallbacks that the
+// gate does not govern, and a transport that is not gated (the explicit H3
+// target mode is the sole transport) never waits.
+func (self *PlatformTransport) waitH3EnabledFor(mode TransportMode) bool {
+	if !self.h3GatedFor(mode) {
 		return true
 	}
 	for {

@@ -1807,7 +1807,7 @@ func (self *PlatformTransport) startH3ModeGroup(modes []TransportMode, auto bool
 			}
 			// fork: a gated auxiliary H3 holds no budget reservation and opens no
 			// socket until the runtime gate is switched on
-			if !self.waitH3Enabled() {
+			if self.h3GroupGated(modes) && !self.waitH3EnabledFor(TransportModeH3) {
 				return
 			}
 			if reservation != nil && !reservation.Acquire(self.ctx) {
@@ -3089,7 +3089,7 @@ func (self *PlatformTransport) runH3(
 	for {
 		// fork: an eligible identity with the runtime gate off opens no socket and
 		// dials nothing: wait here until it is switched on
-		if !self.waitH3Enabled() {
+		if !self.waitH3EnabledFor(ptMode) {
 			return
 		}
 		// wait until we are back in the specific pt mode or auto mode
@@ -3338,7 +3338,7 @@ func (self *PlatformTransport) runH3(
 		// connects; an auxiliary H3 beside H1 and a pinned transport are never a
 		// health signal. (H3 is UDP, so it never goes through a proxy and the
 		// attempt budget would exempt it as direct.)
-		if !self.h3Gated() && !self.pinned() {
+		if !self.h3GatedFor(ptMode) && !self.pinned() {
 			connectGov.recordAttempt(classifyConnectError(err, nil), nil)
 		}
 		if err != nil {
@@ -3362,7 +3362,7 @@ func (self *PlatformTransport) runH3(
 			// threshold with fresh timestamps, so the NEXT session starts
 			// gated. The contract OOB path makes the same carve-out on
 			// client.Done.
-			gated := self.h3Gated()
+			gated := self.h3GatedFor(ptMode)
 			if ctx.Err() == nil && refusal == 0 {
 				counters.connectFailures.Add(1)
 				if !attemptCanceled {
@@ -3447,7 +3447,7 @@ func (self *PlatformTransport) runH3(
 		}
 
 		// auth succeeded: the backend is reachable
-		if self.h3Gated() {
+		if self.h3GatedFor(ptMode) {
 			// fork: an auxiliary H3 authenticating must not clear failures H1
 			// recorded, and H1 is the health signal
 			auxBackoff = 0
@@ -3516,14 +3516,14 @@ func (self *PlatformTransport) runH3(
 			counters.up.Add(1)
 			defer func() {
 				counters.up.Add(-1)
-				if ctx.Err() == nil && !gateClosed.Load() && (!self.h3Gated() || H3Enabled()) {
+				if ctx.Err() == nil && !gateClosed.Load() && (!self.h3GatedFor(ptMode) || H3Enabled()) {
 					counters.drops.Add(1)
 				}
 			}()
 			// fork: turning the runtime gate off closes a live auxiliary H3
 			// connection; the DATAGRAM offer is made at dial time, so a change in
 			// it closes the connection and lets it reconnect with the new offer.
-			if self.h3Gated() {
+			if self.h3GatedFor(ptMode) {
 				startConnectionWorker(func() {
 					for {
 						on, notify := h3GateWatch()
@@ -3560,7 +3560,7 @@ func (self *PlatformTransport) runH3(
 			// everything goes on the stream, which is the behavior before datagram
 			// send existed.
 			var datagramGuard *h3DatagramSendGuard
-			if connStream.useH3Datagrams && self.h3Gated() {
+			if connStream.useH3Datagrams && self.h3GatedFor(ptMode) {
 				datagramGuard = newH3DatagramSendGuard()
 			}
 			var lastStreamReceiveNano atomic.Int64
@@ -3704,12 +3704,12 @@ func (self *PlatformTransport) runH3(
 			self.setRegistered(true)
 			// fork: the explicit H3 target mode is the identity's sole transport and
 			// carries its health; an auxiliary H3 beside H1 never does
-			if !self.h3Gated() {
+			if !self.h3GatedFor(ptMode) {
 				self.noteIdentityTransportUp()
 			}
 
 			defer func() {
-				if !self.h3Gated() {
+				if !self.h3GatedFor(ptMode) {
 					self.noteIdentityTransportDown()
 				}
 				self.setRegistered(false)
@@ -4187,7 +4187,7 @@ func (self *PlatformTransport) runH3(
 		// an idle timeout) when no read or write error got there first
 		endCause.note(context.Cause(conn.Context()))
 		self.familyNoteSessionEnded(familySessionH3, endCause.get(), endCause.getDetail())
-		if flapWait := sessionEndWait(ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, !self.h3Gated() && !self.pinned() && self.enabled.Load(), self.proxySourceLabel()); 0 < flapWait {
+		if flapWait := sessionEndWait(ctx, flaps, lived, self.clientLimitCloseCount.Load() != limitClosesBefore, clientId.String(), self.log, !self.h3GatedFor(ptMode) && !self.pinned() && self.enabled.Load(), self.proxySourceLabel()); 0 < flapWait {
 			hadConnection = false
 			select {
 			case <-ctx.Done():

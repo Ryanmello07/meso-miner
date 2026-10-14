@@ -677,6 +677,7 @@ func runReloadReconciler(ctx context.Context) {
 // StartWatcher launches the background goroutine that polls the reload trigger
 // file every 2 seconds and triggers reload() when its sequence number changes.
 func (r *ProxyReloader) StartWatcher(ctx context.Context) {
+	activeProxyReloader.Store(r)
 	reloadPath, err := proxyReloadPath()
 	if err != nil {
 		tlog("[proxy] warning: could not determine reload path: %v\n", err)

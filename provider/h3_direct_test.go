@@ -38,16 +38,27 @@ func TestH3NeverEligibleForAProxiedIdentity(t *testing.T) {
 		if platformTransportSettingsFor(nil, false).EnableH3 {
 			t.Fatal("a non-native identity without proxy settings was eligible")
 		}
-		if !platformTransportSettingsFor(nil, true).EnableH3 {
-			t.Fatal("the direct identity must be eligible, so the runtime gate can start H3 without a restart")
+		// the beside-H1 auxiliary is the direct identity's opt-in (h3 on)
+		if got := platformTransportSettingsFor(nil, true).EnableH3; got != (env == "on") {
+			t.Fatalf("URNETWORK_H3=%q: direct EnableH3=%v", env, got)
+		}
+		for _, settings := range []*connect.PlatformTransportSettings{
+			platformTransportSettingsFor(proxied, false),
+			platformTransportSettingsFor(proxied, true),
+			platformTransportSettingsFor(nil, false),
+		} {
+			if len(settings.ModePreferences) != 1 || settings.ModePreferences[connect.TransportModeH1] != 1 {
+				t.Fatalf("a proxied identity must stay on H1 only, got %v", settings.ModePreferences)
+			}
 		}
 	}
 }
 
-// A proxied identity's settings are exactly the engine defaults, and a direct
-// identity differs only by eligibility, so a box that never switches H3 on
-// sees no change in how transports are configured.
+// An identity's settings are the engine defaults apart from the transport mode
+// policy, which only the direct identity widens, and the auxiliary flag, which is
+// the opt-in `h3 on`.
 func TestPlatformTransportSettingsAreTheDefaultsExceptEligibility(t *testing.T) {
+	t.Setenv("URNETWORK_H3", "")
 	want := connect.DefaultPlatformTransportSettings()
 	proxied := &connect.ProxySettings{Network: "tcp", Address: "127.0.0.1:1080"}
 	for _, c := range []struct {
@@ -56,7 +67,7 @@ func TestPlatformTransportSettingsAreTheDefaultsExceptEligibility(t *testing.T) 
 		h3   bool
 	}{
 		{"proxied", platformTransportSettingsFor(proxied, false), false},
-		{"direct", platformTransportSettingsFor(nil, true), true},
+		{"direct", platformTransportSettingsFor(nil, true), false},
 	} {
 		if c.got.EnableH3 != c.h3 || c.got.H3Port != want.H3Port ||
 			c.got.ReconnectTimeout != want.ReconnectTimeout || c.got.PingTimeout != want.PingTimeout ||
@@ -113,12 +124,12 @@ func TestH3ControlKeyDrivesTheLiveGate(t *testing.T) {
 	if needsRestart("h3") {
 		t.Fatal("h3 is live: needsRestart must be false")
 	}
-	for _, bad := range []string{"maybe", "", "1"} {
+	for _, bad := range []string{"maybe", "", "1", "true"} {
 		if err := validateControlValue("h3", bad); err == nil {
 			t.Fatalf("h3=%q must be rejected", bad)
 		}
 	}
-	for _, ok := range []string{"on", "off", "ON"} {
+	for _, ok := range []string{"on", "off", "ON", "direct"} {
 		if err := validateControlValue("h3", ok); err != nil {
 			t.Fatalf("h3=%q: %v", ok, err)
 		}
@@ -129,6 +140,10 @@ func TestH3ControlKeyDrivesTheLiveGate(t *testing.T) {
 	}
 	if err := applyLiveSideEffect("h3", "off"); err != nil || connect.H3Enabled() {
 		t.Fatalf("set off: err=%v enabled=%v", err, connect.H3Enabled())
+	}
+	// direct is the automatic fallbacks without the beside-H1 auxiliary
+	if err := applyLiveSideEffect("h3", "direct"); err != nil || connect.H3Enabled() {
+		t.Fatalf("set direct: err=%v enabled=%v", err, connect.H3Enabled())
 	}
 
 	// clear returns to the environment, not to a hardcoded off
@@ -166,7 +181,7 @@ func TestH3DatagramControlKeyDrivesTheOffer(t *testing.T) {
 	if needsRestart("h3_datagram") {
 		t.Fatal("h3_datagram is live: needsRestart must be false")
 	}
-	for _, bad := range []string{"maybe", "", "1"} {
+	for _, bad := range []string{"maybe", "", "1", "true"} {
 		if err := validateControlValue("h3_datagram", bad); err == nil {
 			t.Fatalf("h3_datagram=%q must be rejected", bad)
 		}
@@ -209,7 +224,7 @@ func TestH3DatagramSendControlKeyDrivesTheSendGate(t *testing.T) {
 	if needsRestart("h3_datagram_send") {
 		t.Fatal("h3_datagram_send is live: needsRestart must be false")
 	}
-	for _, bad := range []string{"maybe", "", "1"} {
+	for _, bad := range []string{"maybe", "", "1", "true"} {
 		if err := validateControlValue("h3_datagram_send", bad); err == nil {
 			t.Fatalf("h3_datagram_send=%q must be rejected", bad)
 		}

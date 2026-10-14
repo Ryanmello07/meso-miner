@@ -35,6 +35,24 @@ func (self *PlatformTransport) h3Gated() bool {
 	return self.targetMode == TransportModeAuto && self.settings.EnableH3
 }
 
+// h3GatedFor reports whether the carrier running mode is the gated auxiliary.
+// The gate governs only the plain H3 carrier: the dns carriers beside it are
+// fallbacks in their own right and run whatever the gate says.
+func (self *PlatformTransport) h3GatedFor(mode TransportMode) bool {
+	return mode == TransportModeH3 && self.h3Gated()
+}
+
+// h3GroupGated reports whether every mode of an H3 carrier group is gated, in
+// which case the group holds no budget reservation until the gate is on.
+func (self *PlatformTransport) h3GroupGated(modes []TransportMode) bool {
+	for _, mode := range modes {
+		if !self.h3GatedFor(mode) {
+			return false
+		}
+	}
+	return 0 < len(modes)
+}
+
 // h3Auxiliary reports whether this transport runs H3 only as an opt-in
 // auxiliary beside H1: eligible (Auto mode with EnableH3) and switched on. With
 // the gate off H3 does not run at all, so H1 behaves exactly as it does on a

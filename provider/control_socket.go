@@ -375,11 +375,18 @@ func validateControlValue(key, value string) error {
 		if _, err := connect.ParseFamilyStackMode(value); err != nil {
 			return err
 		}
-	case "fast_auth", "proxy_self_heal", "proxy_audit", "smart_dialer", "baseline", "h3", "h3_datagram", "h3_datagram_send", "h1_plus":
+	case "fast_auth", "proxy_self_heal", "proxy_audit", "smart_dialer", "baseline", "h3_datagram", "h3_datagram_send", "h1_plus":
 		switch valLower {
 		case "on", "off":
 		default:
 			return fmt.Errorf("%s: must be on or off (got %q)", key, value)
+		}
+	case "h3":
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("h3: must be off, direct or on (got an empty value)")
+		}
+		if _, err := parseH3Mode(value); err != nil {
+			return err
 		}
 	case "oom_cap":
 		switch valLower {
@@ -500,7 +507,7 @@ func applyLiveDefault(key string) error {
 	if key == "h3" {
 		// Clearing the key hands the decision back to URNETWORK_H3, which is
 		// what a restart would use, so the live state matches the persisted one.
-		return applyLiveSideEffect(key, onOff(h3Enabled()))
+		return applyLiveSideEffect(key, h3DefaultModeName())
 	}
 	def, ok := liveDefaults[key]
 	if !ok {
@@ -1074,12 +1081,18 @@ func applyLiveSideEffect(key, value string) error {
 		}
 		tlog("⚙️ [control] applied smart_dialer=%s (was %s)\n", value, was)
 	case "h3":
-		// Eligible direct identities already have an idle H3 transport waiting
-		// on this gate, so it takes effect at once: on lets it dial, off closes
-		// a live H3 connection and stops further dials. See connect.SetH3Enabled.
-		enabled := strings.EqualFold(value, "on")
-		previous := connect.SetH3Enabled(enabled)
-		tlog("⚙️ [control] applied h3=%s (was %s)\n", value, onOff(previous))
+		// The mode (see h3Mode) is read when an identity builds its transport. The
+		// beside-H1 gate follows it at once; a changed mode relaunches the direct
+		// identity, the only one it affects, so the new policy takes hold.
+		mode, err := parseH3Mode(value)
+		if err != nil {
+			return err
+		}
+		previous, relaunch := applyH3Mode(mode)
+		tlog("⚙️ [control] applied h3=%s (was %s)\n", mode, previous)
+		if relaunch {
+			go connect.HandleError(restartDirectIdentity)
+		}
 	case "h3_datagram":
 		// The offer is made when H3 dials, so a change closes the live H3
 		// connection and it reconnects with the new setting. It does nothing
@@ -1343,7 +1356,7 @@ func applyPersistedRuntimeTuning(state *controlState) {
 	// identity means one extra socket for a transport that falls back to H1
 	// quietly — so a lean direct box gets H3 without the operator configuring
 	// anything. A pooled node keeps the off default.
-	if err := applyLiveSideEffect("h3", onOff(resolveH3Setting(state, currentProxyResolution()))); err != nil {
+	if err := applyLiveSideEffect("h3", resolveH3Mode(state, currentProxyResolution()).String()); err != nil {
 		tlog("[control] failed to apply h3: %s\n", err)
 	}
 	if v, ok := state.get("smart_dialer"); ok && strings.EqualFold(v, "on") {
