@@ -3877,6 +3877,19 @@ func provide(opts docopt.Opts) {
 				onOff(resolveH3Setting(globalControlState, currentProxyResolution())))
 		}
 		platformSettings.ClientLimitBackoff = clientLimitHoldWithContext(proxyCtx, clientId, time.Now())
+		// The platform refusing the credential (revoked, expired, rejected) is the
+		// signal to renew it now: the transport holds the refused JWT for minutes,
+		// and only a new one ends the hold early. Nonblocking, as the engine requires.
+		renewNow := make(chan struct{}, 1)
+		platformSettings.AuthorizationClosed = func(cause connect.AuthorizationCloseCause) {
+			switch cause {
+			case connect.AuthorizationCloseRevoked, connect.AuthorizationCloseExpired, connect.AuthorizationCloseRejected:
+				select {
+				case renewNow <- struct{}{}:
+				default:
+				}
+			}
+		}
 		// Only the direct identity can hold a transport per address family (see
 		// family_transport.go); every proxied identity builds exactly the single
 		// transport it always has.
@@ -4042,7 +4055,6 @@ func provide(opts docopt.Opts) {
 		// and at startup if the reused token is already expired, preserving
 		// the client_id identity. On backends still issuing long-lived tokens
 		// the 12h threshold never fires — a no-op.
-		renewNow := make(chan struct{}, 1)
 		go runProxyJWTWatcher(proxyCtx, proxyJWTWatcherConfig{
 			IdentityKey: identityKey,
 			ClientID:    clientId,
