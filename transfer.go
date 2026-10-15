@@ -5682,6 +5682,15 @@ func (self *ReceiveSequence) receive(receivePack *ReceivePack) (bool, error) {
 // sender no proving acknowledgement, so a gap just below the boundary
 // recovers on the paced resend rather than on gap recovery.
 func (self *ReceiveSequence) commitHeldPrefix() {
+	// The queue owns these items; the reusable slice only borrows pointers
+	// during this scan. Clearing the slots keeps delivered items and their
+	// frame pointers from staying reachable through the scratch capacity.
+	// This only nils the borrowed pointers and never returns a pooled buffer
+	// (ported from upstream c46b46f6f).
+	defer func() {
+		clear(self.heldScratch)
+		self.heldScratch = self.heldScratch[:0]
+	}()
 	capacity := self.receiveBufferSettings.ReceiveQueueMaxByteCount
 	frameByteCount := max(self.maxHeldByteCount, 1)
 
