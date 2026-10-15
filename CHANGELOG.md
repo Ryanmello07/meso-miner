@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Fragments from tunnel clients are reassembled at the provider**: a fragmented UDP datagram (IPv4 or IPv6) is reassembled before the parse, the security policy runs once on the whole datagram, and the NAT receives the complete datagram, which is sharded by its real flow. Before this the parser rejected every fragment and the datagram was dropped without a trace. Only UDP is accepted; fragmented TCP is still dropped. The provider keeps at most 16 KiB of in-flight fragments per family.
+- **An IPv6 flow keeps its shard behind an extension header**: an unfragmented extension chain hashes the ports at the transport header, like a plain packet.
+
+### Fixed
+
+- The seed file is read through the descriptor that was checked, closing a check-then-read swap window.
+- The receive path releases its scratch references after a committed-prefix scan.
+
 ## [v3.23.0-fix.33.0-rc1]
 
 > Pre-release of the v33 line, invisible to `urnet-tools update`. Try it on one box first.
