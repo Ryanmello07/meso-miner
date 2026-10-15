@@ -3158,6 +3158,10 @@ type RemoteUserNatProviderSettings struct {
 	EgressSecurityPolicyGenerator func(*SecurityPolicyStatsCollector) SecurityPolicy
 }
 
+// providerIngressFragmentMaxRetainedBytes bounds the in-flight fragment bytes
+// the provider holds per family for all tunnel clients of one provider.
+const providerIngressFragmentMaxRetainedBytes = 16 * 1024
+
 type RemoteUserNatProvider struct {
 	client         *Client
 	localUserNat   *LocalUserNat
@@ -3166,7 +3170,11 @@ type RemoteUserNatProvider struct {
 	// intentionally independent, and multiple tunnel clients can share an IP
 	// tuple, so this ingress guard namespaces its state by the authenticated
 	// source (the smtpEgressGuard type serves both directions).
-	smtpIngressGuard  smtpEgressGuard
+	smtpIngressGuard smtpEgressGuard
+	// Reassembles fragments arriving from tunnel clients before any parse or
+	// policy runs, so the NAT only ever sees whole datagrams (see
+	// receiveFragment). Reassembly is per source path.
+	ingressFragments  ipFragmentGate
 	settings          *RemoteUserNatProviderSettings
 	bw                *ProxyBandwidth
 	localUserNatUnsub func()
@@ -3188,11 +3196,14 @@ func NewRemoteUserNatProvider(
 	settings *RemoteUserNatProviderSettings,
 ) *RemoteUserNatProvider {
 	userNatProvider := &RemoteUserNatProvider{
-		client:         client,
-		localUserNat:   localUserNat,
-		securityPolicy: settings.EgressSecurityPolicyGenerator(DefaultSecurityPolicyStatsCollector()),
-		settings:       settings,
-		bw:             bw,
+		// one provider per proxy: keep the shared ingress cache small. A
+		// legitimate fragmented datagram is a few KiB
+		ingressFragments: ipFragmentGate{maxRetainedBytes: providerIngressFragmentMaxRetainedBytes},
+		client:           client,
+		localUserNat:     localUserNat,
+		securityPolicy:   settings.EgressSecurityPolicyGenerator(DefaultSecurityPolicyStatsCollector()),
+		settings:         settings,
+		bw:               bw,
 	}
 
 	localUserNatUnsub := localUserNat.AddReceivePacketCallback(userNatProvider.Receive)
@@ -3307,6 +3318,11 @@ func (self *RemoteUserNatProvider) ClientReceive(source TransferPath, frames []*
 				self.bw.BillableTx.Add(uint64(len(ipPacketToProvider.IpPacket.PacketBytes)))
 			}
 
+			if isIpFragmentPacket(ipPacketToProvider.IpPacket.PacketBytes) {
+				self.receiveFragment(source, peer, ipPacketToProvider.IpPacket.PacketBytes)
+				continue
+			}
+
 			ipPath, payload, err := ParseIpPathWithPayload(ipPacketToProvider.IpPacket.PacketBytes)
 			if err == nil {
 				// The provider independently enforces the same SMTP encryption
@@ -3367,12 +3383,70 @@ func (self *RemoteUserNatProvider) ClientReceive(source TransferPath, frames []*
 	}
 }
 
+// receiveFragment reassembles a fragment from a tunnel client. The parser
+// rejects every fragment, so without this gate a fragmented datagram (a QUIC
+// Initial larger than the tunnel MTU, a large DNS answer) would be dropped
+// silently before it reached the NAT. Policy runs once on the complete
+// datagram and the NAT receives the reassembled datagram, which is sharded by
+// its real flow instead of by fragment identification. Only UDP is accepted:
+// TCP segments at the MSS, and accepting a partial TCP header would open a
+// policy-evasion path (same rule as upstream). The packet is a borrowed
+// reference; the gate takes its own copy.
+func (self *RemoteUserNatProvider) receiveFragment(
+	source TransferPath,
+	peer Peer,
+	packetBytes []byte,
+) {
+	result := self.ingressFragments.processOwned(
+		source,
+		TransferKey{},
+		peer.ProvideMode,
+		MessagePoolCopy(packetBytes),
+	)
+	// take the reassembled datagram out of the result so only the original
+	// fragment owners are returned below
+	datagram := result.packet
+	result.packet = nil
+	defer returnIpFragmentProcessResult(result)
+	if datagram == nil {
+		return
+	}
+
+	ipPath, payload, err := ParseIpPathWithPayload(datagram)
+	if err != nil || ipPath.Protocol != IpProtocolUdp {
+		MessagePoolReturn(datagram)
+		return
+	}
+	r, err := self.securityPolicy.Inspect(peer.ProvideMode, ipPath, payload)
+	if err != nil {
+		MessagePoolReturn(datagram)
+		return
+	}
+	switch r {
+	case SecurityPolicyResultAllow:
+		// SendPacketWithTimeout takes ownership of the datagram on all paths
+		self.localUserNat.SendPacketWithTimeout(
+			source,
+			peer.ProvideMode,
+			datagram,
+			self.settings.WriteTimeout,
+		)
+	case SecurityPolicyResultIncident:
+		MessagePoolReturn(datagram)
+		self.client.ReportAbuse(source)
+	default:
+		MessagePoolReturn(datagram)
+	}
+}
+
 func (self *RemoteUserNatProvider) Close() {
 	unregisterDeadClientProvider(self)
 	// self.client.RemoveReceiveCallback(self.clientCallbackId)
 	// self.localUserNat.RemoveReceivePacketCallback(self.localUserNatCallbackId)
 	self.clientUnsub()
 	self.localUserNatUnsub()
+	// after the unsubscribes, so a late receive cannot recreate the cache
+	self.ingressFragments.close()
 }
 
 // deliverSmtpPolicyReset sends the synthesized reset for a rejected SMTP
