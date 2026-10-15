@@ -1753,6 +1753,17 @@ type SendBufferSettings struct {
 
 	beforeResendCapacityWaitForTest func(sendSequenceId)
 
+	// SendSequenceLoopStartedForTest, when set, runs once just before a send
+	// sequence's main loop enters its first iteration: a test that cancels a
+	// bare sequence waits for it, so the cancel cannot land in the start-up
+	// path and record the exit under another reason. Nil in production.
+	SendSequenceLoopStartedForTest func()
+
+	// SendSequenceExitRecorderForTest, when set, observes every send-sequence
+	// exit at record time, with the sequence the record is for. Nil in
+	// production.
+	SendSequenceExitRecorderForTest func(seq *SendSequence, reason int)
+
 	SequenceBufferSize int
 	AckBufferSize      int
 
@@ -2791,7 +2802,12 @@ func resendBackoff(scaledRtt time.Duration, sendCount int, maxResendInterval tim
 
 func (self *SendSequence) Run() {
 	exitReason := sendExitClosed
-	defer func() { recordSendSequenceExit(exitReason) }()
+	defer func() {
+		if self.sendBufferSettings.SendSequenceExitRecorderForTest != nil {
+			self.sendBufferSettings.SendSequenceExitRecorderForTest(self, exitReason)
+		}
+		recordSendSequenceExit(exitReason)
+	}()
 	defer func() {
 		if r := recover(); r != nil {
 			self.log.Errorf("[s]%s->%s...%s s(%s) abnormal exit =  %s\n", self.client.ClientTag(), self.intermediaryIds, self.destination.DestinationId, self.destination.StreamId, r)
@@ -2914,6 +2930,14 @@ func (self *SendSequence) Run() {
 	// each blocking select arms it (go1.23+ delivers no stale fire after Reset).
 	idleTimer := time.NewTimer(0)
 	defer idleTimer.Stop()
+
+	// sendSequenceLoopStartedForTest, when set, runs once here, just before the
+	// main loop's first iteration: a test that cancels a bare sequence must wait
+	// for the loop to be entered, or the cancel lands in the start-up path and
+	// the exit is recorded under another reason. Nil in production.
+	if self.sendBufferSettings.SendSequenceLoopStartedForTest != nil {
+		self.sendBufferSettings.SendSequenceLoopStartedForTest()
+	}
 
 	for {
 		// apply the acks

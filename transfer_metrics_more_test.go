@@ -2,6 +2,8 @@ package connect
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -62,17 +64,39 @@ func exitCount(reason string) int64 { return TransferMoreStatsNow().SequenceExit
 func TestTransferMoreStats_SequenceExitsAreCountedByReason(t *testing.T) {
 	// cancelled
 	{
-		seq, _, cancel := newMetricsTestSequence(t, DestinationId(NewId()), func(s *SendBufferSettings) { s.IdleTimeout = time.Hour })
+		started := make(chan struct{})
+		var seqReason atomic.Int32
+		seqReason.Store(-1)
+		seq, _, cancel := newMetricsTestSequence(t, DestinationId(NewId()), func(s *SendBufferSettings) {
+			s.IdleTimeout = time.Hour
+			// deterministically wait for the loop's first iteration, so the
+			// cancel cannot land in the start-up path and record the exit
+			// under another reason (a sleep here was flaky under load)
+			s.SendSequenceLoopStartedForTest = sync.OnceFunc(func() { close(started) })
+		})
+		// the exit recorder is per-sequence: the process-wide counter also
+		// takes records from client-internal sequences that share this ctx
+		// and race the cancel, so this asserts the sequence under test
+		seq.sendBufferSettings.SendSequenceExitRecorderForTest = func(got *SendSequence, reason int) {
+			if got == seq {
+				seqReason.Store(int32(reason))
+			}
+		}
+		t.Cleanup(func() { seq.sendBufferSettings.SendSequenceExitRecorderForTest = nil })
 		before := exitCount("cancelled")
 		done := make(chan struct{})
 		go HandleError(func() { seq.Run(); close(done) })
-		// Run must be inside its loop before the cancel, or the sequence ends
-		// through its start-up path under another reason. 20 ms was enough on an
-		// idle machine and not under the full suite with the race detector.
-		time.Sleep(300 * time.Millisecond)
+		select {
+		case <-started:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the sequence loop never started")
+		}
 		cancel()
 		<-done
-		if exitCount("cancelled")-before != 1 {
+		if got := seqReason.Load(); got != int32(sendExitCancelled) {
+			t.Fatalf("the cancelled sequence's own exit reason = %d, want %d (exits now: %+v)", got, sendExitCancelled, TransferMoreStatsNow().SequenceExits)
+		}
+		if exitCount("cancelled")-before < 1 {
 			t.Fatal("a cancelled sequence must count as cancelled")
 		}
 	}
