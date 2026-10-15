@@ -122,6 +122,38 @@ func walletStatus(opts docopt.Opts) {
 	}
 }
 
+// walletSign implements `provider wallet sign <coldkey_ss58>`: one local page
+// where a browser wallet extension signs the network wallet consent. Run it on
+// your own computer, never on a fleet node.
+func walletSign(opts docopt.Opts) {
+	apiUrl, err := resolveApiUrl(opts)
+	if err != nil {
+		fmt.Printf("network config error: %s\n", err)
+		os.Exit(1)
+	}
+	proof, err := snWalletProofFromOpts(opts)
+	if err != nil {
+		fmt.Printf("wallet sign failed: %s\n", err)
+		os.Exit(1)
+	}
+	coldkeySs58, _ := opts.String("<coldkey_ss58>")
+	coldkeySs58 = strings.TrimSpace(coldkeySs58)
+	port := snSignDefaultPort
+	if text, err := opts.String("--port"); err == nil {
+		if value, err := strconv.Atoi(text); err == nil && 0 < value && value < 65536 {
+			port = value
+		}
+	}
+	noOpen, _ := opts.Bool("--no-open")
+	ctx, cancel := walletCommandContext()
+	defer cancel()
+	clientStrategy := connect.NewClientStrategyWithDefaults(ctx)
+	if err := snWalletSignUi(ctx, os.Stdout, clientStrategy, apiUrl, coldkeySs58, proof, port, !noOpen); err != nil {
+		fmt.Printf("wallet sign failed: %s\n", err)
+		os.Exit(1)
+	}
+}
+
 // walletSet implements `provider wallet set <coldkey_ss58>
 // [--coldkey_seed_file=<path> | --message=<text> --signature=<hex>]`.
 func walletSet(opts docopt.Opts) {

@@ -952,6 +952,8 @@ func main() {
 			}
 		} else if status, _ := opts.Bool("status"); status {
 			walletStatus(opts)
+		} else if sign, _ := opts.Bool("sign"); sign {
+			walletSign(opts)
 		}
 	} else if snStatus, _ := opts.Bool("sn-status"); snStatus {
 		snStatusCmd(opts)
@@ -7285,6 +7287,11 @@ Usage:
     provider wallet status
         [--api_url=<api_url>]
         [-v...]
+    provider wallet sign <coldkey_ss58>
+        [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>]
+        [--port=<port>] [--no-open]
+        [--api_url=<api_url>]
+        [-v...]
     provider sn-status [--json]
         [--api_url=<api_url>]
         [-v...]
@@ -7323,6 +7330,7 @@ Options:
     --json                           Output in JSON format for automated tooling.
     -f                               Force overwrite the JWT token store file or proxy value, if exists.
                                      By default, existing values will not be overwritten.
+    --no-open                        wallet sign: do not open the browser; print the address only.
     --api_url=<api_url>              Specify a custom API URL to use.
     --connect_url=<connect_url>      Specify a custom connect URL to use.
     <api_url>                        API URL to save as the chosen network (http:// or https://),

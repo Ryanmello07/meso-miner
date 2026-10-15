@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/vedhavyas/go-subkey/v2"
+	"github.com/vedhavyas/go-subkey/v2/sr25519"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -582,4 +584,13 @@ func TestWalletStatusShowsTheConsentApartFromALoginProofWallet(t *testing.T) {
 	if strings.ContainsRune(text, 0x1b) {
 		t.Fatal("a control character from the server reached the terminal")
 	}
+}
+
+func walletTestKeypair(t testing.TB, seed []byte) subkey.KeyPair {
+	t.Helper()
+	keypair, err := (sr25519.Scheme{}).FromSeed(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return keypair
 }

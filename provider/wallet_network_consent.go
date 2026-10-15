@@ -511,6 +511,53 @@ func snConsentSetup(ctx context.Context, clientStrategy *connect.ClientStrategy,
 	return api, want, nil
 }
 
+// snResolveRetainedConsent handles a consent that was sent but never
+// acknowledged. It replays it exactly, but only when this request is the same
+// one; a different interval, message or login replaces it, and a retained
+// consent that no longer matches the saved login is dropped, so a stale entry
+// can never take over a later request. done is true when the retained consent
+// was replayed and acknowledged, so the caller has nothing left to do.
+func snResolveRetainedConsent(
+	ctx context.Context,
+	api *connect.BringYourApi,
+	apiUrl string,
+	coldkeySs58 string,
+	journalPath string,
+	want *snNetworkConsentExpect,
+	proof *snWalletProof,
+) (done bool, err error) {
+	previous := want.Previous
+	if previous == nil || previous.Acked {
+		return false, nil
+	}
+	if reason := snConsentRetainedMismatch(previous, *want, proof); reason != "" {
+		fmt.Printf("discarding the retained, unacknowledged wallet consent: %s\n", reason)
+		if err := snConsentJournalDrop(journalPath, apiUrl, coldkeySs58); err != nil {
+			return false, err
+		}
+		want.Previous = nil
+		return false, nil
+	}
+	fmt.Printf("replaying the retained, unacknowledged wallet consent for epochs from %d\n", previous.FromEpoch)
+	if _, err := snSubmitNetworkConsent(ctx, api, coldkeySs58, *previous); err != nil {
+		var refused *snConsentRefused
+		if errors.As(err, &refused) {
+			// a definite refusal: the retained original cannot succeed
+			if dropErr := snConsentJournalDrop(journalPath, apiUrl, coldkeySs58); dropErr != nil {
+				return false, errors.Join(err, dropErr)
+			}
+			return false, fmt.Errorf("%w; the retained consent was discarded, run the command again to sign a new one", err)
+		}
+		return false, err
+	}
+	previous.Acked = true
+	if err := snConsentJournalStore(journalPath, *previous); err != nil {
+		return false, err
+	}
+	fmt.Printf("subnet wallet consent for %s acknowledged\n", coldkeySs58)
+	return true, nil
+}
+
 // snSetNetworkWalletConsent is `provider wallet set`: it replays an
 // unacknowledged consent if one is retained, else requests, verifies, signs
 // (from a seed file or an external signature), retains and submits a new one.
@@ -533,37 +580,8 @@ func snSetNetworkWalletConsent(ctx context.Context, clientStrategy *connect.Clie
 		return err
 	}
 
-	// A consent that was sent but never acknowledged is replayed exactly, but
-	// only when this request is the same one. A new interval or a new proof
-	// replaces it, and a retained consent that no longer matches the saved login
-	// is dropped, so a stale entry can never take over a later request.
-	if previous := want.Previous; previous != nil && !previous.Acked {
-		if reason := snConsentRetainedMismatch(previous, want, proof); reason != "" {
-			fmt.Printf("discarding the retained, unacknowledged wallet consent: %s\n", reason)
-			if err := snConsentJournalDrop(journalPath, apiUrl, coldkeySs58); err != nil {
-				return err
-			}
-			want.Previous = nil
-		} else {
-			fmt.Printf("replaying the retained, unacknowledged wallet consent for epochs from %d\n", previous.FromEpoch)
-			if _, err := snSubmitNetworkConsent(ctx, api, coldkeySs58, *previous); err != nil {
-				var refused *snConsentRefused
-				if errors.As(err, &refused) {
-					// a definite refusal: the retained original cannot succeed
-					if dropErr := snConsentJournalDrop(journalPath, apiUrl, coldkeySs58); dropErr != nil {
-						return errors.Join(err, dropErr)
-					}
-					return fmt.Errorf("%w; the retained consent was discarded, run the command again to sign a new one", err)
-				}
-				return err
-			}
-			previous.Acked = true
-			if err := snConsentJournalStore(journalPath, *previous); err != nil {
-				return err
-			}
-			fmt.Printf("subnet wallet consent for %s acknowledged\n", coldkeySs58)
-			return nil
-		}
+	if done, err := snResolveRetainedConsent(ctx, api, apiUrl, coldkeySs58, journalPath, &want, proof); done || err != nil {
+		return err
 	}
 
 	var message string
@@ -594,13 +612,35 @@ func snSetNetworkWalletConsent(ctx context.Context, clientStrategy *connect.Clie
 		}
 	}
 
+	result, err := snStoreNetworkConsent(ctx, api, apiUrl, coldkeySs58, journalPath, message, signature, statement)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("subnet wallet consent for %s stored: epochs %d through %d, generation %d, receipt %s\n",
+		coldkeySs58, statement.FromEpoch, statement.ThroughEpoch, result.MappingGeneration, snPlain(result.MappingHash))
+	return nil
+}
+
+// snStoreNetworkConsent verifies the signed original locally, retains it in the
+// journal BEFORE sending, submits it, checks the server's receipt and marks it
+// acknowledged. Both `wallet set` and the browser signing page end here.
+func snStoreNetworkConsent(
+	ctx context.Context,
+	api *connect.BringYourApi,
+	apiUrl string,
+	coldkeySs58 string,
+	journalPath string,
+	message string,
+	signature string,
+	statement *protocol.NetworkWalletMappingStatement,
+) (*connect.SnSetWalletResult, error) {
 	raw, err := hex.DecodeString(strings.TrimPrefix(signature, "0x"))
 	if err != nil || len(raw) != 64 {
-		return errors.New("wallet consent: the signature is not 64 bytes of hex")
+		return nil, errors.New("wallet consent: the signature is not 64 bytes of hex")
 	}
 	_, hash, err := protocol.VerifyNetworkWalletMappingConsent(ctx, protocol.WalletMappingConsent{Message: message, Signature: [64]byte(raw)})
 	if err != nil {
-		return fmt.Errorf("wallet consent: the signature does not verify for the message: %w", err)
+		return nil, fmt.Errorf("wallet consent: the signature does not verify for the message: %w", err)
 	}
 	entry := snConsentJournalEntry{
 		ApiUrl: apiUrl, Coldkey: coldkeySs58, Message: message, Signature: signature,
@@ -609,19 +649,17 @@ func snSetNetworkWalletConsent(ctx context.Context, clientStrategy *connect.Clie
 	// retain before sending: a lost acknowledgement is answered by this exact
 	// original, never by a second signature
 	if err := snConsentJournalStore(journalPath, entry); err != nil {
-		return fmt.Errorf("wallet consent: cannot retain the consent before sending it: %w", err)
+		return nil, fmt.Errorf("wallet consent: cannot retain the consent before sending it: %w", err)
 	}
 	result, err := snSubmitNetworkConsent(ctx, api, coldkeySs58, entry)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	entry.Acked = true
 	if err := snConsentJournalStore(journalPath, entry); err != nil {
-		return err
+		return nil, err
 	}
-	fmt.Printf("subnet wallet consent for %s stored: epochs %d through %d, generation %d, receipt %s\n",
-		coldkeySs58, statement.FromEpoch, statement.ThroughEpoch, result.MappingGeneration, snPlain(result.MappingHash))
-	return nil
+	return result, nil
 }
 
 // snWalletStatus is `provider wallet status`: what the server holds for this
