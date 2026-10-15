@@ -96,14 +96,23 @@ func snWalletProofFromOpts(opts docopt.Opts) (*snWalletProof, error) {
 	if signature, err := opts.String("--signature"); err == nil {
 		proof.Signature = strings.TrimSpace(signature)
 	}
-	// The earning interval is not carried by the sign-in proof path: the
-	// request body has no interval, so a bounded mapping would silently become
-	// an open-ended one. Refuse it until the canonical consent flow carries it
-	// inside the signed statement.
+	// The earning interval is carried inside the signed network consent
+	// statement (wallet_network_consent.go).
 	from, _ := opts.String("--wallet-from-epoch")
 	through, _ := opts.String("--wallet-through-epoch")
-	if from != "" || through != "" {
-		return nil, errors.New("--wallet-from-epoch and --wallet-through-epoch are not supported yet: the sign-in proof cannot carry an earning interval")
+	if (from == "") != (through == "") {
+		return nil, errors.New("--wallet-from-epoch and --wallet-through-epoch go together")
+	}
+	if from != "" {
+		first, err := strconv.ParseInt(from, 10, 64)
+		if err != nil || first < 0 {
+			return nil, errors.New("invalid wallet earning epoch")
+		}
+		last, err := strconv.ParseInt(through, 10, 64)
+		if err != nil || last < first || last-first > 65535 {
+			return nil, errors.New("wallet earning interval must contain at most 65536 epochs")
+		}
+		proof.fromEpoch, proof.throughEpoch = &first, &last
 	}
 	if proof.SeedFile != "" && (proof.Message != "" || proof.Signature != "") {
 		return nil, errors.New("use either --coldkey_seed_file or --message with --signature, not both")
@@ -351,34 +360,12 @@ func snUnescapeMessage(message string) string {
 // signing the challenge for the seed-file form.
 func snWalletSetArgs(ctx context.Context, clientStrategy *connect.ClientStrategy, apiUrl string, coldkeySs58 string, pubkey [32]byte, proof *snWalletProof) (*connect.SnSetWalletArgs, error) {
 	args := &connect.SnSetWalletArgs{ColdkeySs58: coldkeySs58}
-	switch {
-	case proof != nil && proof.SeedFile != "":
-		if err := snCheckSigningApiUrl(apiUrl); err != nil {
-			return nil, err
-		}
-		// fetch and validate the challenge first so the key is loaded only for
-		// the signature itself, not across a network round trip
-		challenge, err := snWalletChallenge(ctx, clientStrategy, apiUrl, coldkeySs58)
-		if err != nil {
-			return nil, err
-		}
-		keypair, err := snLoadColdkey(proof.SeedFile, coldkeySs58, pubkey)
-		if err != nil {
-			return nil, err
-		}
-		signature, err := snSignWalletChallenge(keypair, challenge.MessageTemplate)
-		if err != nil {
-			return nil, err
-		}
-		args.Message = challenge.MessageTemplate
-		args.Signature = signature
-	case proof != nil && (proof.Message != "" || proof.Signature != ""):
-		signature, err := snNormalizeSignatureHex(proof.Signature)
-		if err != nil {
-			return nil, err
-		}
-		args.Message = snUnescapeMessage(proof.Message)
-		args.Signature = signature
+	// The coldkey never signs the generic sign-in challenge again: that text is
+	// also a wallet login and release settlement never pays it. A signed set is
+	// the network consent (snSetNetworkWalletConsent); only the unsigned legacy
+	// request reaches here.
+	if proof != nil && !proof.unsigned() {
+		return nil, errors.New("a signed wallet set is the network consent; use `provider wallet set` without --legacy-network-wallet")
 	}
 	return args, nil
 }
@@ -448,15 +435,14 @@ func walletChallenge(opts docopt.Opts, out io.Writer) error {
 	if _, err := ss58.DecodeWithPrefix(coldkeySs58, ss58.BittensorPrefix); err != nil {
 		return fmt.Errorf("invalid ss58 coldkey %q: %s", coldkeySs58, err)
 	}
-	ctx, cancel := walletCommandContext()
-	defer cancel()
-	clientStrategy := connect.NewClientStrategyWithDefaults(ctx)
-	challenge, err := snWalletChallenge(ctx, clientStrategy, apiUrl, coldkeySs58)
+	proof, err := snWalletProofFromOpts(opts)
 	if err != nil {
 		return err
 	}
-	_, err = io.WriteString(out, snWalletChallengeText(coldkeySs58, challenge))
-	return err
+	ctx, cancel := walletCommandContext()
+	defer cancel()
+	clientStrategy := connect.NewClientStrategyWithDefaults(ctx)
+	return snWalletNetworkConsentChallenge(ctx, out, clientStrategy, apiUrl, coldkeySs58, proof)
 }
 
 // walletCommandContext is the shared cancellable context of the wallet

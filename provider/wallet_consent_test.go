@@ -11,7 +11,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -101,104 +100,42 @@ func TestWalletUnsignedSetIsRefusedLocally(t *testing.T) {
 // TestWalletSeedFileSignsTheChallengeVerifiably is the core correctness test:
 // the signature the seed-file path sends must verify against the coldkey over
 // the exact challenge the server issued, wrapped as <Bytes>…</Bytes>.
-func TestWalletSeedFileSignsTheChallengeVerifiably(t *testing.T) {
+func TestWalletSeedFileNeverSignsTheLoginChallenge(t *testing.T) {
 	seed := walletTestSeed(0x11)
 	address := walletTestAddress(t, seed)
 	pubkey, err := ss58.DecodeWithPrefix(address, ss58.BittensorPrefix)
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
-	seedPath := writeSeedFile(t, dir, seed, 0o600, true)
-
-	t.Setenv("URNETWORK_WALLET_ALLOW_CUSTOM_API", "1")
-	challenge, challengeId := testServerChallenge(time.Now().Unix())
-	var sawSet map[string]interface{}
+	seedPath := writeSeedFile(t, t.TempDir(), seed, 0o600, true)
+	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/auth/wallet-challenge":
-			var args map[string]interface{}
-			_ = json.NewDecoder(r.Body).Decode(&args)
-			if args["blockchain"] != "TAO" {
-				t.Errorf("challenge asked for chain %v, want TAO", args["blockchain"])
-			}
-			if args["purpose"] != "connect" {
-				t.Errorf("challenge asked for purpose %v, want connect", args["purpose"])
-			}
-			if args["wallet_address"] != address {
-				t.Errorf("challenge asked for address %v, want %s", args["wallet_address"], address)
-			}
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{
-				"message_template": challenge,
-				"challenge":        challengeId,
-				"expires_in":       300,
-			})
-		case "/sn/wallet":
-			if err := json.NewDecoder(r.Body).Decode(&sawSet); err != nil {
-				t.Error(err)
-			}
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{})
-		default:
-			t.Errorf("unexpected path %s", r.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-		}
+		requests++
+		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer server.Close()
-
+	t.Setenv("URNETWORK_WALLET_ALLOW_CUSTOM_API", "1")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	strategy := connect.NewClientStrategyWithDefaults(ctx)
-
 	proof := &snWalletProof{SeedFile: seedPath}
-	args, err := snWalletSetArgs(ctx, strategy, server.URL, address, pubkey, proof)
-	if err != nil {
-		t.Fatal(err)
+	if _, err := snWalletSetArgs(ctx, connect.NewClientStrategyWithDefaults(ctx), server.URL, address, pubkey, proof); err == nil {
+		t.Fatal("the coldkey signed through the legacy login-challenge path")
 	}
-	if args.ColdkeySs58 != address {
-		t.Fatalf("set args carry %q, want %s", args.ColdkeySs58, address)
-	}
-	if args.Message != challenge {
-		t.Fatalf("sent message %q, want the server's challenge", args.Message)
-	}
-
-	keypair, err := (sr25519.Scheme{}).FromSeed(seed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := hex.DecodeString(strings.TrimPrefix(args.Signature, "0x"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(raw) != 64 {
-		t.Fatalf("signature is %d bytes, want 64", len(raw))
-	}
-	if !keypair.Verify(snWrapBytes(challenge), raw) {
-		t.Fatal("the signature does not verify over the <Bytes>-wrapped challenge")
-	}
-	if sawSet != nil {
-		t.Fatal("the set must not be posted by snWalletSetArgs; it only builds the args")
+	if requests != 0 {
+		t.Fatalf("the legacy path made %d requests before refusing", requests)
 	}
 }
 
 // TestWalletMessageSignaturePath pins the sign-elsewhere form, including the
 // one-line \n escaping the challenge text uses.
-func TestWalletMessageSignaturePath(t *testing.T) {
+func TestWalletMessageSignatureIsNotAcceptedOnTheLegacyPath(t *testing.T) {
 	seed := walletTestSeed(0x11)
 	address := walletTestAddress(t, seed)
 	pubkey, err := ss58.DecodeWithPrefix(address, ss58.BittensorPrefix)
 	if err != nil {
 		t.Fatal(err)
 	}
-	keypair, err := (sr25519.Scheme{}).FromSeed(seed)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	const message = "line one\nline two"
-	signature, err := keypair.Sign(snWrapBytes(message))
-	if err != nil {
-		t.Fatal(err)
-	}
 	escaped := snEscapeMessage(message)
 	if escaped != `line one\nline two` {
 		t.Fatalf("escape produced %q", escaped)
@@ -206,17 +143,9 @@ func TestWalletMessageSignaturePath(t *testing.T) {
 	if snUnescapeMessage(escaped) != message {
 		t.Fatal("escape/unescape must round-trip")
 	}
-
-	proof := &snWalletProof{Message: escaped, Signature: "0x" + hex.EncodeToString(signature)}
-	args, err := snWalletSetArgs(context.Background(), nil, "http://invalid", address, pubkey, proof)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if args.Message != message {
-		t.Fatalf("the one-line form must unescape to the real message, got %q", args.Message)
-	}
-	if args.Signature == "" {
-		t.Fatal("the signature must be carried through")
+	proof := &snWalletProof{Message: escaped, Signature: "0x" + strings.Repeat("00", 64)}
+	if _, err := snWalletSetArgs(context.Background(), nil, "http://invalid", address, pubkey, proof); err == nil {
+		t.Fatal("a signature over login text was accepted on the legacy path")
 	}
 }
 
@@ -417,11 +346,25 @@ func TestWalletServerTextHasNoControlCharacters(t *testing.T) {
 	}
 }
 
-func TestWalletEarningIntervalFlagsAreRefused(t *testing.T) {
-	if _, err := snWalletProofFromOpts(fakeOpts(map[string]interface{}{
-		"--wallet-from-epoch": "1", "--wallet-through-epoch": "2",
-	})); err == nil {
-		t.Fatal("an earning interval was accepted although the request cannot carry it")
+func TestWalletEarningIntervalFlagsParse(t *testing.T) {
+	proof, err := snWalletProofFromOpts(fakeOpts(map[string]interface{}{
+		"--wallet-from-epoch": "51", "--wallet-through-epoch": "151",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proof.fromEpoch == nil || *proof.fromEpoch != 51 || *proof.throughEpoch != 151 {
+		t.Fatalf("the interval did not parse: %+v", proof)
+	}
+	for name, opts := range map[string]map[string]interface{}{
+		"only from":    {"--wallet-from-epoch": "1"},
+		"reversed":     {"--wallet-from-epoch": "5", "--wallet-through-epoch": "4"},
+		"too long":     {"--wallet-from-epoch": "1", "--wallet-through-epoch": "70000"},
+		"not a number": {"--wallet-from-epoch": "x", "--wallet-through-epoch": "4"},
+	} {
+		if _, err := snWalletProofFromOpts(fakeOpts(opts)); err == nil {
+			t.Fatalf("%s: accepted", name)
+		}
 	}
 }
 

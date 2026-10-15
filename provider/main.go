@@ -7273,10 +7273,11 @@ Usage:
         [--URL=<URL>...]
         [-v...]
     provider wallet set <coldkey_ss58> [--coldkey_seed_file=<path> | --message=<text> --signature=<hex>]
-        [--legacy-network-wallet]
+        [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>] [--legacy-network-wallet]
         [--api_url=<api_url>]
         [-v...]
     provider wallet challenge <coldkey_ss58>
+        [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>]
         [--api_url=<api_url>]
         [-v...]
     provider sn-status [--json]

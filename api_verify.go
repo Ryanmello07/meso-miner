@@ -11,6 +11,7 @@ package connect
 // verify_wire.go.
 
 import (
+	"encoding/json"
 	"fmt"
 	neturl "net/url"
 )
@@ -73,16 +74,23 @@ type SnSetWalletCallback ApiCallback[*SnSetWalletResult]
 // refuses under its signed wallet rules.
 type SnSetWalletArgs struct {
 	ColdkeySs58 string `json:"coldkey_ss58"`
-	Message     string `json:"message,omitempty"`
-	Signature   string `json:"signature,omitempty"`
+	// ClientId selects a provider wallet consent; a network consent omits it.
+	ClientId  *Id    `json:"client_id,omitempty"`
+	Message   string `json:"message,omitempty"`
+	Signature string `json:"signature,omitempty"`
 }
 
 type SnSetWalletError struct {
+	Code    string `json:"code,omitempty"`
 	Message string `json:"message"`
 }
 
 type SnSetWalletResult struct {
 	Error *SnSetWalletError `json:"error,omitempty"`
+	// MappingHash is the hex sha256 of the stored original, the receipt a
+	// consent submission is checked against.
+	MappingHash       string `json:"mapping_hash,omitempty"`
+	MappingGeneration uint64 `json:"mapping_generation,omitempty"`
 }
 
 // SnSetWallet sets the subnet wallet via the authenticated
@@ -197,6 +205,13 @@ type SnEpochResult struct {
 	TEpochBlocks        uint64 `json:"t_epoch_blocks"`
 	ChainId             uint64 `json:"chain_id"`
 	ContractAddress     string `json:"contract_address"`
+	// the subnet identity a wallet consent is bound to; empty or zero from a
+	// server that predates them. NoId and Netuid accept the server's numeric or
+	// decimal-string encoding.
+	GenesisHash            string      `json:"genesis_hash,omitempty"`
+	SettlementVaultAddress string      `json:"settlement_vault_address,omitempty"`
+	NoId                   json.Number `json:"no_id,omitempty"`
+	Netuid                 json.Number `json:"netuid,omitempty"`
 }
 
 // SnEpoch fetches the current epoch state via `GET /sn/epoch`. The route

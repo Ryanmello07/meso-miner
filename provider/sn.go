@@ -139,6 +139,14 @@ func walletSet(opts docopt.Opts) {
 	clientStrategy := connect.NewClientStrategyWithDefaults(ctx)
 
 	coldkeySs58, _ := opts.String("<coldkey_ss58>")
+	if !proof.unsigned() {
+		// a signed set is the network consent; the login challenge is never signed
+		if err := snSetNetworkWalletConsent(ctx, clientStrategy, apiUrl, strings.TrimSpace(coldkeySs58), proof); err != nil {
+			fmt.Printf("subnet wallet not set: %s\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := snSetWalletSigned(ctx, clientStrategy, apiUrl, coldkeySs58, proof); err != nil {
 		fmt.Printf("subnet wallet not set: %s\n", err)
 		os.Exit(1)

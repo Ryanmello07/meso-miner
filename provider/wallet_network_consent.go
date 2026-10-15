@@ -1,0 +1,505 @@
+package main
+
+// wallet_network_consent.go -- the canonical prospective NETWORK wallet
+// consent behind `provider wallet challenge|set`.
+//
+// Release settlement pays only a wallet that a coldkey consented to with a
+// purpose-bound statement: a displayed schema, the network, the coldkey, an
+// earning-epoch interval and the operator's prospective approval. The generic
+// sign-in challenge the earlier path signed is a login, which settlement never
+// pays, and which the same server also accepts as a wallet login.
+//
+// One network consent covers every provider client of the network, current and
+// future, so a fleet of many proxies needs one coldkey signature, made on the
+// operator's own machine. Nothing here runs on, or is needed by, a fleet node.
+//
+// Every field of the statement the server returns is checked against what this
+// side knows BEFORE the coldkey is loaded, so a hostile or mistaken endpoint
+// cannot get a signature over anything else.
+
+import (
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	gojwt "github.com/golang-jwt/jwt/v5"
+	"github.com/urfoundation/sn/protocol"
+	"github.com/urfoundation/sn/ss58"
+
+	"github.com/urnetwork/connect"
+)
+
+// the consent text is valid for 5 minutes; allow clock skew on top
+const snConsentClockSkew = 2 * time.Minute
+
+// the protocol's finite consent interval is 65,536 epochs
+const snConsentSpan = 65535
+
+// snNetworkIdentity is what the network JWT says about its owner, read without
+// verifying the signature: the server checks it, this side only compares.
+type snNetworkIdentity struct {
+	UserId    [16]byte
+	NetworkId [16]byte
+}
+
+// snNetworkJwtIdentity reads user_id and network_id from a network JWT and
+// refuses a client JWT: a network consent is made by the network owner, not by
+// one provider client.
+func snNetworkJwtIdentity(byJwt string) (snNetworkIdentity, error) {
+	var identity snNetworkIdentity
+	claims := gojwt.MapClaims{}
+	if _, _, err := gojwt.NewParser().ParseUnverified(byJwt, claims); err != nil {
+		return identity, fmt.Errorf("the network jwt does not parse: %w", err)
+	}
+	if _, hasClient := claims["client_id"]; hasClient {
+		return identity, errors.New("the saved jwt belongs to a client; run `provider auth` on this machine to save a network jwt")
+	}
+	for claim, into := range map[string]*[16]byte{"user_id": &identity.UserId, "network_id": &identity.NetworkId} {
+		raw, ok := claims[claim].(string)
+		id, err := connect.ParseId(raw)
+		if !ok || err != nil || id == (connect.Id{}) {
+			return identity, fmt.Errorf("the network jwt has no usable %s claim", claim)
+		}
+		*into = [16]byte(id)
+	}
+	return identity, nil
+}
+
+// snNetworkConsentExpect is everything the signer knows independently of the
+// message it is asked to sign.
+type snNetworkConsentExpect struct {
+	Coldkey      [32]byte
+	Identity     snNetworkIdentity
+	FromEpoch    uint64
+	ThroughEpoch uint64
+	Epoch        *connect.SnEpochResult
+	Now          time.Time
+	// Previous is the last acknowledged consent kept locally, if any.
+	Previous *snConsentJournalEntry
+}
+
+// snVerifyNetworkConsentMessage decodes the statement canonically (which also
+// verifies the operator's prospective signature and every protocol bound) and
+// compares each field with the independent expectation. It returns an error for
+// anything that is not exactly the consent asked for.
+func snVerifyNetworkConsentMessage(message string, want snNetworkConsentExpect) (*protocol.NetworkWalletMappingStatement, error) {
+	if want.Epoch == nil {
+		return nil, errors.New("wallet consent: the epoch state is unavailable; refusing to sign")
+	}
+	statement, err := protocol.DecodeNetworkWalletMappingStatement(message)
+	if err != nil {
+		return nil, fmt.Errorf("wallet consent: the message to sign is not a network wallet consent: %w; refusing to sign it", err)
+	}
+	refuse := func(what string) (*protocol.NetworkWalletMappingStatement, error) {
+		return nil, fmt.Errorf("wallet consent: %s; refusing to sign it", what)
+	}
+	if statement.Schema != protocol.NetworkWalletMappingConsentSchema || statement.Scope != protocol.NetworkWalletMappingScope {
+		return refuse("the statement is not a network consent")
+	}
+	if statement.Coldkey != want.Coldkey {
+		return refuse("the statement names a different coldkey")
+	}
+	if statement.UserId != want.Identity.UserId || statement.NetworkId != want.Identity.NetworkId {
+		return refuse("the statement names a different network or owner than the saved login")
+	}
+	if statement.FromEpoch != want.FromEpoch || statement.ThroughEpoch != want.ThroughEpoch {
+		return refuse(fmt.Sprintf("the statement covers epochs %d to %d, not the %d to %d asked for",
+			statement.FromEpoch, statement.ThroughEpoch, want.FromEpoch, want.ThroughEpoch))
+	}
+	if statement.FromEpoch <= want.Epoch.Epoch {
+		return refuse("the earning interval starts at or before the current epoch; a consent is prospective")
+	}
+	if statement.Prospective.Boundary.Epoch > want.Epoch.Epoch {
+		return refuse("the operator's approval is from a future epoch")
+	}
+	if statement.Prospective.Boundary.Epoch >= statement.FromEpoch {
+		return refuse("the operator's approval boundary is not before the earning interval")
+	}
+
+	// the subnet identity: every field the epoch route can state is compared,
+	// and a field the server cannot state is a reason to stop, not to skip
+	domain := statement.Domain
+	epoch := want.Epoch
+	if epoch.ChainId == 0 || domain.ChainID != epoch.ChainId {
+		return refuse("the statement's chain does not match the current epoch state")
+	}
+	if epoch.ContractAddress == "" || domain.Coordinator != common.HexToAddress(epoch.ContractAddress) {
+		return refuse("the statement's coordinator does not match the current epoch state")
+	}
+	if epoch.SettlementVaultAddress == "" || domain.SettlementVault != common.HexToAddress(epoch.SettlementVaultAddress) {
+		return refuse("the statement's settlement vault does not match the current epoch state")
+	}
+	genesis, err := hex.DecodeString(strings.TrimPrefix(epoch.GenesisHash, "0x"))
+	if err != nil || len(genesis) != 32 || [32]byte(genesis) != domain.GenesisHash {
+		return refuse("the statement's genesis hash does not match the current epoch state")
+	}
+	netuid, err := epoch.Netuid.Int64()
+	if err != nil || netuid <= 0 || uint64(netuid) != uint64(domain.Netuid) {
+		return refuse("the statement's netuid does not match the current epoch state")
+	}
+	noId, err := epoch.NoId.Int64()
+	if err != nil || noId <= 0 || uint64(noId) != domain.NoID {
+		return refuse("the statement's operator id does not match the current epoch state")
+	}
+
+	// freshness: the text lives five minutes; bound it against the local clock
+	issued := time.Unix(statement.IssuedAt, 0)
+	expires := time.Unix(statement.ExpiresAt, 0)
+	if want.Now.Add(snConsentClockSkew).Before(issued) {
+		return refuse("the statement was issued in the future")
+	}
+	if !want.Now.Before(expires) {
+		return refuse("the statement has expired")
+	}
+
+	// the chain of consents: a new one extends the last acknowledged original
+	if previous := want.Previous; previous != nil && previous.Acked {
+		if statement.Generation != previous.Generation+1 || statement.PreviousHash != previous.Hash {
+			return refuse("the statement does not extend the last consent kept on this machine")
+		}
+		if statement.FromEpoch <= previous.FromEpoch {
+			return refuse("the statement does not move the earning interval forward")
+		}
+	}
+	return statement, nil
+}
+
+// snConsentJournalEntry is the consent retained before it is sent, so a lost
+// acknowledgement can be answered by replaying the identical original: the same
+// nonce and the same randomized signature, never a second signature.
+type snConsentJournalEntry struct {
+	ApiUrl     string   `json:"api_url"`
+	Coldkey    string   `json:"coldkey_ss58"`
+	Message    string   `json:"message"`
+	Signature  string   `json:"signature"`
+	Acked      bool     `json:"acked"`
+	Generation uint64   `json:"generation"`
+	Hash       [32]byte `json:"hash"`
+	FromEpoch  uint64   `json:"from_epoch"`
+}
+
+func snConsentJournalPath() (string, error) {
+	return providerStatePath("wallet_consent.json")
+}
+
+// snConsentJournalLoad returns the entry for this API and coldkey, or nil.
+func snConsentJournalLoad(path string, apiUrl string, coldkey string) (*snConsentJournalEntry, error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var entries []snConsentJournalEntry
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil, fmt.Errorf("the wallet consent journal %s does not parse: %w", path, err)
+	}
+	for i := range entries {
+		if entries[i].ApiUrl == apiUrl && entries[i].Coldkey == coldkey {
+			entry := entries[i]
+			return &entry, nil
+		}
+	}
+	return nil, nil
+}
+
+// snConsentJournalStore writes the entry atomically at mode 0600: temp file in
+// the same directory, fsync, rename.
+func snConsentJournalStore(path string, entry snConsentJournalEntry) error {
+	var entries []snConsentJournalEntry
+	if raw, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(raw, &entries); err != nil {
+			return fmt.Errorf("the wallet consent journal %s does not parse: %w", path, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	replaced := false
+	for i := range entries {
+		if entries[i].ApiUrl == entry.ApiUrl && entries[i].Coldkey == entry.Coldkey {
+			entries[i] = entry
+			replaced = true
+		}
+	}
+	if !replaced {
+		entries = append(entries, entry)
+	}
+	raw, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	temp, err := os.CreateTemp(dir, ".wallet_consent-*.tmp")
+	if err != nil {
+		return err
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(0o600); err != nil {
+		temp.Close()
+		return err
+	}
+	if _, err := temp.Write(raw); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, path)
+}
+
+// snConsentInterval is the interval to ask for: the explicit one, else the next
+// earning epoch through the protocol's finite span.
+func snConsentInterval(proof *snWalletProof, epoch *connect.SnEpochResult, previous *snConsentJournalEntry) (uint64, uint64, error) {
+	if proof != nil && proof.fromEpoch != nil {
+		return uint64(*proof.fromEpoch), uint64(*proof.throughEpoch), nil
+	}
+	if epoch == nil {
+		return 0, 0, errors.New("wallet consent: the epoch state is unavailable")
+	}
+	from := epoch.Epoch + 1
+	if previous != nil && previous.Acked && from <= previous.FromEpoch {
+		from = previous.FromEpoch + 1
+	}
+	return from, from + snConsentSpan, nil
+}
+
+// snRequestNetworkConsent asks the server for the statement and verifies it.
+func snRequestNetworkConsent(
+	ctx context.Context,
+	api *connect.BringYourApi,
+	coldkeySs58 string,
+	want snNetworkConsentExpect,
+) (string, *protocol.NetworkWalletMappingStatement, error) {
+	result, err := api.SnNetworkWalletConsentSync(&connect.SnNetworkWalletConsentArgs{
+		ColdkeySs58:  coldkeySs58,
+		FromEpoch:    want.FromEpoch,
+		ThroughEpoch: want.ThroughEpoch,
+	})
+	if err != nil {
+		return "", nil, fmt.Errorf("wallet consent: %w", err)
+	}
+	if result.Error != nil {
+		return "", nil, fmt.Errorf("wallet consent: %s", snPlain(result.Error.Message))
+	}
+	statement, err := snVerifyNetworkConsentMessage(result.Message, want)
+	if err != nil {
+		return "", nil, err
+	}
+	return result.Message, statement, nil
+}
+
+// snSubmitNetworkConsent verifies the signed original locally, sends it, and
+// accepts the answer only when the server's receipt names the same content.
+func snSubmitNetworkConsent(
+	ctx context.Context,
+	api *connect.BringYourApi,
+	coldkeySs58 string,
+	entry snConsentJournalEntry,
+) (*connect.SnSetWalletResult, error) {
+	signature, err := hex.DecodeString(strings.TrimPrefix(entry.Signature, "0x"))
+	if err != nil || len(signature) != 64 {
+		return nil, errors.New("wallet consent: the signature is not 64 bytes of hex")
+	}
+	original := protocol.WalletMappingConsent{Message: entry.Message, Signature: [64]byte(signature)}
+	if _, _, err := protocol.VerifyNetworkWalletMappingConsent(ctx, original); err != nil {
+		return nil, fmt.Errorf("wallet consent: the signature does not verify for the message: %w", err)
+	}
+	result, err := api.SnSetWalletSync(&connect.SnSetWalletArgs{
+		ColdkeySs58: coldkeySs58,
+		Message:     entry.Message,
+		Signature:   entry.Signature,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("wallet consent: %w", err)
+	}
+	if result.Error != nil {
+		code := ""
+		if result.Error.Code != "" {
+			code = " (" + snPlain(result.Error.Code) + ")"
+		}
+		return nil, fmt.Errorf("wallet consent: the server refused it%s: %s", code, snPlain(result.Error.Message))
+	}
+	// a 200 with no receipt proves nothing: the receipt must name this consent
+	want := hex.EncodeToString(entry.Hash[:])
+	if !strings.EqualFold(strings.TrimPrefix(result.MappingHash, "0x"), want) {
+		return nil, fmt.Errorf("wallet consent: the server's receipt %q does not name this consent; it may not be stored", snPlain(result.MappingHash))
+	}
+	if result.MappingGeneration != entry.Generation {
+		return nil, fmt.Errorf("wallet consent: the server stored generation %d, expected %d", result.MappingGeneration, entry.Generation)
+	}
+	return result, nil
+}
+
+// snWalletNetworkConsentChallenge is `provider wallet challenge`: it prints the
+// verified statement and how to sign it elsewhere, then submit the signature.
+func snWalletNetworkConsentChallenge(ctx context.Context, out io.Writer, clientStrategy *connect.ClientStrategy, apiUrl string, coldkeySs58 string, proof *snWalletProof) error {
+	api, want, err := snConsentSetup(ctx, clientStrategy, apiUrl, coldkeySs58, proof)
+	if err != nil {
+		return err
+	}
+	defer api.Close()
+	message, statement, err := snRequestNetworkConsent(ctx, api, coldkeySs58, want)
+	if err != nil {
+		return err
+	}
+	remaining := time.Until(time.Unix(statement.ExpiresAt, 0)).Round(time.Second)
+	fmt.Fprintf(out, "Sign this message with the coldkey %s: sr25519, \"substrate\" signing context.\n", coldkeySs58)
+	fmt.Fprintf(out, "It consents that earnings of every provider client of this network are paid to that coldkey for epochs %d through %d.\n", statement.FromEpoch, statement.ThroughEpoch)
+	fmt.Fprintf(out, "The bytes to sign are the UTF-8 text between the markers exactly as printed; a Polkadot signRaw of type \"bytes\", which wraps them in <Bytes>...</Bytes>, is accepted too.\n")
+	fmt.Fprintf(out, "It expires in %s.\n", remaining)
+	fmt.Fprintf(out, "\n----- message -----\n%s\n----- end -----\n", message)
+	fmt.Fprintf(out, "\nThen, within that window, submit the 64-byte signature as hex:\n")
+	fmt.Fprintf(out, "  provider wallet set %s --wallet-from-epoch=%d --wallet-through-epoch=%d --message='%s' --signature=0x<128 hex chars>\n",
+		coldkeySs58, statement.FromEpoch, statement.ThroughEpoch, snEscapeMessage(message))
+	return nil
+}
+
+// snConsentSetup resolves the pieces both commands need.
+func snConsentSetup(ctx context.Context, clientStrategy *connect.ClientStrategy, apiUrl string, coldkeySs58 string, proof *snWalletProof) (*connect.BringYourApi, snNetworkConsentExpect, error) {
+	var want snNetworkConsentExpect
+	pubkey, err := ss58.DecodeWithPrefix(coldkeySs58, ss58.BittensorPrefix)
+	if err != nil {
+		return nil, want, fmt.Errorf("invalid ss58 coldkey %q: %s", coldkeySs58, err)
+	}
+	want.Coldkey = pubkey
+	byJwt, err := readNetworkJwt()
+	if err != nil {
+		return nil, want, err
+	}
+	if want.Identity, err = snNetworkJwtIdentity(byJwt); err != nil {
+		return nil, want, err
+	}
+	api := connect.NewBringYourApi(ctx, clientStrategy, apiUrl)
+	api.SetByJwt(byJwt)
+	if want.Epoch, err = api.SnEpochSync(); err != nil {
+		api.Close()
+		return nil, want, fmt.Errorf("wallet consent: the epoch state is unavailable: %w", err)
+	}
+	path, err := snConsentJournalPath()
+	if err != nil {
+		api.Close()
+		return nil, want, err
+	}
+	if want.Previous, err = snConsentJournalLoad(path, apiUrl, coldkeySs58); err != nil {
+		api.Close()
+		return nil, want, err
+	}
+	if want.FromEpoch, want.ThroughEpoch, err = snConsentInterval(proof, want.Epoch, want.Previous); err != nil {
+		api.Close()
+		return nil, want, err
+	}
+	want.Now = time.Now()
+	return api, want, nil
+}
+
+// snSetNetworkWalletConsent is `provider wallet set`: it replays an
+// unacknowledged consent if one is retained, else requests, verifies, signs
+// (from a seed file or an external signature), retains and submits a new one.
+func snSetNetworkWalletConsent(ctx context.Context, clientStrategy *connect.ClientStrategy, apiUrl string, coldkeySs58 string, proof *snWalletProof) error {
+	if proof == nil || proof.unsigned() {
+		return errors.New("wallet consent needs the coldkey's signature: use --coldkey_seed_file on your own machine, or `provider wallet challenge` and then --message with --signature")
+	}
+	if proof.SeedFile != "" {
+		if err := snCheckSigningApiUrl(apiUrl); err != nil {
+			return err
+		}
+	}
+	api, want, err := snConsentSetup(ctx, clientStrategy, apiUrl, coldkeySs58, proof)
+	if err != nil {
+		return err
+	}
+	defer api.Close()
+	journalPath, err := snConsentJournalPath()
+	if err != nil {
+		return err
+	}
+
+	// a consent that was sent but never acknowledged is replayed exactly
+	if previous := want.Previous; previous != nil && !previous.Acked {
+		fmt.Printf("replaying the retained, unacknowledged wallet consent for epochs from %d\n", previous.FromEpoch)
+		if _, err := snSubmitNetworkConsent(ctx, api, coldkeySs58, *previous); err != nil {
+			return err
+		}
+		previous.Acked = true
+		if err := snConsentJournalStore(journalPath, *previous); err != nil {
+			return err
+		}
+		fmt.Printf("subnet wallet consent for %s acknowledged\n", coldkeySs58)
+		return nil
+	}
+
+	var message string
+	var statement *protocol.NetworkWalletMappingStatement
+	var signature string
+	if proof.SeedFile != "" {
+		// the statement is requested and verified first; the key is loaded only
+		// for the signature itself
+		message, statement, err = snRequestNetworkConsent(ctx, api, coldkeySs58, want)
+		if err != nil {
+			return err
+		}
+		keypair, err := snLoadColdkey(proof.SeedFile, coldkeySs58, want.Coldkey)
+		if err != nil {
+			return err
+		}
+		if signature, err = snSignWalletChallenge(keypair, message); err != nil {
+			return err
+		}
+	} else {
+		// an external signature: the message passed in must itself verify
+		message = snUnescapeMessage(proof.Message)
+		if statement, err = snVerifyNetworkConsentMessage(message, want); err != nil {
+			return err
+		}
+		if signature, err = snNormalizeSignatureHex(proof.Signature); err != nil {
+			return err
+		}
+	}
+
+	raw, err := hex.DecodeString(strings.TrimPrefix(signature, "0x"))
+	if err != nil || len(raw) != 64 {
+		return errors.New("wallet consent: the signature is not 64 bytes of hex")
+	}
+	_, hash, err := protocol.VerifyNetworkWalletMappingConsent(ctx, protocol.WalletMappingConsent{Message: message, Signature: [64]byte(raw)})
+	if err != nil {
+		return fmt.Errorf("wallet consent: the signature does not verify for the message: %w", err)
+	}
+	entry := snConsentJournalEntry{
+		ApiUrl: apiUrl, Coldkey: coldkeySs58, Message: message, Signature: signature,
+		Generation: statement.Generation, Hash: hash, FromEpoch: statement.FromEpoch,
+	}
+	// retain before sending: a lost acknowledgement is answered by this exact
+	// original, never by a second signature
+	if err := snConsentJournalStore(journalPath, entry); err != nil {
+		return fmt.Errorf("wallet consent: cannot retain the consent before sending it: %w", err)
+	}
+	result, err := snSubmitNetworkConsent(ctx, api, coldkeySs58, entry)
+	if err != nil {
+		return err
+	}
+	entry.Acked = true
+	if err := snConsentJournalStore(journalPath, entry); err != nil {
+		return err
+	}
+	fmt.Printf("subnet wallet consent for %s stored: epochs %d through %d, generation %d, receipt %s\n",
+		coldkeySs58, statement.FromEpoch, statement.ThroughEpoch, result.MappingGeneration, snPlain(result.MappingHash))
+	return nil
+}

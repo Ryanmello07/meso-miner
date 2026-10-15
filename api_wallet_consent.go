@@ -84,3 +84,57 @@ func (self *BringYourApi) AuthWalletChallengeSync(authWalletChallenge *AuthWalle
 		NewNoopApiCallback[*AuthWalletChallengeResult](),
 	)
 }
+
+// SnNetworkWalletConsentArgs asks the server for the statement a coldkey signs
+// to consent that its earnings are paid to it for every provider client of the
+// network, current and future, over an epoch interval. The request needs a
+// network JWT; a client JWT is refused.
+type SnNetworkWalletConsentArgs struct {
+	ColdkeySs58  string `json:"coldkey_ss58"`
+	FromEpoch    uint64 `json:"from_epoch"`
+	ThroughEpoch uint64 `json:"through_epoch"`
+}
+
+// SnWalletConsentArgs is the provider-scoped variant: one client of the
+// network. ClientId is optional and defaults to the JWT's client.
+type SnWalletConsentArgs struct {
+	ColdkeySs58  string `json:"coldkey_ss58"`
+	ClientId     *Id    `json:"client_id,omitempty"`
+	FromEpoch    uint64 `json:"from_epoch"`
+	ThroughEpoch uint64 `json:"through_epoch"`
+}
+
+// SnWalletConsentResult carries the exact message to sign. The platform sends
+// a refusal as HTTP 200 with an error object, as for the other wallet routes.
+type SnWalletConsentResult struct {
+	Message string                    `json:"message,omitempty"`
+	Error   *AuthWalletChallengeError `json:"error,omitempty"`
+}
+
+// SnNetworkWalletConsentSync requests the network consent statement via
+// `POST /sn/wallet/network-consent`.
+func (self *BringYourApi) SnNetworkWalletConsentSync(args *SnNetworkWalletConsentArgs) (*SnWalletConsentResult, error) {
+	return HttpPostWithStrategy(
+		self.ctx,
+		self.clientStrategy,
+		fmt.Sprintf("%s/sn/wallet/network-consent", self.apiUrl),
+		args,
+		self.ByJwt(),
+		&SnWalletConsentResult{},
+		NewNoopApiCallback[*SnWalletConsentResult](),
+	)
+}
+
+// SnWalletConsentSync requests the provider consent statement via
+// `POST /sn/wallet/consent`.
+func (self *BringYourApi) SnWalletConsentSync(args *SnWalletConsentArgs) (*SnWalletConsentResult, error) {
+	return HttpPostWithStrategy(
+		self.ctx,
+		self.clientStrategy,
+		fmt.Sprintf("%s/sn/wallet/consent", self.apiUrl),
+		args,
+		self.ByJwt(),
+		&SnWalletConsentResult{},
+		NewNoopApiCallback[*SnWalletConsentResult](),
+	)
+}

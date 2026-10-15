@@ -7,6 +7,8 @@
 - **Fragments from tunnel clients are reassembled at the provider**: a fragmented UDP datagram (IPv4 or IPv6) is reassembled before the parse, the security policy runs once on the whole datagram, and the NAT receives the complete datagram, which is sharded by its real flow. Before this the parser rejected every fragment and the datagram was dropped without a trace. Only UDP is accepted; fragmented TCP is still dropped. The provider keeps at most 16 KiB of in-flight fragments per family.
 - **An IPv6 flow keeps its shard behind an extension header**: an unfragmented extension chain hashes the ports at the transport header, like a plain packet.
 
+- **Network wallet consent (`provider wallet challenge`, `provider wallet set`)**: the coldkey now signs the canonical prospective network consent, the statement release settlement pays, instead of the generic sign-in challenge (which is also a wallet login and is never paid). One signature covers every provider client of the network, current and future, and carries the earning-epoch interval (`--wallet-from-epoch`, `--wallet-through-epoch`; the default is the next epoch through 65,536 epochs). Every field of the statement is checked against the saved login, the epoch route and the coldkey before the key is loaded, the consent is retained before it is sent so a lost acknowledgement is answered by the identical original, and the server's receipt must name the same consent. Sign on your own machine; a fleet node needs nothing.
+
 ### Fixed
 
 - The seed file is read through the descriptor that was checked, closing a check-then-read swap window.
