@@ -1238,6 +1238,7 @@ func (self *UdpSequence) Run() {
 	}
 
 	self.log.V(2).Infof("[init]udp connect\n")
+	dialStart := time.Now()
 	socket, err := self.udpBufferSettings.DialContext(
 		self.ctx,
 		"udp",
@@ -1245,6 +1246,12 @@ func (self *UdpSequence) Run() {
 	)
 	if err != nil {
 		self.log.V(1).Infof("[init]udp connect error = %s\n", err)
+		// A UDP dial cannot yield a meaningful refusal to the inner source.
+		if self.ctx.Err() == nil {
+			if _, signal := classifyDialFailure(self.IpPath(), err, time.Since(dialStart)); signal != nil {
+				receive(MessagePoolCopy(signal))
+			}
+		}
 		return
 	}
 	defer socket.Close()
@@ -2179,6 +2186,7 @@ func (self *TcpSequence) Run() {
 
 	// connect to upstream before sending the syn+ack
 	self.log.V(2).Infof("[init]tcp connect\n")
+	dialStart := time.Now()
 	socket, err := self.tcpBufferSettings.DialContext(
 		self.ctx,
 		"tcp",
@@ -2186,7 +2194,29 @@ func (self *TcpSequence) Run() {
 	)
 	if err != nil {
 		self.log.V(1).Infof("[init]tcp connect error = %s\n", err)
+		// The source has not seen our synthetic syn-ack yet. Abandoning the
+		// sequence silently leaves it retransmitting the syn in backoff, so
+		// answer it instead (classifyDialFailure says what and when). A parent
+		// cancellation is teardown, not an upstream refusal, and must not
+		// generate new output.
 		MessagePoolReturn(packet)
+		if self.ctx.Err() == nil {
+			switch action, signal := classifyDialFailure(self.IpPath(), err, time.Since(dialStart)); action {
+			case dialFailureRst:
+				var rstPacket []byte
+				var rstErr error
+				func() {
+					self.mutex.Lock()
+					defer self.mutex.Unlock()
+					rstPacket, rstErr = self.RstAck()
+				}()
+				if rstErr == nil {
+					receive(rstPacket)
+				}
+			case dialFailureUnreachable:
+				receive(MessagePoolCopy(signal))
+			}
+		}
 		return
 	}
 	self.UpdateLastActivityTime()
