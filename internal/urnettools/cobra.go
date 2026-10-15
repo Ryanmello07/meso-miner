@@ -84,6 +84,12 @@ Proxy Management:
   direct [on|off]         Toggle providing on the machine's direct/local IP
   usage [graph[s] <view>] Traffic accounting: billable vs control, time-series
 
+Wallet Consent:
+  wallet status           Show the network wallet consent (read-only)
+  wallet challenge <ck>   Fetch the consent statement to sign (signs nothing)
+  wallet set <ck>         Submit a signed consent (--coldkey_seed_file: own workstation only)
+  wallet sign <ck>        Sign in the browser (Talisman); the seed never leaves the extension
+
 Maintenance:
   reinstall                     Reinstall provider
   uninstall                     Uninstall provider
@@ -170,6 +176,7 @@ func buildRootCmd() *cobra.Command {
 		newSetCmd(),
 		newAuthCmd(),
 		newChooseNetworkCmd(),
+		newWalletCmd(),
 		newProxyCmd(),
 		newDirectCmd(),
 		newUsageCmd(),
