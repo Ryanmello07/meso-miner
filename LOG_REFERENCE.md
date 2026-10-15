@@ -1145,6 +1145,7 @@ The watchdog watches memory pressure and swap and moves between four states: `ca
 [thrash] swap is 96% full (1.9 GiB of 2.0 GiB used) — the box is nearly out of memory entirely
 ✅ [memory] Thrash cleared: 640 MiB RAM free, 410 MiB swap in use, memory stalls 3%.
 ✅ [memory] Thrash cleared by the restart: 1.2 GiB RAM free, 90 MiB swap in use, memory stalls 1%.
+```
 ## 🚧 Client Limit Hold (`[t]` close lines, `[client-limit]`)
 
 ```text
@@ -1154,6 +1155,7 @@ The watchdog watches memory pressure and swap and moves between four states: `ca
 ⚠️ [client-limit] could not persist the hold: <error>
 ⚠️ [client-limit] could not write the standing hold before exit: <error>
 ⚠️ [client-limit] client_limit_hold.json is not valid JSON, replacing it
+```
 ## 🩺 Liveness (`[liveness]`)
 
 Only on a unit that sets `WatchdogSec=` (see [Configuration](docs/Configuration.md#systemd-watchdog-stalled-provider)). These lines go to `~/.urnetwork/events.log`, not the ramlog, because the ramlog reader may be the thing that is starved.
@@ -1222,6 +1224,7 @@ The thrash watchdog also has a heap rule: a heap at least 1.4 times its soft lim
 
 ---
 
+```
 ## 📸 Incident Capture (`[incident]`)
 
 Goroutine and heap profiles taken on the way into a stall (see [Configuration](docs/Configuration.md#incident-capture-evidence-before-a-stall)). The line goes to `~/.urnetwork/events.log`.
