@@ -3018,6 +3018,13 @@ func provide(opts docopt.Opts) {
 		if proofErr != nil {
 			fmt.Printf("subnet wallet not set: %s\n", proofErr)
 			fmt.Printf("continuing to provide.\n")
+		} else if walletProof.SeedFile != "" || walletProof.Message != "" || walletProof.Signature != "" {
+			// The coldkey seed must not sit on a provider node and be used on
+			// every start, restart and update; a pasted proof expires in
+			// minutes and would be refused on the next start anyway. Prove the
+			// coldkey on the operator's own machine with `provider wallet set`.
+			fmt.Printf("subnet wallet not set: signing the wallet proof is not done while providing; run `provider wallet set <coldkey_ss58> --coldkey_seed_file=<path>` on your own machine\n")
+			fmt.Printf("continuing to provide.\n")
 		} else if walletProof.unsigned() {
 			legacyNetwork, _ := opts.Bool("--legacy-network-wallet")
 			if err := legacyNetworkWalletGate(legacyNetwork, "provide --wallet"); err != nil {
@@ -7237,8 +7244,7 @@ Usage:
     provider provide [--port=<port>]
         [--api_url=<api_url>]
         [--connect_url=<connect_url>]
-        [--wallet=<coldkey_ss58> [--coldkey_seed_file=<path> | --message=<text> --signature=<hex>]
-         [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>] [--legacy-network-wallet]]
+        [--wallet=<coldkey_ss58> [--legacy-network-wallet]]
         [--max-memory=<mem>]
         [--proxy_file=<proxy_file>]
         [--file=<file>]
@@ -7254,8 +7260,7 @@ Usage:
     	[--port=<port>]
         [--api_url=<api_url>]
         [--connect_url=<connect_url>]
-        [--wallet=<coldkey_ss58> [--coldkey_seed_file=<path> | --message=<text> --signature=<hex>]
-         [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>] [--legacy-network-wallet]]
+        [--wallet=<coldkey_ss58> [--legacy-network-wallet]]
         [--max-memory=<mem>]
         [--proxy_file=<proxy_file>]
         [--file=<file>]
@@ -7264,7 +7269,7 @@ Usage:
         [--URL=<URL>...]
         [-v...]
     provider wallet set <coldkey_ss58> [--coldkey_seed_file=<path> | --message=<text> --signature=<hex>]
-        [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>] [--legacy-network-wallet]
+        [--legacy-network-wallet]
         [--api_url=<api_url>]
         [-v...]
     provider wallet challenge <coldkey_ss58>

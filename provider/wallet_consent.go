@@ -37,10 +37,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/docopt/docopt-go"
 	"github.com/vedhavyas/go-subkey/v2"
@@ -94,21 +96,14 @@ func snWalletProofFromOpts(opts docopt.Opts) (*snWalletProof, error) {
 	if signature, err := opts.String("--signature"); err == nil {
 		proof.Signature = strings.TrimSpace(signature)
 	}
+	// The earning interval is not carried by the sign-in proof path: the
+	// request body has no interval, so a bounded mapping would silently become
+	// an open-ended one. Refuse it until the canonical consent flow carries it
+	// inside the signed statement.
 	from, _ := opts.String("--wallet-from-epoch")
 	through, _ := opts.String("--wallet-through-epoch")
-	if (from == "") != (through == "") {
-		return nil, errors.New("--wallet-from-epoch and --wallet-through-epoch go together")
-	}
-	if from != "" {
-		first, err := strconv.ParseInt(from, 10, 64)
-		if err != nil || first < 0 {
-			return nil, errors.New("invalid wallet earning epoch")
-		}
-		last, err := strconv.ParseInt(through, 10, 64)
-		if err != nil || last < first || last-first > 65535 {
-			return nil, errors.New("wallet earning interval must contain at most 65536 epochs")
-		}
-		proof.fromEpoch, proof.throughEpoch = &first, &last
+	if from != "" || through != "" {
+		return nil, errors.New("--wallet-from-epoch and --wallet-through-epoch are not supported yet: the sign-in proof cannot carry an earning interval")
 	}
 	if proof.SeedFile != "" && (proof.Message != "" || proof.Signature != "") {
 		return nil, errors.New("use either --coldkey_seed_file or --message with --signature, not both")
@@ -134,7 +129,7 @@ func snWalletChallenge(ctx context.Context, clientStrategy *connect.ClientStrate
 		return nil, fmt.Errorf("wallet challenge: %w", err)
 	}
 	if result.Error != nil {
-		return nil, fmt.Errorf("wallet challenge: %s", result.Error.Message)
+		return nil, fmt.Errorf("wallet challenge: %s", snPlain(result.Error.Message))
 	}
 	if err := snCheckChallengeMessage(result.MessageTemplate, result.Challenge); err != nil {
 		return nil, err
@@ -142,7 +137,13 @@ func snWalletChallenge(ctx context.Context, clientStrategy *connect.ClientStrate
 	return result, nil
 }
 
-var snChallengeMessagePattern = regexp.MustCompile(`^Sign in to URnetwork\nChallenge: ([A-Za-z0-9_-]+)\nTimestamp: [0-9]+$`)
+// The server issues 32 random bytes as padded url-safe base64 (44 characters
+// ending in "="); the bounds leave room for a longer challenge without letting
+// anything but the base64 alphabet through.
+var snChallengeMessagePattern = regexp.MustCompile(`^Sign in to URnetwork\nChallenge: ([A-Za-z0-9_-]{16,128}={0,2})\nTimestamp: ([0-9]{1,12})$`)
+
+// a challenge lives 5 minutes; allow clock skew on top
+const snChallengeClockSkew = 10 * time.Minute
 
 // snCheckChallengeMessage refuses to sign anything but the sign-in challenge the
 // server documents (three fixed-shape lines carrying the challenge and a
@@ -157,10 +158,48 @@ func snCheckChallengeMessage(message string, challenge string) error {
 	if match == nil {
 		return errors.New("wallet challenge: the message to sign is not the expected sign-in challenge; refusing to sign it")
 	}
-	if challenge != "" && match[1] != challenge {
+	// both fields come from the same server response, so equality alone proves
+	// nothing; it only catches a mismatched response. An absent id is refused.
+	if challenge == "" || match[1] != challenge {
 		return errors.New("wallet challenge: the message to sign does not carry the issued challenge; refusing to sign it")
 	}
+	issued, err := strconv.ParseInt(match[2], 10, 64)
+	if err != nil {
+		return errors.New("wallet challenge: the challenge timestamp is not a number; refusing to sign it")
+	}
+	if skew := time.Since(time.Unix(issued, 0)); skew < -snChallengeClockSkew || snChallengeClockSkew < skew {
+		return errors.New("wallet challenge: the challenge timestamp is far from the local clock; refusing to sign it")
+	}
 	return nil
+}
+
+// snCheckSigningApiUrl refuses to sign a server challenge unless it came from
+// the main API over https. The challenge text is the generic sign-in challenge,
+// which the same server also accepts as a wallet login, so signing one issued
+// by an endpoint an attacker controls (a changed --api_url, a saved network
+// that uses http, a MITM) would hand that party a login for the coldkey.
+// URNETWORK_WALLET_ALLOW_CUSTOM_API=1 lifts the check for a private test API.
+func snCheckSigningApiUrl(apiUrl string) error {
+	if os.Getenv("URNETWORK_WALLET_ALLOW_CUSTOM_API") == "1" {
+		return nil
+	}
+	u, err := url.Parse(apiUrl)
+	if err != nil || u.Scheme != "https" || u.Hostname() != defaultAPIHost {
+		return fmt.Errorf("refusing to sign a challenge from %q: the coldkey signs only challenges from https://%s (set URNETWORK_WALLET_ALLOW_CUSTOM_API=1 only for a private test API)", snPlain(apiUrl), defaultAPIHost)
+	}
+	return nil
+}
+
+// snPlain strips control characters from text that came from a server or a
+// flag before it is printed, so a hostile endpoint cannot inject terminal
+// escape sequences.
+func snPlain(text string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, text)
 }
 
 // snWrapBytes is the polkadot-js signRaw payload wrapper for type "bytes".
@@ -314,11 +353,16 @@ func snWalletSetArgs(ctx context.Context, clientStrategy *connect.ClientStrategy
 	args := &connect.SnSetWalletArgs{ColdkeySs58: coldkeySs58}
 	switch {
 	case proof != nil && proof.SeedFile != "":
-		keypair, err := snLoadColdkey(proof.SeedFile, coldkeySs58, pubkey)
+		if err := snCheckSigningApiUrl(apiUrl); err != nil {
+			return nil, err
+		}
+		// fetch and validate the challenge first so the key is loaded only for
+		// the signature itself, not across a network round trip
+		challenge, err := snWalletChallenge(ctx, clientStrategy, apiUrl, coldkeySs58)
 		if err != nil {
 			return nil, err
 		}
-		challenge, err := snWalletChallenge(ctx, clientStrategy, apiUrl, coldkeySs58)
+		keypair, err := snLoadColdkey(proof.SeedFile, coldkeySs58, pubkey)
 		if err != nil {
 			return nil, err
 		}
@@ -365,9 +409,9 @@ func snSetWalletSigned(ctx context.Context, clientStrategy *connect.ClientStrate
 	}
 	if result.Error != nil {
 		if args.Signature == "" {
-			return fmt.Errorf("%s\n%s", result.Error.Message, snWalletProofHint)
+			return fmt.Errorf("%s\n%s", snPlain(result.Error.Message), snWalletProofHint)
 		}
-		return fmt.Errorf("%s", result.Error.Message)
+		return fmt.Errorf("%s", snPlain(result.Error.Message))
 	}
 	if args.Signature == "" {
 		fmt.Printf("subnet wallet set to %s (pubkey 0x%x), unsigned\n", coldkeySs58, pubkey)

@@ -9,8 +9,10 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +20,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/docopt/docopt-go"
 	"github.com/vedhavyas/go-subkey/v2/sr25519"
@@ -108,7 +111,8 @@ func TestWalletSeedFileSignsTheChallengeVerifiably(t *testing.T) {
 	dir := t.TempDir()
 	seedPath := writeSeedFile(t, dir, seed, 0o600, true)
 
-	const challenge = "Sign in to URnetwork\nChallenge: abc123\nTimestamp: 1760000000"
+	t.Setenv("URNETWORK_WALLET_ALLOW_CUSTOM_API", "1")
+	challenge, challengeId := testServerChallenge(time.Now().Unix())
 	var sawSet map[string]interface{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -126,6 +130,7 @@ func TestWalletSeedFileSignsTheChallengeVerifiably(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"message_template": challenge,
+				"challenge":        challengeId,
 				"expires_in":       300,
 			})
 		case "/sn/wallet":
@@ -341,22 +346,82 @@ func TestWalletProofFlagRules(t *testing.T) {
 	}
 }
 
-func TestWalletChallengeMessageShapeIsEnforced(t *testing.T) {
-	good := "Sign in to URnetwork\nChallenge: abc_DEF-123\nTimestamp: 1760000000"
-	if err := snCheckChallengeMessage(good, "abc_DEF-123"); err != nil {
-		t.Fatalf("a well-formed challenge was refused: %v", err)
+// testServerChallenge builds the sign-in message the way the server does: the
+// challenge is 32 random bytes as padded url-safe base64 (44 characters).
+func testServerChallenge(timestamp int64) (message string, challenge string) {
+	raw := make([]byte, 32)
+	for i := range raw {
+		raw[i] = byte(i*37 + 11)
 	}
+	challenge = base64.URLEncoding.EncodeToString(raw)
+	return fmt.Sprintf("Sign in to URnetwork\nChallenge: %s\nTimestamp: %d", challenge, timestamp), challenge
+}
+
+func TestWalletChallengeMessageShapeIsEnforced(t *testing.T) {
+	good, challenge := testServerChallenge(time.Now().Unix())
+	if len(challenge) != 44 || !strings.HasSuffix(challenge, "=") {
+		t.Fatalf("the test challenge %q is not the server's padded form", challenge)
+	}
+	if err := snCheckChallengeMessage(good, challenge); err != nil {
+		t.Fatalf("a well-formed server challenge was refused: %v", err)
+	}
+	now := time.Now().Unix()
 	for name, msg := range map[string]string{
 		"empty":         "",
 		"arbitrary":     "Transfer all funds to 5Evil",
 		"extra line":    good + "\nTransfer all funds",
-		"wrong header":  "Sign in to Elsewhere\nChallenge: abc_DEF-123\nTimestamp: 1",
-		"bad timestamp": "Sign in to URnetwork\nChallenge: abc_DEF-123\nTimestamp: soon",
-		"other nonce":   "Sign in to URnetwork\nChallenge: zzz\nTimestamp: 1",
+		"wrong header":  fmt.Sprintf("Sign in to Elsewhere\nChallenge: %s\nTimestamp: %d", challenge, now),
+		"bad timestamp": fmt.Sprintf("Sign in to URnetwork\nChallenge: %s\nTimestamp: soon", challenge),
+		"other nonce":   fmt.Sprintf("Sign in to URnetwork\nChallenge: %s\nTimestamp: %d", strings.Repeat("z", 43)+"=", now),
+		"stale":         fmt.Sprintf("Sign in to URnetwork\nChallenge: %s\nTimestamp: %d", challenge, now-3600),
+		"future":        fmt.Sprintf("Sign in to URnetwork\nChallenge: %s\nTimestamp: %d", challenge, now+3600),
 	} {
-		if err := snCheckChallengeMessage(msg, "abc_DEF-123"); err == nil {
+		if err := snCheckChallengeMessage(msg, challenge); err == nil {
 			t.Fatalf("%s: the message was accepted for signing", name)
 		}
+	}
+	// an absent issued challenge is refused, not skipped
+	if err := snCheckChallengeMessage(good, ""); err == nil {
+		t.Fatal("a message was accepted without an issued challenge to check it against")
+	}
+}
+
+func TestWalletSigningRefusesAnApiThatIsNotTheMainApi(t *testing.T) {
+	t.Setenv("URNETWORK_WALLET_ALLOW_CUSTOM_API", "")
+	for _, apiUrl := range []string{
+		"http://api.bringyour.com",
+		"https://evil.example.com",
+		"https://api.bringyour.com.evil.example.com",
+		"ftp://api.bringyour.com",
+		"",
+	} {
+		if err := snCheckSigningApiUrl(apiUrl); err == nil {
+			t.Fatalf("%q was accepted as a signing API", apiUrl)
+		}
+	}
+	if err := snCheckSigningApiUrl("https://api.bringyour.com"); err != nil {
+		t.Fatalf("the main API was refused: %v", err)
+	}
+	t.Setenv("URNETWORK_WALLET_ALLOW_CUSTOM_API", "1")
+	if err := snCheckSigningApiUrl("http://127.0.0.1:1"); err != nil {
+		t.Fatalf("the explicit override was ignored: %v", err)
+	}
+}
+
+func TestWalletServerTextHasNoControlCharacters(t *testing.T) {
+	got := snPlain("bad\x1b[2J\x07 text\x00")
+	for _, r := range got {
+		if r < 0x20 || r == 0x7f {
+			t.Fatalf("control character %q survived in %q", r, got)
+		}
+	}
+}
+
+func TestWalletEarningIntervalFlagsAreRefused(t *testing.T) {
+	if _, err := snWalletProofFromOpts(fakeOpts(map[string]interface{}{
+		"--wallet-from-epoch": "1", "--wallet-through-epoch": "2",
+	})); err == nil {
+		t.Fatal("an earning interval was accepted although the request cannot carry it")
 	}
 }
 

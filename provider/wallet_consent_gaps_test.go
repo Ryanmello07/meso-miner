@@ -119,15 +119,6 @@ func TestWalletSignatureNormalizationEdges(t *testing.T) {
 	}
 }
 
-// a well-formed message passes when the caller has no issued challenge to
-// cross-check (the snWalletChallenge path always has one)
-func TestWalletChallengeMessageWithoutIssuedChallenge(t *testing.T) {
-	good := "Sign in to URnetwork\nChallenge: abc_DEF-123\nTimestamp: 1760000000"
-	if err := snCheckChallengeMessage(good, ""); err != nil {
-		t.Fatalf("a well-formed challenge must pass without a cross-check: %v", err)
-	}
-}
-
 // the printed challenge must surface the signing window, the exact bytes as
 // hex, and the submit command with the one-line message
 func TestWalletChallengeTextSurfacesTheWindow(t *testing.T) {
