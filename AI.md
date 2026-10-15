@@ -120,8 +120,10 @@ urnet-tools uninstall              # full removal
 # Experimental
 urnet-tools hot-restart on|off     # client JWT reuse (default off)
 urnet-tools fast-auth on|off       # bypass auth rate limiter
-urnet-tools set h3 on|off          # H3 (QUIC) transport for the direct identity (beta)
-urnet-tools set h3-datagram on|off # offer QUIC DATAGRAM on the H3 connection (beta)
+urnet-tools set h3 off|direct|on|N|all # which identities may use H3 (QUIC) and the DNS carriers (default: direct)
+urnet-tools set h3-datagram on|off # offer QUIC DATAGRAM on the H3 connection (default on)
+urnet-tools set ip-version dual|ipv4|ipv6|legacy # IP families for the direct identity (default dual)
+urnet-tools set h1-plus on|off     # H1+ carrier upgrade on new H1 dials (default on)
 ```
 
 ## Environment Variables
@@ -144,7 +146,7 @@ Key variables:
 | `URNETWORK_SKIP_AUDIT` | `1` = skip startup system audit (ulimit, conntrack checks, disk benchmark) |
 | `URNETWORK_DISK_BENCH` | startup disk benchmark (auto profile only): unset = bare metal/VM only, never in containers or on a busy disk; `1` = also in containers; `0` = never |
 | `URNETWORK_HOT_RESTART` | `1` = experimental client JWT reuse |
-| `URNETWORK_H3` | `on` (or `1`, `true`, `yes`) = run H3 (QUIC) beside H1 for the direct identity (beta, off by default); the `h3` control key overrides it live |
+| `URNETWORK_H3` | `on` (or `1`, `true`, `yes`) = run H3 (QUIC) beside H1 for the direct identity (off by default); the `h3` control key overrides it live |
 
 ## Release & Versioning
 
