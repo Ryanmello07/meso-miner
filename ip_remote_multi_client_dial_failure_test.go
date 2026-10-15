@@ -173,14 +173,15 @@ func TestMultiClientDialFailureReraceOffForwardsTheSignal(t *testing.T) {
 func TestMultiClientChannelDialStarvedWindow(t *testing.T) {
 	channel := &multiClientChannel{}
 
-	channel.addDialFailure()
-	channel.addDialFailure()
+	channel.addDialFailure("203.0.113.7")
+	channel.addDialFailure("203.0.113.7")
 	if channel.dialStarved() {
 		t.Fatal("two failures must not count as starved")
 	}
-	channel.addDialFailure()
+	// three failures spanning two distinct destinations with no successes
+	channel.addDialFailure("203.0.113.8")
 	if !channel.dialStarved() {
-		t.Fatal("three failures with no successes must count as starved")
+		t.Fatal("three failures across two destinations with no successes must count as starved")
 	}
 	// one proven connect in the window clears it
 	channel.addConnectSuccess()
@@ -200,6 +201,43 @@ func TestMultiClientChannelDialStarvedWindow(t *testing.T) {
 	channel.stateLock.Unlock()
 	if remaining != 0 {
 		t.Fatalf("the stale failures were not pruned (%d left)", remaining)
+	}
+}
+
+// one repeatedly failing destination must not starve-warn a channel: the
+// strikes have to span distinct destinations before they are evidence about
+// the exit rather than about a destination
+func TestMultiClientChannelDialStarvedRequiresDistinctDestinations(t *testing.T) {
+	channel := &multiClientChannel{}
+
+	for i := 0; i < 4; i++ {
+		channel.addDialFailure("203.0.113.7")
+	}
+	if channel.dialStarved() {
+		t.Fatal("one destination's repeated failures must not starve-warn the exit")
+	}
+
+	// a second destination makes the strikes evidence about the exit
+	channel.addDialFailure("198.51.100.9")
+	if !channel.dialStarved() {
+		t.Fatal("strikes spanning two destinations with no successes must count as starved")
+	}
+
+	// the parallel destinations stay entry-aligned under the window prune
+	channel.stateLock.Lock()
+	channel.dialFailureTimes[0] = time.Now().Add(-2 * dialStrikeWindow)
+	channel.dialFailureTimes[1] = time.Now().Add(-2 * dialStrikeWindow)
+	channel.dialFailureTimes[2] = time.Now().Add(-2 * dialStrikeWindow)
+	channel.stateLock.Unlock()
+	if channel.dialStarved() {
+		t.Fatal("pruned strikes must not starve")
+	}
+	channel.stateLock.Lock()
+	times := len(channel.dialFailureTimes)
+	destinations := len(channel.dialFailureDestinations)
+	channel.stateLock.Unlock()
+	if times != destinations {
+		t.Fatalf("times and destinations fell out of alignment: %d vs %d", times, destinations)
 	}
 }
 

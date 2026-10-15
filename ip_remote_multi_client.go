@@ -1842,8 +1842,13 @@ func (self *RemoteUserNatMultiClient) clientDialFailure(sourceClient *multiClien
 	}
 
 	// strike accounting is per-channel and takes the channel's own stateLock;
-	// recorded outside the parent stateLock so the two never nest.
-	sourceClient.addDialFailure()
+	// recorded outside the parent stateLock so the two never nest. The
+	// destination ip rides along so dialStarved can require strikes to span
+	// distinct destinations -- one polled-dead site retransmitting into this
+	// path must not starve-warn the exit by itself. net.IP.String() on a nil
+	// ip yields a stable "<nil>" key, so a pathological signal still records
+	// safely rather than panicking.
+	sourceClient.addDialFailure(egressIpPath.DestinationIp.String())
 
 	if rerace {
 		self.flowReraced()
@@ -3182,6 +3187,13 @@ type multiClientChannel struct {
 	// established flows.
 	dialFailureTimes    []time.Time
 	connectSuccessTimes []time.Time
+	// dialFailureDestinations runs parallel to dialFailureTimes: the
+	// destination ip each failed dial was for. A single retransmitting
+	// destination must not starve-warn the exit by itself, so dialStarved
+	// requires the surviving strikes to span distinct destinations (see
+	// dialStarvedMinDestinations). Kept entry-aligned by
+	// pruneDialStrikesWithLock.
+	dialFailureDestinations []string
 }
 
 func newMultiClientChannel(
@@ -3331,6 +3343,15 @@ const dialStrikeWindow = 60 * time.Second
 // nothing connecting is the resold-proxy-over-cap signature this warns on.
 const dialStarvedFailureThreshold = 3
 
+// dialStarvedMinDestinations is how many distinct destination ips the
+// surviving strikes must span before they count as starvation. A single
+// destination retransmitting failed dials -- a polled-dead site, a tracker
+// the network blackholes -- can supply any number of strikes by itself and
+// could starve-warn a healthy exit for one website's death (upstream
+// requires the same span). A genuinely starved upstream fails dials for
+// everything, so the real dud still convicts at full speed.
+const dialStarvedMinDestinations = 2
+
 // pruneStrikeTimes drops timestamps strictly before horizon. The slices are
 // append-only and time-ordered, so a prefix scan is sufficient.
 func pruneStrikeTimes(times []time.Time, horizon time.Time) []time.Time {
@@ -3341,13 +3362,36 @@ func pruneStrikeTimes(times []time.Time, horizon time.Time) []time.Time {
 	return times[i:]
 }
 
-// addDialFailure records one intercepted dial failure for this channel.
-func (self *multiClientChannel) addDialFailure() {
+// pruneDialStrikesWithLock prunes the dial-failure record to the strike
+// window, cutting the same prefix from the times and the parallel
+// destinations so the two stay entry-aligned. The destination cut is
+// clamped: a fixture that hand-injects dialFailureTimes without destinations
+// must prune cleanly rather than slice out of range -- production always
+// appends the two together via addDialFailure.
+//
+// must be called with stateLock
+func (self *multiClientChannel) pruneDialStrikesWithLock(horizon time.Time) {
+	i := 0
+	for i < len(self.dialFailureTimes) && self.dialFailureTimes[i].Before(horizon) {
+		i += 1
+	}
+	if 0 < i {
+		self.dialFailureTimes = self.dialFailureTimes[i:]
+		self.dialFailureDestinations = self.dialFailureDestinations[min(i, len(self.dialFailureDestinations)):]
+	}
+}
+
+// addDialFailure records one intercepted dial failure for this channel,
+// alongside the destination ip the failed dial was for (see
+// dialFailureDestinations for why the destination matters).
+func (self *multiClientChannel) addDialFailure(destination string) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 
 	now := time.Now()
-	self.dialFailureTimes = append(pruneStrikeTimes(self.dialFailureTimes, now.Add(-dialStrikeWindow)), now)
+	self.pruneDialStrikesWithLock(now.Add(-dialStrikeWindow))
+	self.dialFailureTimes = append(self.dialFailureTimes, now)
+	self.dialFailureDestinations = append(self.dialFailureDestinations, destination)
 }
 
 // addConnectSuccess records one proven upstream connect for this channel (a
@@ -3362,8 +3406,9 @@ func (self *multiClientChannel) addConnectSuccess() {
 }
 
 // dialStarved reports whether this channel's upstream is refusing work: at
-// least dialStarvedFailureThreshold intercepted dial failures and zero proven
-// connects inside the sliding window. It gates new-flow selection only (the
+// least dialStarvedFailureThreshold intercepted dial failures spanning at
+// least dialStarvedMinDestinations distinct destinations, and zero proven
+// connects, inside the sliding window. It gates new-flow selection only (the
 // resize pass warning); it must never feed the removal decision, because a
 // dial-starved provider's established flows are its only working asset and
 // destroying them is the bug this whole design exists to avoid.
@@ -3372,9 +3417,26 @@ func (self *multiClientChannel) dialStarved() bool {
 	defer self.stateLock.Unlock()
 
 	horizon := time.Now().Add(-dialStrikeWindow)
-	self.dialFailureTimes = pruneStrikeTimes(self.dialFailureTimes, horizon)
+	self.pruneDialStrikesWithLock(horizon)
 	self.connectSuccessTimes = pruneStrikeTimes(self.connectSuccessTimes, horizon)
-	return dialStarvedFailureThreshold <= len(self.dialFailureTimes) && len(self.connectSuccessTimes) == 0
+	if len(self.dialFailureTimes) < dialStarvedFailureThreshold || 0 < len(self.connectSuccessTimes) {
+		return false
+	}
+	// the distinct-destination span. Fewer recorded destinations than the
+	// required span can never satisfy it (this is also the nil-safe path for
+	// fixtures that inject dialFailureTimes without destinations). The
+	// surviving strike count is small -- bounded by the failure rate over a
+	// 60s window -- so a linear first-differs scan finds "at least 2
+	// distinct" without allocating.
+	if len(self.dialFailureDestinations) < dialStarvedMinDestinations {
+		return false
+	}
+	for _, destination := range self.dialFailureDestinations[1:] {
+		if destination != self.dialFailureDestinations[0] {
+			return true
+		}
+	}
+	return false
 }
 
 // func (self *multiClientChannel) UpdateAffinity() {
