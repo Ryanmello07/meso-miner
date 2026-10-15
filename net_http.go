@@ -204,6 +204,8 @@ type ClientStrategy struct {
 
 	nextConnectTime time.Time
 	failureCount    int
+	// callers holding the reconnect fast path; guarded by mutex
+	reconnectFastPathCount int
 
 	probes probeWindow
 }
@@ -447,8 +449,22 @@ func (self *ClientStrategy) CustomExtenders() map[netip.Addr]string {
 	return maps.Clone(self.extenderIpSecrets)
 }
 
-// new connections should use next connect time to avoid flooding the network at once
-func (self *ClientStrategy) NextConnectTime() time.Time {
+// nextConnectMaxLead caps how far the shared next-connect timestamp may run
+// ahead of wall clock. A dialer whose pacing wait was cancelled used to keep its
+// step, so rapid connect/disconnect cycles compounded the lead without bound.
+// The cancel release below is the primary fix; this clamp is the backstop that
+// bounds the damage of any reservation that still leaks (from upstream at
+// 20b29f79).
+const nextConnectMaxLead = 10 * time.Second
+
+// new connections should use next connect time to avoid flooding the network
+// at once.
+//
+// The returned release gives this caller's reservation back to the staircase.
+// It exists for one situation: the caller's pacing wait was cancelled before it
+// ever dialed, so the step it reserved paces nobody. A caller that goes on to
+// dial must NOT call release. The release is idempotent and never nil.
+func (self *ClientStrategy) NextConnectTime() (time.Time, func()) {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 
@@ -462,8 +478,63 @@ func (self *ClientStrategy) NextConnectTime() time.Time {
 	if nextConnectTime.Before(now) {
 		nextConnectTime = now
 	}
+	if maxLead := now.Add(nextConnectMaxLead); maxLead.Before(nextConnectTime) {
+		nextConnectTime = maxLead
+	}
 	self.nextConnectTime = nextConnectTime
-	return nextConnectTime
+
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			self.mutex.Lock()
+			defer self.mutex.Unlock()
+			self.nextConnectTime = self.nextConnectTime.Add(-connectDelay)
+		})
+	}
+	return nextConnectTime, release
+}
+
+const (
+	// reconnectFastPathLimit caps how many callers may hold the reconnect fast
+	// path (NextReconnectTime) at once; callers past the cap fall back to the
+	// serialized NextConnectTime staircase.
+	reconnectFastPathLimit = 4
+	// reconnectFastPathMaxDelay is the independent per-caller jitter for a
+	// fast-path reconnect: uniform in [0, 250ms).
+	reconnectFastPathMaxDelay = 250 * time.Millisecond
+)
+
+// NextReconnectTime is the scoped fast path of NextConnectTime for a caller
+// whose transport was connected and just lost its connection: a small
+// independent jitter that neither reads nor advances the shared timestamp, capped
+// at reconnectFastPathLimit concurrent holders. The returned release frees the
+// slot and MUST be called once the dial attempt completes; it is idempotent and
+// never nil. Retries after a failed reconnect go back through NextConnectTime.
+func (self *ClientStrategy) NextReconnectTime() (time.Time, func()) {
+	acquired := false
+	func() {
+		self.mutex.Lock()
+		defer self.mutex.Unlock()
+		if self.reconnectFastPathCount < reconnectFastPathLimit {
+			self.reconnectFastPathCount += 1
+			acquired = true
+		}
+	}()
+	if !acquired {
+		next, _ := self.NextConnectTime()
+		return next, func() {}
+	}
+
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			self.mutex.Lock()
+			defer self.mutex.Unlock()
+			self.reconnectFastPathCount -= 1
+		})
+	}
+	jitter := time.Duration(mathrand.Int63n(int64(reconnectFastPathMaxDelay)))
+	return time.Now().Add(jitter), release
 }
 
 func (self *ClientStrategy) dialerWeights() map[*clientDialer]float32 {
@@ -515,6 +586,13 @@ type evalResult struct {
 	// materialize, when set, is run for the selected HTTP response (ported
 	// from upstream net_http.go at 20b29f79; nil is inert on the fork).
 	materialize func() error
+	// h1Conn is the framed H1 message connection an H1 dial produced; dialerInfo
+	// describes the dialer that won it (stage 3, from upstream at 20b29f79).
+	h1Conn     H1MessageConn
+	dialerInfo *DialerInfo
+	// terminal ends the logical dial with this result's error instead of
+	// retrying the remaining dialers (an authorization denial).
+	terminal bool
 
 	httpResult
 }
@@ -693,7 +771,7 @@ func (self *ClientStrategy) parallelEvalErr(ctx context.Context, eval func(ctx c
 				result := eval(handleCtx, dialer)
 				noteFailed(result)
 				if result != nil {
-					if result.err == nil {
+					if result.err == nil || result.terminal {
 						self.log.V(2).Infof("[net][p]select: %s\n", dialer.String())
 						return result, nil
 					}
@@ -717,7 +795,7 @@ func (self *ClientStrategy) parallelEvalErr(ctx context.Context, eval func(ctx c
 					return nil, finish()
 				case result := <-out:
 					if result != nil {
-						if result.err == nil {
+						if result.err == nil || result.terminal {
 							self.log.V(2).Infof("[net][p]select: %s\n", result.dialer.String())
 							return result, nil
 						}
@@ -745,7 +823,7 @@ func (self *ClientStrategy) parallelEvalErr(ctx context.Context, eval func(ctx c
 					return nil, finish()
 				case result := <-out:
 					if result != nil {
-						if result.err == nil {
+						if result.err == nil || result.terminal {
 							self.log.V(2).Infof("[net][p]select: %s\n", result.dialer.String())
 							return result, nil
 						}
@@ -765,7 +843,7 @@ func (self *ClientStrategy) parallelEvalErr(ctx context.Context, eval func(ctx c
 				return nil, finish()
 			case result := <-out:
 				if result != nil {
-					if result.err == nil {
+					if result.err == nil || result.terminal {
 						return result, nil
 					}
 					result.Close()

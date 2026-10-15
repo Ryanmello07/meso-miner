@@ -145,3 +145,42 @@ func sessionEndWait(ctx context.Context, flaps *flapGuard, lived time.Duration, 
 	}
 	return flapWait
 }
+
+// forkModePreferences is the Auto mode policy of a transport. A caller that sets
+// ModePreferences explicitly gets exactly that (normalized). Otherwise the fork
+// policy applies: H1 always, plus H3 on an identity that opted in with EnableH3,
+// the two equally preferred so the election is sticky among equals and H3 stays
+// an auxiliary beside H1 (see h3Auxiliary). The dns carriers are never started by
+// default; upstream's default policy enables them.
+func forkModePreferences(settings *PlatformTransportSettings) map[TransportMode]int {
+	if settings.ModePreferences != nil {
+		return normalizeTransportModePreferences(settings.ModePreferences)
+	}
+	preferences := map[TransportMode]int{TransportModeH1: 1}
+	if settings.EnableH3 {
+		preferences[TransportModeH3] = 1
+	}
+	return preferences
+}
+
+// h3DatagramOffer reports whether a dial in ptMode offers QUIC DATAGRAM. The
+// explicit EnableH3Datagrams setting always wins. Otherwise only the gated
+// auxiliary H3 on the plain H3 path offers it, and only while the operator
+// datagram gate is on. Upstream turns the setting on by default; this tree keeps
+// it off until an operator asks (SetH3DatagramsEnabled).
+func (self *PlatformTransport) h3DatagramOffer(ptMode TransportMode) bool {
+	if self.settings.EnableH3Datagrams {
+		return true
+	}
+	return ptMode == TransportModeH3 && self.h3Gated() && H3DatagramsEnabled()
+}
+
+// h3UseDatagramForPath is the per-message lane decision. The gated auxiliary H3
+// honors the operator send gate: with it off, a connection that negotiated
+// DATAGRAM is receive-only and the stream carries everything.
+func (self *PlatformTransport) h3UseDatagramForPath(messageByteCount int, maxDatagramByteCount int) bool {
+	if self.h3Gated() && !H3DatagramSendEnabled() {
+		return false
+	}
+	return self.h3DatagramSettings.UseDatagramForPath(messageByteCount, maxDatagramByteCount)
+}

@@ -79,6 +79,12 @@ type PacketTranslationSettings struct {
 	DnsMaxCombinePerAddress int
 	DnsMaxCombine           int64
 
+	// byte bounds read by the ported extender memory policy (net_extender_memory.go);
+	// this tree's packet translation does not consume them
+	DnsMaxCombinedPacketByteCount ByteCount
+	DnsMaxCombineBytesPerAddress  ByteCount
+	DnsMaxCombineBytes            ByteCount
+
 	DnsMaxPumpHostsPerAddress int
 	DnsMaxPumpHosts           int64
 

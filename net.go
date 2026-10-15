@@ -289,6 +289,10 @@ type ConnectSettings struct {
 	// DefaultLogger().
 	Log Logger
 
+	// The QUIC versions the platform h3 carriers offer (net_quic_version.go).
+	// The zero value offers version 2 first with version 1 behind it.
+	QuicVersionPolicy QuicVersionPolicy
+
 	RequestTimeout   time.Duration
 	ConnectTimeout   time.Duration
 	TlsTimeout       time.Duration
