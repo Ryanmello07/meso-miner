@@ -503,12 +503,33 @@ func TestFragmentRetainedBytesCapDropsGrownDatagram(t *testing.T) {
 	}
 }
 
+// the nat budget must admit the real fragment patterns this line sees: a
+// ~9 KiB reply (the measured 9,124-byte peer TLS flight) fragments into 9
+// fragments at the tunnel mtu and must reassemble under
+// natFragmentReassemblyMaxRetainedBytes.
+func TestFragmentNatBudgetAdmitsARealisticReply(t *testing.T) {
+	for _, version := range []int{4, 6} {
+		r := newFragmentReassembler(version)
+		defer r.close()
+		setFragmentMaxRetainedBytes(r, natFragmentReassemblyMaxRetainedBytes)
+		fragments, payload := fragmentSet(t, version, 9124, 1100)
+		now := time.Unix(0, 0)
+		var whole []byte
+		for _, fragment := range fragments {
+			whole = feedFragment(r, fragment, now).packet
+		}
+		assertReassembledPayload(t, whole, payload)
+	}
+}
+
 func TestFragmentRetainedBytesCapEvictsOldest(t *testing.T) {
 	for _, version := range []int{4, 6} {
 		r := newFragmentReassembler(version)
 		defer r.close()
-		// the nat's per-shard budget
-		setFragmentMaxRetainedBytes(r, natFragmentReassemblyMaxRetainedBytes)
+		// an explicit small budget so the BYTE-cap eviction path is what
+		// runs: at ~2061 charged bytes per fragment even a few datagrams
+		// exceed it and the oldest gives way
+		setFragmentMaxRetainedBytes(r, 10*1024)
 		base := time.Unix(0, 0)
 		idents := make([]uint32, 0, 20)
 		for i := 0; i < 20; i++ {
@@ -516,12 +537,12 @@ func TestFragmentRetainedBytesCapEvictsOldest(t *testing.T) {
 			feedFragment(r, fragments[0], base.Add(time.Duration(i)*time.Millisecond))
 			returnFragments(fragments[1])
 			idents = append(idents, fragmentIdent(fragments[0]))
-			if natFragmentReassemblyMaxRetainedBytes < retainedByteCount(r) {
+			if 10*1024 < retainedByteCount(r) {
 				t.Fatalf("v%d: retained bytes exceed the cap (%d)", version, retainedByteCount(r))
 			}
 		}
 		if datagramCount(r) >= 20 {
-			t.Fatalf("v%d: no eviction happened under a %d byte cap", version, natFragmentReassemblyMaxRetainedBytes)
+			t.Fatalf("v%d: no eviction happened under a %d byte cap", version, 10*1024)
 		}
 		if hasFragmentIdent(r, idents[0]) {
 			t.Fatalf("v%d: the oldest datagram survived the byte-cap eviction", version)
