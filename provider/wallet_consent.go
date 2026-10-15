@@ -202,6 +202,19 @@ func snSeedFromFile(path string) ([32]byte, error) {
 	if info.Mode()&os.ModeSymlink != 0 {
 		return seed, fmt.Errorf("seed file %s is a symlink; give the real path", path)
 	}
+	// Open without following symlinks and run every check on the open
+	// descriptor, then read from that same descriptor. Checking by path and
+	// reading by path leaves a window in which the path can be swapped for a
+	// symlink or another file between the check and the read.
+	f, err := openSeedNoFollow(path)
+	if err != nil {
+		return seed, fmt.Errorf("seed file %s: %w", path, err)
+	}
+	defer f.Close()
+	info, err = f.Stat()
+	if err != nil {
+		return seed, fmt.Errorf("seed file %s: %w", path, err)
+	}
 	if !info.Mode().IsRegular() {
 		return seed, fmt.Errorf("seed file %s is not a regular file", path)
 	}
@@ -211,7 +224,7 @@ func snSeedFromFile(path string) ([32]byte, error) {
 	if snSeedModeTooOpen(info) {
 		return seed, fmt.Errorf("seed file %s is mode %04o; it must not be readable by group or other (chmod 600)", path, info.Mode().Perm())
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := io.ReadAll(io.LimitReader(f, 4096))
 	if err != nil {
 		return seed, fmt.Errorf("seed file %s: %w", path, err)
 	}

@@ -150,3 +150,29 @@ func TestWalletChallengeTextSurfacesTheWindow(t *testing.T) {
 		}
 	}
 }
+
+// The open itself must not follow a symlink, so a path swapped for a link
+// between the Lstat check and the open is refused rather than read.
+func TestOpenSeedNoFollowRefusesASymlinkSwap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no O_NOFOLLOW on windows")
+	}
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	if err := os.WriteFile(real, make([]byte, 32), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if f, err := openSeedNoFollow(link); err == nil {
+		f.Close()
+		t.Fatal("openSeedNoFollow followed a symlink")
+	}
+	f, err := openSeedNoFollow(real)
+	if err != nil {
+		t.Fatalf("regular file refused: %v", err)
+	}
+	f.Close()
+}
