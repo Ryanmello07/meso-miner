@@ -128,3 +128,44 @@ func TestFlowHashPinsAllFragmentsOfADatagram(t *testing.T) {
 		}
 	}
 }
+
+// An oversized udp reply is one datagram fragmented at the ip layer in both
+// families, never several independent datagrams, which would corrupt the
+// application's framing.
+func TestStreamStateOversizedUdpReplyIsOneFragmentedDatagram(t *testing.T) {
+	for _, version := range []int{4, 6} {
+		stream := newTestStreamState(version)
+		if version == 6 {
+			stream.sourceIp, stream.destinationIp = net.ParseIP("fd00::1"), net.ParseIP("2001:db8::2")
+		}
+		payload := make([]byte, 3000)
+		for i := range payload {
+			payload[i] = byte(i * 3)
+		}
+		packets, err := stream.DataPackets(payload, len(payload), 1100)
+		if err != nil || len(packets) < 3 {
+			t.Fatalf("v%d: %d packets, err=%v", version, len(packets), err)
+		}
+		var whole []byte
+		if version == 4 {
+			r := newIpv4FragmentReassembler()
+			defer r.close()
+			for _, p := range packets {
+				whole = r.process(TransferPath{}, TransferKey{}, protocol.ProvideMode_Network, p)
+			}
+		} else {
+			r := newIpv6FragmentReassembler()
+			defer r.close()
+			for _, p := range packets {
+				whole = r.process(TransferPath{}, TransferKey{}, protocol.ProvideMode_Network, p)
+			}
+		}
+		if whole == nil {
+			t.Fatalf("v%d: the fragments did not reassemble into one datagram", version)
+		}
+		ipPath, got, err := ParseIpPathWithPayload(whole)
+		if err != nil || string(got) != string(payload) || ipPath.Protocol != IpProtocolUdp {
+			t.Fatalf("v%d: reassembled datagram is wrong (err=%v, %d bytes)", version, err, len(got))
+		}
+	}
+}
