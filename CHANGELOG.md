@@ -2,7 +2,24 @@
 
 ## [Unreleased]
 
+## [v3.23.0-fix.33.0-rc1]
+
+> Pre-release of the v33 line, invisible to `urnet-tools update`. Try it on one box first.
+
 ### Added
+
+- **Dual-stack platform transport**: the direct identity connects to the platform over IPv4 and IPv6 at once (one pinned transport per family plus a parked family-agnostic fallback that dials only if neither pin connects), on hosts with a usable global IPv6 address. A proxied identity stays on the single legacy transport. Switch it live with `urnet-tools set ip-version dual|ipv4|ipv6|legacy` (control key `ip_version`, default `dual`). Per-family `urnet_dualstack_*` metrics and `[ipv6]` log lines show each family's connects, drops and session lifetimes, and a pinned transport that connects over the other family is counted as a mismatch. See the Configuration and Monitoring pages.
+- **Upstream's platform transport is swapped in**: the transport files are taken from upstream, with the fork's defaults and datagram safety kept. DNS and DNS-pump carriers (upstream's packet translation) are automatic fallbacks on the direct identity, and a SOCKS5 UDP relay plus a per-proxy path check carry QUIC for proxied identities.
+- **The `h3` setting is `off|direct|on`, a proxy count, or `all`**: `direct` (default) runs the fallback transports on the direct identity only; a number or `all` widens it to the best N or every proxy. Widening relaunches the proxies it adds and each redial costs the platform's speed tests, so prefer a small N. `urnet-tools set h3 off|direct|on|N|all`.
+- **H1+ is on by default again, with a live switch**: the authenticated custom carrier upgrade is tried on each H1 dial; `urnet-tools set h1-plus on|off` (control key `h1_plus`) turns it off for new connections. Losing H1 dials are closed, the outage guard is kept, a 429 or 5xx does not fall back to a plain websocket, and the framed-upgrade rejection cache is scoped to the route it was seen on. Counters and the carrier appear in the log and under `urnet_h1plus_*`.
+- **QUIC datagrams are on by default, as upstream**: `h3_datagram` and `h3_datagram_send` default to `on` (`off` turns each off). The minimum message length limit is 16 KiB, as upstream, so the per-peer TLS handshake flights no longer end a session with `read limit exceeded`.
+- **Credential renewal**: the provider renews its credential when the platform refuses it, and a transport holds its dials on a credential the platform definitively refused (a 401 or 403, or a revoked, expired or rejected close) instead of redialing it every few seconds.
+- **An IPv6 extension-header walker**: the parse now walks the extension chain (hop-by-hop, routing, fragment, destination options) to find the transport header, so a datagram carrying extension headers is parsed instead of being dropped as an unsupported protocol. `ip_ipv6_ext.go`.
+- **Cross-OS CI**: a build and vet matrix over the supported operating systems, native Windows and macOS runs of the ip and wallet tests, and the same tests on the FreeBSD kernel. `.github/workflows/portable-core.yml`.
+- **An optional client key publication opt-out** (`ClientSettings.SkipClientKeyPublication`, library setting, default off): a delivery-only client can keep its identity key local. It is refused with a logged error whenever the per-peer session layer needs the published key.
+
+> [!NOTE]
+> Not in this release: fragments arriving at a provider are not reassembled (reassembly runs in the local NATs only), and ICMP echo is not supported.
 
 - **The NAT reassembles fragmented IPv4 and IPv6 datagrams before parsing them**: a datagram split by the link was dropped whole, because a non-first fragment carries no transport identity and the parsers refuse a lone fragment. Each NAT send shard now reassembles only the datagrams pinned to it (by the IPv4 identification or the IPv6 fragment identification), retains at most 16 KiB of fragment bytes per family per shard, and drops a datagram still incomplete after the reassembly timeout (15 s). A lone fragment is still refused. `ip.go:646`, `ip_nat_fragment.go:9`, `ip_fragment.go:28`, `ip_ipv6_fragment.go:35`.
 - **A provider answers a source whose upstream dial failed, instead of going silent**: a refused TCP dial is answered RST+ACK, any other immediate failure with an ICMP destination-unreachable, and a timeout, a failure later than 3 s or a parent cancellation with nothing at all. The source learns in milliseconds instead of waiting out its own timeout. `ip_dial_failure.go:18`, `ip_dial_failure.go:73`.
