@@ -412,6 +412,10 @@ type receivePacket struct {
 	IpPath      *IpPath
 	Packet      []byte
 	Pooled      bool
+	// proven preserves whether this packet proves the upstream carries work
+	// (see provenConnectPacket) for the race commit, which sees buffered
+	// packets long after their flags were dropped by the path reverse
+	proven bool
 }
 
 type ServerNameLookup interface {
@@ -1633,6 +1637,26 @@ func (self *RemoteUserNatMultiClient) sendPacket(
 	return
 }
 
+// provenConnectPacket reports whether an inbound packet proves the upstream
+// carries real work. A tcp control-only packet that a middlebox or the
+// provider itself can fabricate -- a reset, or a bare syn -- proves only that
+// packets arrive, so it must not mark the flow established nor clear the
+// dial-strike window (upstream gates the proof on the syn-ack the same way).
+// Everything else -- udp data, a tcp syn-ack, tcp data -- is proof. Read
+// before the ingress path is reversed: Reverse drops the flags.
+func provenConnectPacket(ipPath *IpPath) bool {
+	if ipPath.Protocol != IpProtocolTcp {
+		return true
+	}
+	if ipPath.Rst {
+		return false
+	}
+	if ipPath.Syn && !ipPath.Ack {
+		return false
+	}
+	return true
+}
+
 // clientReceivePacketFunction
 func (self *RemoteUserNatMultiClient) clientReceivePacket(
 	sourceClient *multiClientChannel,
@@ -1649,6 +1673,9 @@ func (self *RemoteUserNatMultiClient) clientReceivePacket(
 		return
 	}
 
+	// the flags are on the as-received path; Reverse drops them (see
+	// provenConnectPacket)
+	provenConnect := provenConnectPacket(ipPath)
 	ipPath = ipPath.Reverse()
 
 	var abandonedClients []*multiClientChannel
@@ -1668,8 +1695,10 @@ func (self *RemoteUserNatMultiClient) clientReceivePacket(
 		if client == sourceClient {
 			// the first inbound packet for this flow marks it established,
 			// which gates the dial-failure re-race (a stale signal must not
-			// unbind a flow already carrying data)
-			if update.receivedInbound.CompareAndSwap(false, true) {
+			// unbind a flow already carrying data). only a proven connect
+			// counts: a provider's own reset or a bare syn must not establish
+			// the flow nor clear the exit's dial-strike window
+			if provenConnect && update.receivedInbound.CompareAndSwap(false, true) {
 				connectSucceeded = true
 			}
 			p := &receivePacket{
@@ -1695,6 +1724,7 @@ func (self *RemoteUserNatMultiClient) clientReceivePacket(
 				IpPath:      ipPath,
 				Packet:      packetCopy,
 				Pooled:      pooled,
+				proven:      provenConnect,
 			}
 			state.packets = append(state.packets, receivePacket)
 			if 1 == len(state.packets) {
@@ -1720,7 +1750,7 @@ func (self *RemoteUserNatMultiClient) clientReceivePacket(
 			self.log.Infof("[multi]receive race buffer limit reached")
 
 			for abandonedClient, abandonedState := range race.clientStates {
-				if abandonedClient != client {
+				if abandonedClient != sourceClient {
 					abandonedClients = append(abandonedClients, abandonedClient)
 					for _, p := range abandonedState.packets {
 						if p.Pooled {
@@ -1731,9 +1761,12 @@ func (self *RemoteUserNatMultiClient) clientReceivePacket(
 				}
 			}
 
+			// this packet ends the race in sourceClient's favour: commit it
+			// as the flow's owner (never nil, or the flow is established
+			// without an owner and every later packet reads it as a race)
 			update.clearRace()
-			update.client = client
-			if update.receivedInbound.CompareAndSwap(false, true) {
+			update.client = sourceClient
+			if provenConnect && update.receivedInbound.CompareAndSwap(false, true) {
 				connectSucceeded = true
 			}
 			receivePacket := &receivePacket{
@@ -1741,6 +1774,7 @@ func (self *RemoteUserNatMultiClient) clientReceivePacket(
 				ProvideMode: provideMode,
 				IpPath:      ipPath,
 				Packet:      packet,
+				proven:      provenConnect,
 			}
 			receivePackets = append(state.packets, receivePacket)
 			for _, p := range receivePackets {
@@ -1938,11 +1972,18 @@ func (self *RemoteUserNatMultiClient) scheduleCompleteRace(
 						client := orderedClients[len(orderedClients)-1]
 
 						update.client = client
-						if update.receivedInbound.CompareAndSwap(false, true) {
-							connectSucceeded = true
-							connectSucceededClient = client
-						}
 						receivePackets = race.clientStates[client].packets
+						// only a proven packet in the committed set (a syn-ack
+						// or data, never a reset or bare syn) is connect proof
+						for _, p := range receivePackets {
+							if p.proven {
+								if update.receivedInbound.CompareAndSwap(false, true) {
+									connectSucceeded = true
+									connectSucceededClient = client
+								}
+								break
+							}
+						}
 						for _, p := range receivePackets {
 							if p.Pooled {
 								p.Pooled = false
