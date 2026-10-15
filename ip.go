@@ -516,6 +516,14 @@ func flowHash(packet []byte) uint32 {
 		if len(packet) >= 20 {
 			h := hash(packet[12:20])
 			protocol := packet[9]
+			if binary.BigEndian.Uint16(packet[6:8])&0x3fff != 0 {
+				// Every fragment of one datagram, the first included, pins by the
+				// shared ipv4 identity: a non-first fragment carries no ports, and
+				// the reassembler of a shard only sees the fragments pinned to it.
+				h ^= hash(packet[9:10])
+				h ^= hash(packet[4:6])
+				return h
+			}
 			if protocol == 6 || protocol == 17 {
 				headerLen := int(packet[0]&0x0F) * 4
 				if len(packet) >= headerLen+4 {
@@ -528,6 +536,16 @@ func flowHash(packet []byte) uint32 {
 		if len(packet) >= 40 {
 			h := hash(packet[8:40])
 			protocol := packet[6]
+			if isIpv6ExtensionHeader(protocol) {
+				// a fragmented datagram pins every fragment, the first included,
+				// by its shared identification, for the same reason as ipv4
+				if walk, ok := walkIpv6ExtensionHeaders(packet); ok && walk.fragmented {
+					var identification [4]byte
+					binary.BigEndian.PutUint32(identification[:], walk.fragment.identification)
+					h ^= hash(identification[:])
+					return h
+				}
+			}
 			if protocol == 6 || protocol == 17 {
 				if len(packet) >= 44 {
 					h ^= hash(packet[40:44])
@@ -625,6 +643,17 @@ func (self *LocalUserNat) runShard(shard int) {
 	tcp4Buffer := NewTcp4Buffer(self.ctx, self.receive, self.settings.TcpBufferSettings, self.bw)
 	tcp6Buffer := NewTcp6Buffer(self.ctx, self.receive, self.settings.TcpBufferSettings, self.bw)
 	shardCh := self.sendShards[shard]
+	// Fragments are reassembled before they are parsed: a non-first fragment
+	// has no transport header and a first fragment has a truncated payload.
+	// Every fragment of a datagram pins to this shard (flowHash), so a shard
+	// reassembles only its own datagrams. Both are bounded in datagrams,
+	// fragments and retained bytes.
+	ipv4Fragments := newIpv4FragmentReassembler()
+	ipv4Fragments.maxRetainedBytes = natFragmentReassemblyMaxRetainedBytes
+	defer ipv4Fragments.close()
+	ipv6Fragments := newIpv6FragmentReassembler()
+	ipv6Fragments.maxRetainedBytes = natFragmentReassemblyMaxRetainedBytes
+	defer ipv6Fragments.close()
 	func() {
 		self.sourceCancelMutex.Lock()
 		defer self.sourceCancelMutex.Unlock()
@@ -649,6 +678,12 @@ func (self *LocalUserNat) runShard(shard int) {
 			ipVersion := uint8(ipPacket[0]) >> 4
 			switch ipVersion {
 			case 4:
+				// an unfragmented packet comes back unchanged; a fragment is
+				// retained (nil) until its datagram is whole
+				ipPacket = ipv4Fragments.process(sendPacket.source, TransferKey{}, sendPacket.provideMode, ipPacket)
+				if ipPacket == nil {
+					continue
+				}
 				ipProtocol, sourceIp, destinationIp, transport, ok := parseIpv4(ipPacket)
 				if !ok {
 					MessagePoolReturn(ipPacket)
@@ -708,6 +743,10 @@ func (self *LocalUserNat) runShard(shard int) {
 					MessagePoolReturn(ipPacket)
 				}
 			case 6:
+				ipPacket = ipv6Fragments.process(sendPacket.source, TransferKey{}, sendPacket.provideMode, ipPacket)
+				if ipPacket == nil {
+					continue
+				}
 				ipProtocol, sourceIp, destinationIp, transport, ok := parseIpv6(ipPacket)
 				if !ok {
 					MessagePoolReturn(ipPacket)
