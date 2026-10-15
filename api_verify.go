@@ -66,8 +66,15 @@ type SnSetWalletCallback ApiCallback[*SnSetWalletResult]
 // SnSetWalletArgs sets the caller network's subnet coldkey — the ss58
 // address pool payouts for this network are claimable by. Kept separate from
 // the payout wallet types on purpose.
+//
+// Message and Signature carry the coldkey's proof of possession: the exact
+// server-issued challenge text and the coldkey's sr25519 signature over it, hex
+// and 0x-prefixed. Both empty is an unsigned set, which the main network
+// refuses under its signed wallet rules.
 type SnSetWalletArgs struct {
 	ColdkeySs58 string `json:"coldkey_ss58"`
+	Message     string `json:"message,omitempty"`
+	Signature   string `json:"signature,omitempty"`
 }
 
 type SnSetWalletError struct {

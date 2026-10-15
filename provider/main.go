@@ -945,6 +945,11 @@ func main() {
 	} else if wallet, _ := opts.Bool("wallet"); wallet {
 		if set, _ := opts.Bool("set"); set {
 			walletSet(opts)
+		} else if challenge, _ := opts.Bool("challenge"); challenge {
+			if err := walletChallenge(opts, os.Stdout); err != nil {
+				fmt.Printf("wallet challenge failed: %s\n", err)
+				os.Exit(1)
+			}
 		}
 	} else if snStatus, _ := opts.Bool("sn-status"); snStatus {
 		snStatusCmd(opts)
@@ -3004,16 +3009,32 @@ func provide(opts docopt.Opts) {
 	// before providing starts. A failure warns and does not block
 	// providing — the wallet may already be set from a previous run, and
 	// the call can be retried any time with `provider wallet set`.
+	//
+	// The main network requires the coldkey's signature, so the same proof
+	// flags as `provider wallet set` apply here. Without one the request is
+	// unsigned and refused unless the operator opted in.
 	if coldkeySs58, walletErr := opts.String("--wallet"); walletErr == nil && coldkeySs58 != "" {
-		legacyNetwork, _ := opts.Bool("--legacy-network-wallet")
-		if err := legacyNetworkWalletGate(legacyNetwork, "provide --wallet"); err != nil {
-			fmt.Printf("subnet wallet not set: %s\n", err)
+		walletProof, proofErr := snWalletProofFromOpts(opts)
+		if proofErr != nil {
+			fmt.Printf("subnet wallet not set: %s\n", proofErr)
 			fmt.Printf("continuing to provide.\n")
+		} else if walletProof.unsigned() {
+			legacyNetwork, _ := opts.Bool("--legacy-network-wallet")
+			if err := legacyNetworkWalletGate(legacyNetwork, "provide --wallet"); err != nil {
+				fmt.Printf("subnet wallet not set: %s\n", err)
+				fmt.Printf("continuing to provide.\n")
+			} else {
+				walletClientStrategy := connect.NewClientStrategyWithDefaults(ctx)
+				if err := snSetWalletSigned(ctx, walletClientStrategy, apiUrl, coldkeySs58, walletProof); err != nil {
+					fmt.Printf("subnet wallet not set: %s\n", err)
+					fmt.Printf("continuing to provide. Retry with: provider wallet set <coldkey_ss58> --legacy-network-wallet\n")
+				}
+			}
 		} else {
 			walletClientStrategy := connect.NewClientStrategyWithDefaults(ctx)
-			if err := snSetWallet(ctx, walletClientStrategy, apiUrl, coldkeySs58); err != nil {
+			if err := snSetWalletSigned(ctx, walletClientStrategy, apiUrl, coldkeySs58, walletProof); err != nil {
 				fmt.Printf("subnet wallet not set: %s\n", err)
-				fmt.Printf("continuing to provide. Retry with: provider wallet set <coldkey_ss58> --legacy-network-wallet\n")
+				fmt.Printf("continuing to provide. Retry with: provider wallet set <coldkey_ss58> followed by the same proof flags\n")
 			}
 		}
 	}
@@ -7216,7 +7237,8 @@ Usage:
     provider provide [--port=<port>]
         [--api_url=<api_url>]
         [--connect_url=<connect_url>]
-        [--wallet=<coldkey_ss58> [--legacy-network-wallet]]
+        [--wallet=<coldkey_ss58> [--coldkey_seed_file=<path> | --message=<text> --signature=<hex>]
+         [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>] [--legacy-network-wallet]]
         [--max-memory=<mem>]
         [--proxy_file=<proxy_file>]
         [--file=<file>]
@@ -7232,7 +7254,8 @@ Usage:
     	[--port=<port>]
         [--api_url=<api_url>]
         [--connect_url=<connect_url>]
-        [--wallet=<coldkey_ss58> [--legacy-network-wallet]]
+        [--wallet=<coldkey_ss58> [--coldkey_seed_file=<path> | --message=<text> --signature=<hex>]
+         [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>] [--legacy-network-wallet]]
         [--max-memory=<mem>]
         [--proxy_file=<proxy_file>]
         [--file=<file>]
@@ -7240,7 +7263,11 @@ Usage:
         [--url=<url>...]
         [--URL=<URL>...]
         [-v...]
-    provider wallet set <coldkey_ss58> [--legacy-network-wallet]
+    provider wallet set <coldkey_ss58> [--coldkey_seed_file=<path> | --message=<text> --signature=<hex>]
+        [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>] [--legacy-network-wallet]
+        [--api_url=<api_url>]
+        [-v...]
+    provider wallet challenge <coldkey_ss58>
         [--api_url=<api_url>]
         [-v...]
     provider sn-status [--json]
@@ -7294,8 +7321,20 @@ Options:
     --max-memory=<mem>               Set the maximum amount of memory in bytes, or the suffixes b, kib, mib, gib may be used [This is a soft limit].
     --wallet=<coldkey_ss58>          Also set the subnet claim wallet at startup, same as provider wallet set.
                                      A failure is logged and does not block providing.
-    --legacy-network-wallet          Allow the unsigned network wallet request (provider wallet set, provide --wallet).
-                                     Without it both refuse: set the wallet in the URnetwork app or web account.
+    --coldkey_seed_file=<path>       Prove the coldkey by signing the server challenge with this 32-byte
+                                     sr25519 seed (raw, or 64 hex characters). The seed never leaves the host
+                                     and is never logged. Use it on a workstation, not on a fleet node.
+                                     The file must be mode 600 and is never created.
+    --message=<text>                 Prove the coldkey with a challenge signed elsewhere: the exact message
+                                     printed by provider wallet challenge, or its one-line form with a
+                                     literal \n per line break. Goes with --signature.
+    --signature=<hex>                The coldkey's 64-byte sr25519 signature over --message, hex, 0x optional.
+    --wallet-from-epoch=<epoch>      First epoch the wallet mapping applies to. Goes with --wallet-through-epoch.
+    --wallet-through-epoch=<epoch>   Last epoch the wallet mapping applies to; at most 65536 epochs apart.
+    --legacy-network-wallet          Send the unsigned network wallet request (provider wallet set, provide --wallet).
+                                     Without it an unsigned request is refused: sign it with
+                                     --coldkey_seed_file (or --message with --signature), or set the wallet in
+                                     the URnetwork app or web account.
     <coldkey_ss58>                   Subnet claim wallet: an ss58 coldkey address (prefix 42).
     --store-client=<key>             claim: use the client token of this identity from the store
                                      (~/.urnetwork/.client_jwts.json; the key is a proxy address or "direct").

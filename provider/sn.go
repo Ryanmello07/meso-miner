@@ -91,24 +91,37 @@ func snSetWallet(ctx context.Context, clientStrategy *connect.ClientStrategy, ap
 }
 
 // legacyNetworkWalletGate refuses the unsigned network wallet request unless the
-// operator opted in. The platform is moving wallet binding to a signed consent
-// (one coldkey signature, delegated to a hotkey), and whether it still accepts
-// an unsigned request is a server-side policy this binary cannot see, so the
-// request is sent only on an explicit opt-in. The signed flow needs packages
-// (crv4, hotkeywallet) that this fleet binary does not link; it is a one-time
-// per-network action and never needs a hotkey seed on a fleet node.
+// operator opted in. The main network refuses an unsigned wallet set: the
+// signed consent needs the coldkey's signature over a server challenge, and
+// whether a deployment still accepts an unsigned request is a server-side
+// policy this binary cannot see, so the request is sent only on an explicit
+// opt-in. Pass --coldkey_seed_file (or --message with --signature) to use the
+// signed path, which needs no opt-in.
 func legacyNetworkWalletGate(legacyNetwork bool, via string) error {
 	if legacyNetwork {
 		return nil
 	}
-	return fmt.Errorf("%s sends the unsigned network wallet request, which the platform may refuse under its signed wallet rules; set the wallet in the URnetwork app or web account, or pass --legacy-network-wallet to send the unsigned request anyway", via)
+	return fmt.Errorf("%s sends the unsigned network wallet request, which the platform may refuse under its signed wallet rules; set the wallet in the URnetwork app or web account, sign it here with --coldkey_seed_file (or --message with --signature), or pass --legacy-network-wallet to send the unsigned request anyway", via)
 }
 
-// walletSet implements `provider wallet set <coldkey_ss58>`.
+// walletSet implements `provider wallet set <coldkey_ss58>
+// [--coldkey_seed_file=<path> | --message=<text> --signature=<hex>]`.
 func walletSet(opts docopt.Opts) {
-	legacyNetwork, _ := opts.Bool("--legacy-network-wallet")
-	if err := legacyNetworkWalletGate(legacyNetwork, "provider wallet set"); err != nil {
+	proof, err := snWalletProofFromOpts(opts)
+	if err != nil {
 		fmt.Printf("subnet wallet not set: %s\n", err)
+		os.Exit(1)
+	}
+	legacyNetwork, _ := opts.Bool("--legacy-network-wallet")
+	// An unsigned set is the only form the gate governs; a proof makes the
+	// request self-authenticating and needs no opt-in.
+	if proof.unsigned() {
+		if err := legacyNetworkWalletGate(legacyNetwork, "provider wallet set"); err != nil {
+			fmt.Printf("subnet wallet not set: %s\n", err)
+			os.Exit(1)
+		}
+	} else if legacyNetwork {
+		fmt.Printf("subnet wallet not set: --legacy-network-wallet is the unsigned mode; drop it to send the signed set\n")
 		os.Exit(1)
 	}
 	apiUrl, err := resolveApiUrl(opts)
@@ -126,7 +139,7 @@ func walletSet(opts docopt.Opts) {
 	clientStrategy := connect.NewClientStrategyWithDefaults(ctx)
 
 	coldkeySs58, _ := opts.String("<coldkey_ss58>")
-	if err := snSetWallet(ctx, clientStrategy, apiUrl, coldkeySs58); err != nil {
+	if err := snSetWalletSigned(ctx, clientStrategy, apiUrl, coldkeySs58, proof); err != nil {
 		fmt.Printf("subnet wallet not set: %s\n", err)
 		os.Exit(1)
 	}
