@@ -475,12 +475,21 @@ func snWalletNetworkConsentChallenge(ctx context.Context, out io.Writer, clientS
 
 // snConsentSetup resolves the pieces both commands need.
 func snConsentSetup(ctx context.Context, clientStrategy *connect.ClientStrategy, apiUrl string, coldkeySs58 string, proof *snWalletProof) (*connect.BringYourApi, snNetworkConsentExpect, error) {
-	var want snNetworkConsentExpect
-	pubkey, err := ss58.DecodeWithPrefix(coldkeySs58, ss58.BittensorPrefix)
+	api, want, err := snConsentBase(ctx, clientStrategy, apiUrl)
 	if err != nil {
-		return nil, want, fmt.Errorf("invalid ss58 coldkey %q: %s", coldkeySs58, err)
+		return nil, want, err
 	}
-	want.Coldkey = pubkey
+	if err := snConsentBind(&want, apiUrl, coldkeySs58, proof); err != nil {
+		api.Close()
+		return nil, want, err
+	}
+	return api, want, nil
+}
+
+// snConsentBase resolves what does not depend on the coldkey: the saved
+// network login and the epoch state.
+func snConsentBase(ctx context.Context, clientStrategy *connect.ClientStrategy, apiUrl string) (*connect.BringYourApi, snNetworkConsentExpect, error) {
+	var want snNetworkConsentExpect
 	byJwt, err := readNetworkJwt()
 	if err != nil {
 		return nil, want, err
@@ -494,21 +503,28 @@ func snConsentSetup(ctx context.Context, clientStrategy *connect.ClientStrategy,
 		api.Close()
 		return nil, want, fmt.Errorf("wallet consent: the epoch state is unavailable: %w", err)
 	}
+	return api, want, nil
+}
+
+// snConsentBind adds the coldkey, its journal entry and the interval.
+func snConsentBind(want *snNetworkConsentExpect, apiUrl string, coldkeySs58 string, proof *snWalletProof) error {
+	pubkey, err := ss58.DecodeWithPrefix(coldkeySs58, ss58.BittensorPrefix)
+	if err != nil {
+		return fmt.Errorf("invalid ss58 coldkey %q: %s", snPlain(coldkeySs58), err)
+	}
+	want.Coldkey = pubkey
 	path, err := snConsentJournalPath()
 	if err != nil {
-		api.Close()
-		return nil, want, err
+		return err
 	}
 	if want.Previous, err = snConsentJournalLoad(path, apiUrl, coldkeySs58); err != nil {
-		api.Close()
-		return nil, want, err
+		return err
 	}
 	if want.FromEpoch, want.ThroughEpoch, err = snConsentInterval(proof, want.Epoch); err != nil {
-		api.Close()
-		return nil, want, err
+		return err
 	}
 	want.Now = time.Now()
-	return api, want, nil
+	return nil
 }
 
 // snResolveRetainedConsent handles a consent that was sent but never

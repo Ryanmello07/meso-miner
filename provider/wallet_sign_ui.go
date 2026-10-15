@@ -51,7 +51,10 @@ const (
 	snSignRefreshSpacing = 3 * time.Second
 	// time the result stays on screen after a successful store
 	snSignLingerAfterDone = 20 * time.Second
-	snSignDefaultPort     = 8765
+	// the page can be given another full lifetime a few times; it is still
+	// bounded, and local-only the whole while
+	snSignMaxExtensions = 3
+	snSignDefaultPort   = 8765
 )
 
 type snSignUi struct {
@@ -62,14 +65,20 @@ type snSignUi struct {
 	journalPath string
 	token       string
 	deadline    time.Time
+	proof       *snWalletProof
+	// preview marks example data (never set by the command)
+	preview bool
 
 	mutex       sync.Mutex
 	want        snNetworkConsentExpect
 	message     string
 	statement   *protocol.NetworkWalletMappingStatement
 	refreshes   int
+	extensions  int
 	lastRefresh time.Time
 	stored      bool
+	// stored text when the retained consent was acknowledged on select
+	alreadyStored string
 
 	done chan struct{}
 }
@@ -80,6 +89,30 @@ func snSignToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(raw), nil
+}
+
+// bindWithLock binds the run to the account the wallet extension offered (or the
+// one named on the command line), finishes a retained unacknowledged consent
+// for it, and gets the first statement. The address is checked as a Bittensor
+// ss58 address before anything is requested.
+func (self *snSignUi) bindWithLock(address string) error {
+	if self.statement != nil && self.coldkey == address {
+		return nil
+	}
+	want := self.want
+	if err := snConsentBind(&want, self.apiUrl, address, self.proof); err != nil {
+		return err
+	}
+	if done, err := snResolveRetainedConsent(self.ctx, self.api, self.apiUrl, address, self.journalPath, &want, self.proof); err != nil {
+		return err
+	} else if done {
+		self.coldkey = address
+		self.stored = true
+		self.alreadyStored = "A consent you signed earlier was sent again and is now acknowledged."
+		return nil
+	}
+	self.want, self.coldkey = want, address
+	return self.newMessageWithLock()
 }
 
 // newMessageWithLock asks the server for a fresh statement and verifies it.
@@ -102,6 +135,9 @@ type snSignState struct {
 }
 
 func (self *snSignUi) stateWithLock() snSignState {
+	if self.statement == nil {
+		return snSignState{}
+	}
 	return snSignState{
 		Message:   self.message,
 		Hex:       "0x" + hex.EncodeToString([]byte(self.message)),
@@ -153,16 +189,19 @@ func (self *snSignUi) handler() http.Handler {
 		}
 		self.mutex.Lock()
 		state := self.stateWithLock()
+		deadline, extensions := self.deadline, self.extensions
 		self.mutex.Unlock()
 		boot := map[string]any{
-			"address":      self.coldkey,
-			"token":        self.token,
-			"message":      state.Message,
-			"hex":          state.Hex,
-			"expiresAt":    state.ExpiresAt,
-			"from":         state.From,
-			"through":      state.Through,
-			"pageDeadline": self.deadline.Unix(),
+			"preview":        self.preview,
+			"address":        self.coldkey,
+			"token":          self.token,
+			"message":        state.Message,
+			"hex":            state.Hex,
+			"expiresAt":      state.ExpiresAt,
+			"from":           state.From,
+			"through":        state.Through,
+			"pageDeadline":   deadline.Unix(),
+			"extensionsLeft": snSignMaxExtensions - extensions,
 		}
 		bootJson, _ := json.Marshal(boot)
 		logo := snSignLogoSvg
@@ -183,7 +222,10 @@ func (self *snSignUi) handler() http.Handler {
 				snSignError(w, http.StatusForbidden, "forbidden")
 				return
 			}
-			if time.Now().After(self.deadline) {
+			self.mutex.Lock()
+			stopped := time.Now().After(self.deadline)
+			self.mutex.Unlock()
+			if stopped {
 				snSignError(w, http.StatusGone, "this page has stopped; run the command again")
 				return
 			}
@@ -191,9 +233,58 @@ func (self *snSignUi) handler() http.Handler {
 			handle(w, r)
 		}
 	}
+	mux.HandleFunc("/select", post(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Address string `json:"address"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			snSignError(w, http.StatusBadRequest, "bad request")
+			return
+		}
+		address := strings.TrimSpace(body.Address)
+		self.mutex.Lock()
+		defer self.mutex.Unlock()
+		if self.stored {
+			snSignError(w, http.StatusConflict, "the consent is already stored")
+			return
+		}
+		if self.coldkey != "" && self.coldkey != address {
+			snSignError(w, http.StatusConflict, "this run is for "+self.coldkey)
+			return
+		}
+		if err := self.bindWithLock(address); err != nil {
+			snSignError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if self.alreadyStored != "" {
+			snSignWriteJson(w, http.StatusOK, map[string]any{"address": self.coldkey, "already": self.alreadyStored})
+			return
+		}
+		state := self.stateWithLock()
+		snSignWriteJson(w, http.StatusOK, map[string]any{"address": self.coldkey, "state": state})
+	}))
+	mux.HandleFunc("/extend", post(func(w http.ResponseWriter, r *http.Request) {
+		self.mutex.Lock()
+		defer self.mutex.Unlock()
+		if self.stored {
+			snSignError(w, http.StatusConflict, "the consent is already stored")
+			return
+		}
+		if self.extensions >= snSignMaxExtensions {
+			snSignError(w, http.StatusTooManyRequests, "this page cannot be extended again; run the command again")
+			return
+		}
+		self.extensions += 1
+		self.deadline = time.Now().Add(snSignPageLifetime)
+		snSignWriteJson(w, http.StatusOK, map[string]any{"pageDeadline": self.deadline.Unix(), "extensionsLeft": snSignMaxExtensions - self.extensions})
+	}))
 	mux.HandleFunc("/refresh", post(func(w http.ResponseWriter, r *http.Request) {
 		self.mutex.Lock()
 		defer self.mutex.Unlock()
+		if self.statement == nil {
+			snSignError(w, http.StatusConflict, "choose your account first")
+			return
+		}
 		if self.stored {
 			snSignError(w, http.StatusConflict, "the consent is already stored")
 			return
@@ -225,6 +316,10 @@ func (self *snSignUi) handler() http.Handler {
 		}
 		self.mutex.Lock()
 		defer self.mutex.Unlock()
+		if self.statement == nil {
+			snSignError(w, http.StatusConflict, "choose your account first")
+			return
+		}
 		if self.stored {
 			snSignError(w, http.StatusConflict, "the consent is already stored")
 			return
@@ -287,7 +382,7 @@ func snWalletSignUi(
 	if err := snCheckSigningApiUrl(apiUrl); err != nil {
 		return err
 	}
-	api, want, err := snConsentSetup(ctx, clientStrategy, apiUrl, coldkeySs58, proof)
+	api, want, err := snConsentBase(ctx, clientStrategy, apiUrl)
 	if err != nil {
 		return err
 	}
@@ -296,24 +391,26 @@ func snWalletSignUi(
 	if err != nil {
 		return err
 	}
-	// a consent sent earlier and never acknowledged is finished first
-	if done, err := snResolveRetainedConsent(ctx, api, apiUrl, coldkeySs58, journalPath, &want, proof); done || err != nil {
-		return err
-	}
 
 	token, err := snSignToken()
 	if err != nil {
 		return err
 	}
 	ui := &snSignUi{
-		ctx: ctx, api: api, apiUrl: apiUrl, coldkey: coldkeySs58, journalPath: journalPath,
+		ctx: ctx, api: api, apiUrl: apiUrl, journalPath: journalPath, proof: proof,
 		token: token, deadline: time.Now().Add(snSignPageLifetime), want: want, done: make(chan struct{}),
 	}
-	ui.mutex.Lock()
-	err = ui.newMessageWithLock()
-	ui.mutex.Unlock()
-	if err != nil {
-		return err
+	if coldkeySs58 != "" {
+		ui.mutex.Lock()
+		err = ui.bindWithLock(coldkeySs58)
+		stored := ui.stored
+		ui.mutex.Unlock()
+		if err != nil {
+			return err
+		}
+		if stored {
+			return nil
+		}
 	}
 
 	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
@@ -330,29 +427,37 @@ func snWalletSignUi(
 	go func() { serveErr <- server.Serve(listener) }()
 	defer server.Close()
 
-	fmt.Fprintf(out, "Sign the wallet consent for %s (epochs %d through %d).\n", coldkeySs58, ui.statement.FromEpoch, ui.statement.ThroughEpoch)
+	if ui.statement != nil {
+		fmt.Fprintf(out, "Sign the wallet consent for %s (epochs %d through %d).\n", ui.coldkey, ui.statement.FromEpoch, ui.statement.ThroughEpoch)
+	} else {
+		fmt.Fprintf(out, "Sign the wallet consent. You choose the account in your wallet extension on the page.\n")
+	}
 	fmt.Fprintf(out, "Open this address in the browser that has your wallet extension:\n\n    %s\n\n", url)
-	fmt.Fprintf(out, "It stops serving in %d minutes, or when you are done. Ctrl-C stops it now.\n", int(snSignPageLifetime/time.Minute))
+	fmt.Fprintf(out, "It stops serving in %d minutes (the page can extend it), or when you are done. Ctrl-C stops it now.\n", int(snSignPageLifetime/time.Minute))
 	if openBrowser {
 		snOpenBrowser(url)
 	}
 
-	timer := time.NewTimer(snSignPageLifetime)
-	defer timer.Stop()
-	select {
-	case <-ui.done:
-		return nil
-	case <-timer.C:
-		ui.mutex.Lock()
-		stored := ui.stored
-		ui.mutex.Unlock()
-		if !stored {
-			return errors.New("the page timed out before a signature was stored; run the command again")
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ui.done:
+			return nil
+		case <-ticker.C:
+			ui.mutex.Lock()
+			stopped, stored := time.Now().After(ui.deadline), ui.stored
+			ui.mutex.Unlock()
+			if stopped {
+				if !stored {
+					return errors.New("the page timed out before a signature was stored; run the command again")
+				}
+				return nil
+			}
+		case err := <-serveErr:
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-		return nil
-	case err := <-serveErr:
-		return err
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 }

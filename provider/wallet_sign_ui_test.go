@@ -21,6 +21,13 @@ import (
 // tests and serves its handler.
 func newSignUiForTest(t *testing.T, seed []byte) (*snSignUi, *consentServer, *httptest.Server, string) {
 	t.Helper()
+	return newSignUiWithBinding(t, seed, true)
+}
+
+// newSignUiWithBinding builds the page; with bind false no account is chosen
+// yet, as when the command is run without an address.
+func newSignUiWithBinding(t *testing.T, seed []byte, bind bool) (*snSignUi, *consentServer, *httptest.Server, string) {
+	t.Helper()
 	consentTestHome(t)
 	address := walletTestAddress(t, seed)
 	fake := &consentServer{t: t, want: consentTestExpect(t, seed, time.Now())}
@@ -37,14 +44,16 @@ func newSignUiForTest(t *testing.T, seed []byte) (*snSignUi, *consentServer, *ht
 		t.Fatal(err)
 	}
 	ui := &snSignUi{
-		ctx: ctx, api: api, apiUrl: platform.URL, coldkey: address, journalPath: path,
+		ctx: ctx, api: api, apiUrl: platform.URL, journalPath: path,
 		token: "test-token", deadline: time.Now().Add(snSignPageLifetime), want: fake.want, done: make(chan struct{}),
 	}
-	ui.mutex.Lock()
-	if err := ui.newMessageWithLock(); err != nil {
-		t.Fatal(err)
+	if bind {
+		ui.mutex.Lock()
+		if err := ui.bindWithLock(address); err != nil {
+			t.Fatal(err)
+		}
+		ui.mutex.Unlock()
 	}
-	ui.mutex.Unlock()
 	page := httptest.NewServer(ui.handler())
 	t.Cleanup(page.Close)
 	return ui, fake, page, address
@@ -207,11 +216,70 @@ func TestSignPagePreview(t *testing.T) {
 	if port == "" {
 		t.Skip("set URNETWORK_SIGN_PREVIEW=<port> to serve the page for 10 minutes")
 	}
-	ui, _, _, _ := newSignUiForTest(t, walletTestSeed(0x11))
+	ui, _, _, _ := newSignUiWithBinding(t, walletTestSeed(0x11), os.Getenv("URNETWORK_SIGN_PREVIEW_UNBOUND") == "")
 	ui.token = "preview"
+	ui.preview = true
 	server := &http.Server{Addr: "127.0.0.1:" + port, Handler: ui.handler()}
 	go func() { _ = server.ListenAndServe() }()
 	defer server.Close()
 	t.Logf("preview at http://127.0.0.1:%s/ (session token: preview)", port)
 	time.Sleep(10 * time.Minute)
+}
+
+func TestSignPageExtendResetsThePageTimerWithinLimits(t *testing.T) {
+	ui, _, page, _ := newSignUiForTest(t, walletTestSeed(0x11))
+	ui.mutex.Lock()
+	ui.deadline = time.Now().Add(30 * time.Second)
+	ui.mutex.Unlock()
+	for i := 0; i < snSignMaxExtensions; i++ {
+		status, out := signUiPost(t, page.URL, "/extend", "test-token", "", nil)
+		if status != http.StatusOK {
+			t.Fatalf("extension %d answered %d", i+1, status)
+		}
+		if left := time.Until(time.Unix(int64(out["pageDeadline"].(float64)), 0)); left < snSignPageLifetime-5*time.Second {
+			t.Fatalf("the page timer was reset to only %s", left)
+		}
+	}
+	if status, _ := signUiPost(t, page.URL, "/extend", "test-token", "", nil); status != http.StatusTooManyRequests {
+		t.Fatalf("an extension beyond the limit answered %d", status)
+	}
+}
+
+// Without an address on the command line the account is chosen on the page from
+// the wallet extension's accounts, and everything waits for that choice.
+func TestSignPageChoosesTheAccountOnThePage(t *testing.T) {
+	seed := walletTestSeed(0x11)
+	ui, fake, page, address := newSignUiWithBinding(t, seed, false)
+	if status, _ := signUiPost(t, page.URL, "/refresh", "test-token", "", nil); status != http.StatusConflict {
+		t.Fatalf("a refresh before an account was chosen answered %d", status)
+	}
+	if status, _ := signUiPost(t, page.URL, "/signature", "test-token", "", map[string]string{"signature": "0x" + strings.Repeat("ab", 64)}); status != http.StatusConflict {
+		t.Fatalf("a signature before an account was chosen answered %d", status)
+	}
+	if status, _ := signUiPost(t, page.URL, "/select", "test-token", "", map[string]string{"address": "not-an-address"}); status != http.StatusBadRequest {
+		t.Fatalf("a malformed address answered %d", status)
+	}
+	if fake.challenges != 0 {
+		t.Fatal("a statement was requested before a valid account was chosen")
+	}
+	status, out := signUiPost(t, page.URL, "/select", "test-token", "", map[string]string{"address": address})
+	if status != http.StatusOK || out["address"] != address {
+		t.Fatalf("the account was not accepted: %d %v", status, out)
+	}
+	if fake.challenges != 1 || ui.coldkey != address {
+		t.Fatal("choosing the account did not request its statement")
+	}
+	// another account cannot be chosen afterwards in the same run
+	other := walletTestAddress(t, walletTestSeed(0x55))
+	if status, _ := signUiPost(t, page.URL, "/select", "test-token", "", map[string]string{"address": other}); status != http.StatusConflict {
+		t.Fatalf("a second account answered %d", status)
+	}
+	// and the chosen account can now sign
+	signature, err := snSignWalletChallenge(walletTestKeypair(t, seed), ui.message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, out := signUiPost(t, page.URL, "/signature", "test-token", "", map[string]string{"signature": signature}); status != http.StatusOK || out["ok"] != true {
+		t.Fatalf("the chosen account could not sign: %d %v", status, out)
+	}
 }

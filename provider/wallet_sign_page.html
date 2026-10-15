@@ -29,7 +29,7 @@ h1 { font-size: 1.35rem; color: var(--white); margin: 0 0 .5rem; font-weight: no
 }
 .label { font-size: .65rem; text-transform: uppercase; letter-spacing: .08em; opacity: .8; margin-bottom: .15rem; }
 .mono { font-family: 'PP Neue Bit', 'PPNeueBit', ui-monospace, 'Cascadia Mono', Menlo, monospace; }
-.value { color: var(--white); font-size: 1.05rem; word-break: break-all; }
+.value { color: var(--white); font-size: 1.05rem; overflow-wrap: anywhere; }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 @media (max-width: 34rem) { .grid { grid-template-columns: 1fr; } }
 ol { margin: .4rem 0 0 1.1rem; padding: 0; } li { margin: .25rem 0; }
@@ -52,6 +52,9 @@ pre {
 }
 details summary { cursor: pointer; color: var(--ur); }
 .done { border-color: var(--ok); box-shadow: 0 0 30px rgba(135,251,103,.12); }
+.warnbox { border-color: var(--ur); }
+.pick { margin: .6rem 0 0; }
+.pick select { font: inherit; background: #181818; color: var(--white); border: 1px solid var(--ui); padding: .5rem; max-width: 100%; }
 .foot { margin-top: 2rem; font-size: .6rem; text-align: center; opacity: .6; letter-spacing: .05em; }
 code { font-family: 'PP Neue Bit', ui-monospace, monospace; color: var(--white); }
 </style>
@@ -65,6 +68,11 @@ code { font-family: 'PP Neue Bit', ui-monospace, monospace; color: var(--white);
 
   <h1>Approve where your earnings are paid</h1>
   <p>Your wallet extension signs one statement that says the earnings of every provider client of your network are paid to your wallet. Your seed phrase stays inside the extension and never touches this page.</p>
+
+  <div class="card warnbox" id="previewBanner" hidden>
+    <div class="label">Example data</div>
+    <div>This is a preview with made-up data. The wallet and epochs below are not real and nothing here can be signed.</div>
+  </div>
 
   <div class="card">
     <div class="grid">
@@ -84,15 +92,27 @@ code { font-family: 'PP Neue Bit', ui-monospace, monospace; color: var(--white);
 
   <div class="card">
     <div class="timer">
-      <div><div class="label">This message expires in</div><div class="value mono" id="msgLeft">-</div></div>
+      <div><div class="label">This message expires in (New message restarts it)</div><div class="value mono" id="msgLeft">-</div></div>
       <div><div class="label">This page closes in</div><div class="value mono" id="pageLeft">-</div></div>
     </div>
+  </div>
+
+  <div class="card" id="walletPick" hidden>
+    <div class="label">More than one wallet extension was found. Choose yours</div>
+    <div class="pick"><select id="wallets"></select></div>
+  </div>
+
+  <div class="card" id="picker" hidden>
+    <div class="label">Choose the account that receives the earnings</div>
+    <div class="pick"><select id="accounts"></select>
+    <button id="use" style="margin-left:.5rem">Use this account</button></div>
   </div>
 
   <div>
     <button id="connect">1. Connect wallet</button>
     <button id="sign" disabled>2. Sign</button>
     <button id="refresh" class="secondary">New message</button>
+    <button id="extend" class="secondary">Add 10 minutes to the page</button>
   </div>
   <div class="status" id="status"></div>
 
@@ -110,25 +130,28 @@ code { font-family: 'PP Neue Bit', ui-monospace, monospace; color: var(--white);
 <script>
 const boot = JSON.parse(document.getElementById('boot').textContent);
 let st = { message: boot.message, hex: boot.hex, expiresAt: boot.expiresAt, from: boot.from, through: boot.through };
-let ext = null, account = null, finished = false;
+let ext = null, account = null, finished = false, all = [];
 const $ = (id) => document.getElementById(id);
 const say = (text, cls) => { const s = $('status'); s.textContent = text; s.className = 'status ' + (cls || ''); };
 const fmt = (n) => Math.floor(n / 60) + ':' + String(n % 60).padStart(2, '0');
 function show() {
-  $('addr').textContent = boot.address;
-  $('epochs').textContent = st.from + ' through ' + st.through;
-  $('msg').textContent = st.message;
+  $('addr').textContent = boot.address || 'Not chosen yet. Connect your wallet and pick the account.';
+  $('addr').className = 'value' + (boot.address ? ' mono' : ' warn');
+  $('epochs').textContent = boot.address ? (st.from + ' through ' + st.through) : '-';
+  $('msg').textContent = boot.address ? st.message : '(the message appears after you choose your account)';
 }
+if (boot.preview) $('previewBanner').hidden = false;
+if (boot.extensionsLeft === 0) $('extend').disabled = true;
 show();
 setInterval(() => {
   const now = Date.now() / 1000;
   const msgLeft = Math.max(0, Math.round(st.expiresAt - now));
   const pageLeft = Math.max(0, Math.round(boot.pageDeadline - now));
-  $('msgLeft').textContent = fmt(msgLeft);
+  if (boot.address) { $('msgLeft').textContent = fmt(msgLeft); $('msgLeft').className = 'value mono ' + (msgLeft < 60 ? 'bad' : ''); }
   $('pageLeft').textContent = fmt(pageLeft);
-  $('msgLeft').className = 'value mono ' + (msgLeft < 60 ? 'bad' : '');
-  if (!finished && msgLeft === 0) { $('sign').disabled = true; say('This message expired. Click New message.', 'warn'); }
-  if (!finished && pageLeft === 0) { $('sign').disabled = true; $('connect').disabled = true; $('refresh').disabled = true; say('This page has stopped. Run the command again to start a new one.', 'bad'); }
+  if (!boot.address) { $('msgLeft').textContent = '-'; $('msgLeft').className = 'value mono'; }
+  if (boot.address && !finished && msgLeft === 0) { $('sign').disabled = true; say('This message expired. Click New message.', 'warn'); }
+  if (!finished && pageLeft === 0) { $('sign').disabled = true; $('connect').disabled = true; $('refresh').disabled = true; $('extend').disabled = true; say('This page has stopped. Run the command again to start a new one.', 'bad'); }
 }, 500);
 
 async function post(path, body) {
@@ -142,10 +165,33 @@ async function post(path, body) {
 $('connect').onclick = async () => {
   try {
     const inj = window.injectedWeb3 || {};
-    const provider = inj.talisman || inj['polkadot-js'] || inj.subwallet || Object.values(inj)[0];
-    if (!provider) { say('No wallet extension found. Open this page in the browser that has your wallet and allow the extension on this site.', 'bad'); return; }
+    const keys = Object.keys(inj);
+    if (keys.length === 0) { say('No wallet extension found. Open this page in the browser that has your wallet (Talisman, SubWallet, Polkadot{.js}, Nova, or another Polkadot-compatible extension) and allow it on this site.', 'bad'); return; }
+    const names = { 'talisman': 'Talisman', 'polkadot-js': 'Polkadot{.js}', 'subwallet-js': 'SubWallet', 'nova': 'Nova', 'fearless-wallet': 'Fearless', 'enkrypt': 'Enkrypt', 'mimir': 'Mimir' };
+    let key = null;
+    if (!$('walletPick').hidden) key = $('wallets').value;
+    else if (keys.length === 1) key = keys[0];
+    else {
+      const sel = $('wallets'); sel.innerHTML = '';
+      keys.forEach(k => { const o = document.createElement('option'); o.value = k; o.textContent = names[k] || k; sel.appendChild(o); });
+      $('walletPick').hidden = false;
+      say('Choose your wallet extension in the box above, then click Connect wallet again.', 'ok');
+      return;
+    }
+    const provider = inj[key];
     ext = await provider.enable('URnetwork wallet consent');
-    const accounts = await ext.accounts.get();
+    let accounts = await ext.accounts.get();
+    // Bittensor coldkeys are substrate accounts; skip Ethereum-type accounts
+    accounts = accounts.filter(a => a.type !== 'ethereum');
+    if (!boot.address) {
+      if (accounts.length === 0) { say('Your wallet extension shows no Substrate accounts. Enable one for sites in the extension.', 'bad'); return; }
+      const sel = $('accounts'); sel.innerHTML = '';
+      accounts.forEach(a => { const o = document.createElement('option'); o.value = a.address; o.textContent = (a.name ? a.name + '  ' : '') + a.address; sel.appendChild(o); });
+      all = accounts;
+      $('picker').hidden = false;
+      say('Connected. Choose the account that should receive the earnings, then click Use this account.', 'ok');
+      return;
+    }
     account = accounts.find(a => a.address === boot.address);
     if (!account) {
       say('Your wallet extension does not list ' + boot.address + '. It lists: ' + accounts.map(a => a.address).join(', ') + '. Enable this account for sites in the extension.', 'bad');
@@ -154,6 +200,21 @@ $('connect').onclick = async () => {
     say('Connected to ' + (account.name || 'your account') + '. Now click Sign.', 'ok');
     $('sign').disabled = false;
   } catch (e) { say('Connect failed: ' + e.message, 'bad'); }
+};
+
+$('use').onclick = async () => {
+  try {
+    const address = $('accounts').value;
+    const res = await post('/select', { address });
+    boot.address = res.address;
+    if (res.already) { finished = true; say(res.already, 'ok'); $('picker').hidden = true; return; }
+    st = res.state;
+    account = all.find(a => a.address === res.address);
+    $('picker').hidden = true;
+    show();
+    say('Account chosen. Check the message, then click Sign.', 'ok');
+    $('sign').disabled = false;
+  } catch (e) { say('Could not use that account: ' + e.message, 'bad'); }
 };
 
 $('sign').onclick = async () => {
@@ -174,23 +235,33 @@ $('sign').onclick = async () => {
     r.textContent = 'receipt ' + res.receipt;
     box.append(t, v, r);
     say('Done. You can close this tab. Check any time with: provider wallet status', 'ok');
-    $('connect').disabled = true; $('refresh').disabled = true;
+    $('connect').disabled = true; $('refresh').disabled = true; $('extend').disabled = true;
   } catch (e) {
     say('Not stored: ' + e.message, 'bad');
     $('sign').disabled = false;
   }
 };
 
+$('extend').onclick = async () => {
+  try {
+    const res = await post('/extend');
+    boot.pageDeadline = res.pageDeadline;
+    boot.extensionsLeft = res.extensionsLeft;
+    say('The page timer was reset to 10 minutes.' + (res.extensionsLeft === 0 ? ' It cannot be extended again.' : ''), 'ok');
+    if (res.extensionsLeft === 0) $('extend').disabled = true;
+    $('connect').disabled = false; $('refresh').disabled = false;
+  } catch (e) { say('Could not extend: ' + e.message, 'bad'); }
+};
 $('refresh').onclick = async () => {
   try {
     const res = await post('/refresh');
     st = { message: res.message, hex: res.hex, expiresAt: res.expiresAt, from: res.from, through: res.through };
     show();
-    say('New message ready.' + (account ? ' Click Sign.' : ' Connect your wallet first.'), 'ok');
+    say('New message ready. The 5 minute timer restarted.' + (account ? ' Click Sign.' : ' Connect your wallet first.'), 'ok');
     if (account) $('sign').disabled = false;
   } catch (e) { say('Could not get a new message: ' + e.message, 'bad'); }
 };
-if (boot.expiresAt - Date.now() / 1000 < 30) say('This message is about to expire. Click New message.', 'warn');
+if (boot.address && boot.expiresAt - Date.now() / 1000 < 30) say('This message is about to expire. Click New message.', 'warn');
 </script>
 </body>
 </html>

@@ -252,6 +252,7 @@ func (self *consentServer) handler() http.Handler {
 			// like the server, issue exactly the interval asked for
 			asked := self.want
 			asked.FromEpoch, asked.ThroughEpoch = args.FromEpoch, args.ThroughEpoch
+			asked.Now = time.Now() // the server stamps each statement when it issues it
 			message := consentTestMessage(self.t, asked, nil)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"message": message})
 		case "/sn/wallet":

@@ -7287,7 +7287,7 @@ Usage:
     provider wallet status
         [--api_url=<api_url>]
         [-v...]
-    provider wallet sign <coldkey_ss58>
+    provider wallet sign [<coldkey_ss58>]
         [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>]
         [--port=<port>] [--no-open]
         [--api_url=<api_url>]
