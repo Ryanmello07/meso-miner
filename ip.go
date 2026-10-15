@@ -4132,8 +4132,9 @@ func ParseIpPathWithPayload(ipPacket []byte) (*IpPath, []byte, error) {
 				Ack:             tcpPacket.ack,
 			}, tcpPacket.payload, nil
 		default:
-			// no support for this protocol
-			return nil, nil, fmt.Errorf("No support for protocol %d", ipProtocol4)
+			// icmp and the unsupported protocols are parsed out of line so
+			// the hot tcp/udp dispatch is unchanged by icmp support
+			return parseIcmpIpPath(4, ipProtocol4, sourceIpCopy, destinationIpCopy, transport)
 		}
 	case 6:
 		ipProtocol6, sourceIp6, destinationIp6, transport, ok := parseIpv6(ipPacket)
@@ -4184,13 +4185,57 @@ func ParseIpPathWithPayload(ipPacket []byte) (*IpPath, []byte, error) {
 				Ack:             tcpPacket.ack,
 			}, tcpPacket.payload, nil
 		default:
-			// no support for this protocol
-			return nil, nil, fmt.Errorf("No support for protocol %d", ipProtocol6)
+			// icmp and the unsupported protocols are parsed out of line (see
+			// the v4 branch)
+			return parseIcmpIpPath(6, ipProtocol6, sourceIpCopy, destinationIpCopy, transport)
 		}
 	default:
 		// no support for this version
 		return nil, nil, fmt.Errorf("No support for ip version %d", ipVersion)
 	}
+}
+
+// parseIcmpIpPath is the cold tail of ParseIpPathWithPayload: the icmp echo
+// view, or the unsupported-protocol error. Split out so the hot tcp/udp
+// dispatch is unchanged by icmp support (the upstream connect b31ec82df
+// shape). Only echo request/reply parse (parseIcmpPacket); every other icmp
+// type fails here, which is what lets an unreachable reach the dial-failure
+// intercept instead. The acceptance is gated: the operator kill switch and
+// the platform self-disable both restore the historical drop exactly.
+//
+//go:noinline
+func parseIcmpIpPath(ipVersion int, ipProtocol IPProtocol, sourceIp net.IP, destinationIp net.IP, transport []byte) (*IpPath, []byte, error) {
+	switch ipProtocol {
+	case ipProtocolNumberIcmp4, ipProtocolNumberIcmp6:
+	default:
+		return nil, nil, fmt.Errorf("No support for protocol %d", ipProtocol)
+	}
+	if (ipProtocol == ipProtocolNumberIcmp4) != (ipVersion == 4) {
+		// the icmp variant must match the ip version
+		return nil, nil, fmt.Errorf("No support for protocol %d", ipProtocol)
+	}
+	if !icmpEchoParsingEnabled() {
+		return nil, nil, fmt.Errorf("No support for protocol %d", ipProtocol)
+	}
+	var icmp parsedIcmp
+	if !parseIcmpPacket(ipVersion, sourceIp, destinationIp, transport, &icmp) {
+		return nil, nil, fmt.Errorf("Unsupported or malformed icmp packet.")
+	}
+	// the echo identifier stands in for the client-side port: the source for
+	// a request, the destination for a reply, so Reverse aligns the two
+	// directions (see ICMP.md)
+	ipPath := &IpPath{
+		Version:       ipVersion,
+		Protocol:      IpProtocolIcmp,
+		SourceIp:      sourceIp,
+		DestinationIp: destinationIp,
+	}
+	if icmp.echoRequest {
+		ipPath.SourcePort = int(icmp.identifier)
+	} else {
+		ipPath.DestinationPort = int(icmp.identifier)
+	}
+	return ipPath, icmp.payload, nil
 }
 
 // func (self *IpPath) Copy() *IpPath {

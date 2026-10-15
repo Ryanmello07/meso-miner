@@ -86,7 +86,9 @@ type icmpEchoReply struct {
 	dataSize      uint16
 	reserved      uint16
 	// points into the reply buffer after IcmpParseReplies
-	data    uintptr
+	// fork: unsafe.Pointer rather than the verbatim uintptr, so go vet's
+	// unsafeptr check passes on windows (the layout is identical)
+	data    unsafe.Pointer
 	options icmpIpOptionInformation
 }
 
@@ -291,11 +293,11 @@ func (self *icmpEngine) completeApc(key uintptr, ioStatusBlock uintptr, reserved
 		if !net.IP(replyAddr[:]).Equal(flow.destinationIp) {
 			return 0
 		}
-		if reply.data == 0 || reply.dataSize == 0 {
+		if reply.data == nil || reply.dataSize == 0 {
 			flow.deliver(tx.sequenceNumber, nil)
 			return 0
 		}
-		payload := unsafe.Slice((*byte)(unsafe.Pointer(reply.data)), int(reply.dataSize))
+		payload := unsafe.Slice((*byte)(reply.data), int(reply.dataSize))
 		flow.deliver(tx.sequenceNumber, payload)
 	} else {
 		r1, _, _ := icmpProcIcmp6ParseReplies.Call(

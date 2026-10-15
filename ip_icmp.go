@@ -549,6 +549,11 @@ func (self *IcmpSequence) Run() {
 	self.log.V(2).Infof("[init]icmp connect\n")
 	egress, err := newIcmpEgress(self.ctx, self.ipVersion, self.destinationIp, self.icmpBufferSettings)
 	if err != nil {
+		// fork: a platform that cannot open unprivileged icmp sockets
+		// self-disables the feature with ONE logged line; the parse gate
+		// then rejects icmp exactly as before the feature existed, so no
+		// further flows reach this path
+		icmpEgressRefused(self.log, err)
 		// fail soft: the platform cannot open an unprivileged echo socket,
 		// so the flow drops exactly as before icmp support
 		if self.log.V(1).Enabled() {
