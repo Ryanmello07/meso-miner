@@ -608,3 +608,55 @@ func TestFamilyGroupStartsInTheChosenStack(t *testing.T) {
 		cancel()
 	}
 }
+
+// The group's standby and pinned-down stretches feed process-wide counters. A
+// stack set while the standby is active, and a group close, must end those
+// stretches; otherwise the active seconds grow for the life of the process and
+// dashboards read a permanent outage.
+func TestFamilyGroupStackSwitchEndsTheStandbyStretch(t *testing.T) {
+	platform := newFamilyTestPlatform(t, "tcp4", "127.0.0.1:0")
+	if platform == nil {
+		t.Skip("needs IPv4 loopback")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	clientStrategySettings := connect.DefaultClientStrategySettings()
+	clientStrategy := connect.NewClientStrategy(ctx, clientStrategySettings)
+	defer clientStrategy.Close()
+
+	settings := connect.DefaultPlatformTransportSettings()
+	settings.PinnedReconnectMaxTimeout = 200 * time.Millisecond
+	settings.EnableH3 = false
+	groupSettings := connect.DefaultFamilyPlatformTransportGroupSettings()
+	groupSettings.StandbyDelay = 200 * time.Millisecond
+	// both pins point at a closed port, so the standby (the live platform)
+	// takes over after the delay
+	dead := "ws://127.0.0.1:1"
+	group := newProviderFamilyGroup(
+		ctx, clientStrategySettings, clientStrategy, connect.NewRouteManager(ctx, "test-standby-stretch"),
+		platform.url(), dead, dead,
+		&connect.ClientAuth{ByJwt: "testing", InstanceId: connect.NewId(), AppVersion: "testing"},
+		settings, groupSettings,
+	)
+	if !familyTestWait(15*time.Second, func() bool { return group.Status().StandbyActive }) {
+		group.Close()
+		t.Fatalf("the standby never started: %+v", group.Status())
+	}
+	group.SetStack(connect.FamilyStackIpv4)
+	if !familyTestWait(15*time.Second, func() bool { return !group.Status().StandbyActive }) {
+		group.Close()
+		t.Fatalf("the standby never stood down: %+v", group.Status())
+	}
+	time.Sleep(300 * time.Millisecond)
+	before := connect.FamilyTransportStatsNow().Group.StandbyActiveSeconds
+	time.Sleep(1200 * time.Millisecond)
+	after := connect.FamilyTransportStatsNow().Group.StandbyActiveSeconds
+	if 0.5 < after-before {
+		group.Close()
+		t.Fatalf("the standby active seconds still grow after the stack fixed the standby off (%.2f -> %.2f)", before, after)
+	}
+	group.Close()
+	if connect.FamilyTransportStatsNow().Group.PinnedDown {
+		t.Fatal("a closed group left the pinned-down stretch open")
+	}
+}

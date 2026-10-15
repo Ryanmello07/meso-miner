@@ -1467,6 +1467,10 @@ func (self *FamilyPlatformTransportGroup) ClientLimitBackoff() *ClientLimitBacko
 // Close stops every transport and the owned strategies. Nonblocking.
 func (self *FamilyPlatformTransportGroup) Close() {
 	self.cancel()
+	// the group's open standby and pinned-down stretches end with it; the
+	// stats are process-wide and the next group starts from a clean slate
+	familyGroupStandbyChanged(self.log, false, "the group closed")
+	familyGroupPinnedReset()
 	for _, transport := range self.Transports() {
 		transport.Close()
 	}
@@ -2074,5 +2078,8 @@ func (self *FamilyPlatformTransportGroup) applyStackStandbyWithLock() {
 	if self.standbyActive {
 		self.standbyTransport.SetEnabled(false)
 		self.standbyActive = false
+		// close the open standby stretch in the process-wide stats, or the
+		// active seconds grow for the life of the process
+		familyGroupStandbyChanged(self.log, false, "the operator fixed the stack")
 	}
 }
