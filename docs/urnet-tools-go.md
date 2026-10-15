@@ -44,7 +44,7 @@ Both are cross-compiled from one Go source — the shell↔PowerShell drift is g
 | `auth <code> [target] [-f]` | Authenticate provider with an auth code. `-f` forces overwrite of existing JWT. Drops privileges to run as target user when called by root. |
 | `direct [on\|off\|status] [target]` | Toggle or report direct/local IP providing state. Taking effect immediately via reload. Available across `provider`, `urnet-tools`, and `urnet-docker`. |
 | `show-ip [on\|off\|status] [target]` | Control whether the provider appends its public IP to the dashboard label set by `rename`. Renamed from `ip-detect` in v3.23.0-fix.31.0, which is kept as an alias. This is about what the dashboard shows, not which address the provider serves on; for that see `direct`. |
-| `sn-status [--json] [target]` | Query and display Subnet 25 mining & node telemetry (v3.23.0-fix.30.9+): global rank, top-200 tier eligibility, net bandwidth provided, registered coldkey (SS58/Hex), current subnet epoch blocks, and finalized epoch pool payout share. Available across `urnet-tools`, `urnet-docker`, and `provider`. |
+| `sn-status [--json] [target]` | Query and display Subnet 25 mining & node telemetry (v3.23.0-fix.30.9+): global rank, top-200 tier eligibility, net bandwidth provided, registered coldkey (SS58/Hex), the network wallet consent (apart from any legacy login-proof wallet; with none it says to sign one with `urnet-tools wallet sign`), current subnet epoch blocks, and finalized epoch pool payout share. Available across `urnet-tools`, `urnet-docker`, and `provider`. |
 | `usage [graphs\|graph <view>] [target]` | Display traffic & billing accounting: billable relay bytes vs control-plane protocol overhead, with rolling time-series summaries. Available across `urnet-tools` and `urnet-docker`. |
 | `choose-network <api> <connect> [target]` | Point provider to custom API and WebSocket signaling endpoints. Use `--reset` to restore default bringyour endpoints. |
 | `fast-auth [on\|off\|status] [target]` | Toggle or check `~/.urnetwork/fast_auth` marker to bypass auth rate limiter. Confirm-gated. |
@@ -58,6 +58,19 @@ Both are cross-compiled from one Go source — the shell↔PowerShell drift is g
 #### OpenRC (Alpine) command parity
 
 On a host where OpenRC is the running init system, the lifecycle commands (`start`, `stop`, `restart`, `auto-start`, `auto-update`, `logs`, `status`, `uninstall`) act on the installer's `urnetwork` service. The command table, the multi-provider selector rules and the root requirement are on the [Alpine Linux (OpenRC)](OpenRC.md#urnet-tools-command-parity) page.
+
+### Wallet Consent Commands
+
+The network wallet consent is one signature from your coldkey that covers every provider client of your network, current and future. Release settlement pays only a consented wallet. The group delegates to the provider binary's own `wallet` subcommands, like `auth` and `choose-network`.
+
+| Command | What it does |
+|---|---|
+| `wallet status [target]` | Show the stored network consent: the consent coldkey, its epoch interval, and whether it is in effect now, still starts in an epoch, or ended. A legacy login-proof wallet (if any) is listed apart: it is not a consent and settlement does not pay it. Read-only. |
+| `wallet challenge <coldkey_ss58> [--wallet-from-epoch N --wallet-through-epoch N] [target]` | Fetch a fresh, verified consent statement to sign. Signs nothing; prints the exact message and the epoch interval it covers. |
+| `wallet set <coldkey_ss58> [--message=<text> --signature=0x<hex> \| --coldkey_seed_file=<path>] [target]` | Submit a signed consent. The `--coldkey_seed_file` form reads a seed from disk and is **for the operator's own workstation only, never a fleet node**: on a fleet member the tool refuses unless you pass `--i-am-on-my-own-workstation`. Use `wallet sign` instead when you can. |
+| `wallet sign <coldkey_ss58> [target]` | Run the browser signing helper (`scripts/wallet-consent/run_signing.sh`): one local page where a wallet extension (Talisman, or any Polkadot `signRaw` extension) signs the statement; the seed never leaves the extension. Refused on a fleet node unless `--i-am-on-my-own-workstation`. See [scripts/wallet-consent/README.md](../scripts/wallet-consent/README.md). |
+
+A later consent must start at a later epoch than the one before it. Use `--wallet-from-epoch`/`--wallet-through-epoch` with `wallet challenge` and `wallet set` for an explicit interval; the default is the next epoch through the full 65,536-epoch span.
 
 ### Proxy Management Commands
 
@@ -78,24 +91,10 @@ On a host where OpenRC is the running init system, the lifecycle commands (`star
 | `proxy remove-dead [target]` | Interactively prune dead and degraded proxies. Honors `--dry-run`. |
 | `summary [target]` | Fleet-style summary of proxy counts by source (url, file, internal). Top-level command, not a `proxy` subcommand. |
 
-### Hub Command Family (v3.23.0-fix.30.4+)
+### Hub Command Family (removed)
 
 > [!WARNING]
-> **Deprecated (v31.3+):** The hub commands have been removed from `urnet-tools`. This section is retained for historical reference only.
-
-| Command | What it does |
-|---|---|
-| `hub init` | Initialize and configure the bandwidth hub service on this machine. Prompts for password (min 8 chars) or reads from stdin. |
-| `hub link <url>` | Pair provider with a remote bandwidth hub. Verifies TLS CA or SHA-256 certificate fingerprint (TOFU security). Confirm-gated on identity change. |
-| `hub unlink` | Unlink provider from bandwidth hub. |
-| `hub test` | Test reachability and TLS certificate chain validation to the configured hub. |
-| `hub onboard-cmd` | Generate one-line onboarding command with URL-escaped tokens for remote providers. |
-| `hub show-password` | Display current hub admin access password. |
-| `hub open-port` | Configure firewall rules (ufw/iptables/firewalld) to open hub listener port. Confirm-gated. |
-| `hub update` | Update bandwidth hub binary to latest release. |
-| `hub set <url>` | Set raw reporting endpoint URL in `~/.urnetwork/report_url`. |
-| `hub off` | Disable hub reporting by clearing `report_url`. |
-| `hub install` | Install bandwidth hub binary and systemd service. |
+> **Removed (v31.3+):** The hub service, its dashboard and the whole `hub` command family were removed from `urnet-tools`. Nothing in the tool depends on them. What remains is per-provider bandwidth reporting: `urnet-tools report <url>` (or `set report-url <url>`) points one provider's bandwidth reporter at your own collector, and `report off` disables it. See "Configuration & Introspection" below.
 
 ### System & Performance Tuning
 
@@ -115,6 +114,7 @@ On a host where OpenRC is the running init system, the lifecycle commands (`star
 | `baseline show [-n N] [--json]` | **(New in 32.8)** Show the newest rows of this box's own behaviour record: UTC time, kind, version, proxies up against desired, RSS, host memory available, swap, and the file's first and last timestamps and size. Default 20 rows, at most 200. Reads `~/.urnetwork/baseline.jsonl` directly, so it works on a box whose provider is stopped. |
 | `baseline mark <label>` | **(New in 32.8)** Annotate the timeline, for example just before an upgrade. Goes through the control socket, so the provider stays the only writer to the file. Prints the timestamp recorded. A label is required: an unlabelled mark is a boundary `compare` cannot use. Works while the recorder is off, and never deletes the file. |
 | `baseline compare [--from A] [--to B] [--skip-ramp 20m] [--json]` | **(New in 32.8)** Compare the box's behaviour across an upgrade. With no arguments it splits at the most recent start whose version differs from the previous one. `A` and `B` are a mark label, a timestamp prefix, or (for `A`) the default. See the rules below, because they decide what the numbers mean. |
+| `enforcement [summary\|history [N]]` | Show the durable record of what the governors enforced: releases of silent clients, connect budget cuts, attempt caps, memory holds and crash-loop starts. `summary` (the default) counts events per kind and mode for today, the last 7 and 30 UTC days, and since the log began; `history [N]` lists the newest events (default 20, at most 500). Mode `shadow` means the governor only noted what it would have done. The files live in the provider's state dir and survive restarts and reboots. |
 
 #### What `baseline compare` actually computes
 

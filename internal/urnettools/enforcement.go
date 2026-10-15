@@ -51,6 +51,7 @@ func newEnforcementCmd() *cobra.Command {
 			"`history [N]` lists the newest N events (default 20, at most 500), newest last. " +
 			"Mode 'shadow' means the governor only noted what it would have done. " +
 			"The files live in the provider's state dir and survive restarts and reboots.",
+		Example:            "  urnet-tools enforcement summary\n  urnet-tools enforcement history 50",
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if hasHelpFlag(args) {
