@@ -6151,14 +6151,16 @@ type receiveItem struct {
 	transferItem
 
 	contractId         *Id
-	head               bool
 	receiveTime        time.Time
 	frames             []*protocol.Frame
 	contractFrame      *protocol.Frame
 	receiveCallback    ReceiveFunction
-	ack                bool
 	tag                *protocol.Tag
 	transferFrameBytes []byte
+	// Flags are kept together at the end to avoid per-field padding
+	// (ported from upstream 54c66fa70).
+	head bool
+	ack  bool
 	// unwrapped is true when the originating TransferFrame arrived on
 	// the wire as plaintext (no outer encrypted wrap). Propagated into
 	// the sequenceAck so the ack format mirrors the incoming pack.
