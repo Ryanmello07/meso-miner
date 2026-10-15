@@ -55,9 +55,10 @@ echo "== root package in a network namespace that refuses ICMP sockets (-short -
 if command -v unshare >/dev/null 2>&1 && unshare -Urn true 2>/dev/null; then
   testbin=$(mktemp /tmp/connect-ci-like.XXXXXX)
   go test -c -race -o "$testbin" .
-  # TestFamilySupportedOnThisHost needs a usable IPv6 stack, which the
-  # namespace does not have either; it skips itself on a runner.
-  unshare -Urn sh -c "ip link set lo up 2>/dev/null; \"$testbin\" -test.short -test.timeout=600s -test.skip=TestFamilySupportedOnThisHost"
+  # Only the ICMP and packet-parsing tests run here: the namespace has a
+  # loopback and nothing else, which is what exposes ICMP state leaks but also
+  # breaks tests that need a real network (the family and H3 tests).
+  unshare -Urn sh -c "ip link set lo up 2>/dev/null; \"$testbin\" -test.short -test.timeout=600s -test.run \"Icmp|ParseIpPath|Ipv6|Smtp|Fragment|Packet|Flow|Dial|Parse\""
   rm -f "$testbin"
 else
   echo "  unshare -Urn is not available here: skipping the ICMP-refused run (run it where it is)"
