@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"syscall"
 	"time"
 )
 
@@ -65,9 +64,9 @@ const (
 // EMFILE/ENFILE, EADDRNOTAVAIL, unrecognized) is capacity-class and gets an
 // unreachable; defaulting unrecognized errors to the capacity class is
 // deliberate -- new clients intercept the signal and old ones drop it at
-// ParseIpPath, so a misclassification is cheap. errors.Is folds the Windows
-// WSAECONNREFUSED onto syscall.ECONNREFUSED, but the providers this runs on
-// are almost all linux, so linux errno semantics are what matter. udp "dial"
+// ParseIpPath, so a misclassification is cheap. Go does not fold the Windows
+// winsock codes onto syscall.ECONNREFUSED/ETIMEDOUT, so isDialRefused and
+// isDialKernelTimeout add the native codes (ip_dial_errno_windows.go). udp "dial"
 // cannot produce a meaningful ECONNREFUSED at connect time, so udp is always
 // capacity-class.
 func classifyDialFailure(ipPath *IpPath, err error, dialDuration time.Duration) (dialFailureAction, []byte) {
@@ -76,7 +75,7 @@ func classifyDialFailure(ipPath *IpPath, err error, dialDuration time.Duration) 
 	}
 	switch ipPath.Protocol {
 	case IpProtocolTcp:
-		if errors.Is(err, syscall.ECONNREFUSED) {
+		if isDialRefused(err) {
 			return dialFailureRst, nil
 		}
 		// otherwise fall through to the unreachable build below
@@ -106,5 +105,5 @@ const dialFailureSignalHorizon = inferredDialFailureTimeout
 func isDialTimeout(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, os.ErrDeadlineExceeded) ||
-		errors.Is(err, syscall.ETIMEDOUT)
+		isDialKernelTimeout(err)
 }
