@@ -236,16 +236,17 @@ func newProviderPlatformTransport(
 		legacy = connect.NewPlatformTransport(ctx, clientStrategy, routeManager, connectUrl, auth, settings)
 		return legacy, legacy, nil
 	}
-	// The default budget admits one carrier of each kind. The group runs three
-	// transports, and at Background priority the two pins are the ones refused
-	// when the budget is full, so with the default they never dial H3 and sit on
-	// H1 without any signal. Size the budget for three. It is admission
-	// accounting, not an allocation.
-	settings.PlatformTransportBudget = familyGroupBudget()
+	// The default budget admits one carrier of each kind, and the group's
+	// carrier mix differs by stack: dual runs both pins and the standby, a
+	// fixed stack runs the one transport it uses. Size the budget for the
+	// launch stack's transport count. It is admission accounting, not an
+	// allocation.
+	stack := initialFamilyStack()
+	settings.PlatformTransportBudget = familyGroupBudgetForStack(stack)
 	group = newProviderFamilyGroup(
 		ctx, clientStrategySettings, clientStrategy, routeManager,
 		connectUrl, familyServiceUrl(connectUrl, 4), familyServiceUrl(connectUrl, 6),
-		auth, settings, groupSettingsFor(initialFamilyStack()),
+		auth, settings, groupSettingsFor(stack),
 	)
 	return group, nil, group
 }
@@ -404,14 +405,23 @@ func writeFamilyTransportMetrics(b *strings.Builder) {
 // when no process-wide memory target is set.
 const familyBudgetReferenceByteCount = 64 << 20
 
-// familyGroupBudget is the transport budget for one identity's family group:
-// the default sizing, scaled for the group's three transports.
-func familyGroupBudget() *connect.PlatformTransportBudget {
+// familyGroupBudgetForStack is the transport budget for one identity's family
+// group running the given stack: the default sizing scaled for the number of
+// transports the stack enables - three for dual (both pins and the
+// family-agnostic standby), one for any fixed stack (the single pin it uses,
+// or the agnostic alone for legacy). It is admission accounting, not an
+// allocation, and it is sized at launch: a live stack change applies the new
+// sizing at the next identity launch.
+func familyGroupBudgetForStack(stack connect.FamilyStackMode) *connect.PlatformTransportBudget {
 	target := connect.MemoryBudget()
 	if target <= 0 {
 		target = familyBudgetReferenceByteCount
 	}
-	return connect.NewPlatformTransportBudgetForMemoryTarget(3 * target)
+	transports := 1
+	if stack == connect.FamilyStackDual {
+		transports = 3
+	}
+	return connect.NewPlatformTransportBudgetForMemoryTarget(connect.ByteCount(transports) * target)
 }
 
 // writeFamilyStatsMetrics exports the native identity's per-family counters
@@ -522,7 +532,10 @@ func applyIpVersion(value string) error {
 		return nil
 	}
 	previous := group.SetStack(mode)
-	tlog("⚙️ [control] applied ip_version=%s (was %s)\n", mode, previous)
+	// the group budget is sized for the launch stack's transport count (see
+	// familyGroupBudgetForStack) and has no live resize; a changed stack
+	// applies its new sizing at the next identity launch
+	tlog("⚙️ [control] applied ip_version=%s (was %s); the transport budget resizes at the next identity launch\n", mode, previous)
 	return nil
 }
 
