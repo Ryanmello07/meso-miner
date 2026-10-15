@@ -250,7 +250,9 @@ func NewDirectClientStrategy(ctx context.Context, settings *ClientStrategySettin
 			PacketConnFactory: packetConnFactory,
 		}
 	}
-	return NewClientStrategy(ctx, &direct)
+	strategy := NewClientStrategy(ctx, &direct)
+	strategy.ipFamily = ipFamily
+	return strategy
 }
 
 // pinnedDialContext is the enforcement below name resolution: the network is

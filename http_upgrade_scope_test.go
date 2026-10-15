@@ -1,6 +1,8 @@
 package connect
 
 import (
+	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -88,12 +90,79 @@ func TestFramedUpgradeOtherFailuresAreNotCached(t *testing.T) {
 	}
 }
 
+// The route scope must name the route by its stable identity, not by the dialer
+// pointer. A dialer-set rebuild (a proxy reload, a recreated strategy) issues
+// new pointers for the same route, and a freed pointer can be reused by a
+// different route, so a pointer-keyed scope both forgets its own rejection and
+// can inherit another route's. The scope also carries the family pin, so the
+// dual-stack pins never alias each other, and it stays readable in a log.
 func TestUpgradeRouteScopeDiffersPerDialer(t *testing.T) {
-	a, b := &clientDialer{}, &clientDialer{}
-	if upgradeRouteScope(a) == upgradeRouteScope(b) {
-		t.Fatal("two dialers must not share a scope")
+	directA := &clientDialer{description: "route-a"}
+	directB := &clientDialer{description: "route-b"}
+	if upgradeRouteScope(0, directA) == upgradeRouteScope(0, directB) {
+		t.Error("two dialers must not share a scope")
 	}
-	if upgradeRouteScope(a) != upgradeRouteScope(a) {
-		t.Fatal("a dialer's scope must be stable")
+	if upgradeRouteScope(0, directA) != upgradeRouteScope(0, directA) {
+		t.Error("a dialer's scope must be stable")
+	}
+	// a rebuilt dialer of the same route keeps the route's scope: this is the
+	// property the pointer form cannot have
+	if upgradeRouteScope(0, directA) != upgradeRouteScope(0, &clientDialer{description: "route-a"}) {
+		t.Errorf("a rebuilt dialer of the same route must keep the route's scope, got %q and %q",
+			upgradeRouteScope(0, directA), upgradeRouteScope(0, &clientDialer{description: "route-a"}))
+	}
+
+	// the scope is the readable identity form, the shape of String() without
+	// the live counters
+	if scope := upgradeRouteScope(0, directA); !strings.Contains(scope, "direct|route-a") {
+		t.Errorf("a direct dialer's scope must carry its identity, got %q", scope)
+	}
+	proxyDialer := &clientDialer{
+		description: "proxy route",
+		settings: &ClientStrategySettings{
+			ProxySettings: &ProxySettings{Index: 7, Address: "proxy.example.invalid:443"},
+		},
+	}
+	if scope := upgradeRouteScope(0, proxyDialer); !strings.Contains(scope, "proxy|7|proxy.example.invalid:443|proxy route") {
+		t.Errorf("a proxy dialer's scope must carry its index, address and description, got %q", scope)
+	}
+
+	// the family pin is part of the route: the same dialer dialed for v4, for
+	// v6 and for the family-agnostic path is three routes
+	scopeV4 := upgradeRouteScope(4, directA)
+	scopeV6 := upgradeRouteScope(6, directA)
+	scopeAny := upgradeRouteScope(0, directA)
+	if scopeV4 == scopeV6 || scopeV4 == scopeAny || scopeV6 == scopeAny {
+		t.Errorf("the family pins must not share a scope: v4=%q v6=%q any=%q", scopeV4, scopeV6, scopeAny)
+	}
+	if !strings.Contains(scopeV4, "ipv4|") || !strings.Contains(scopeV6, "ipv6|") {
+		t.Errorf("the scope must read its family: v4=%q v6=%q", scopeV4, scopeV6)
+	}
+}
+
+// The family prefix of a scope comes from the strategy that dials: the
+// direct-only strategy a family-pinned platform transport owns carries its pin,
+// and a family-agnostic strategy carries none. Without this the pins would all
+// take the family-agnostic prefix and alias each other in the cache.
+func TestUpgradeRouteScopeFollowsStrategyFamilyPin(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	settings := DefaultClientStrategySettings()
+	for _, pin := range []int{0, 4, 6} {
+		var strategy *ClientStrategy
+		if pin == 0 {
+			strategy = NewClientStrategy(ctx, settings)
+		} else {
+			strategy = NewDirectClientStrategy(ctx, settings, pin)
+		}
+		if strategy.ipFamily != pin {
+			t.Errorf("a strategy built for family %d carries %d", pin, strategy.ipFamily)
+		}
+		strategy.Close()
+	}
+	strategy4 := NewDirectClientStrategy(ctx, settings, 4)
+	defer strategy4.Close()
+	if scope := upgradeRouteScope(strategy4.ipFamily, &clientDialer{description: "route-a"}); !strings.HasPrefix(scope, "ipv4|direct|route-a") {
+		t.Errorf("a v4-pinned strategy's scope must read ipv4, got %q", scope)
 	}
 }
