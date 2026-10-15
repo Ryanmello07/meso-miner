@@ -3788,3 +3788,61 @@ The stage-1 table probe drew a contiguous block of the destination table, which 
 **How to Identify in New Upstream**: `internal/urnettools/log_stream.go` and `openFollowFile`.
 
 **Status**: ported to meso-miner (its PR #185) and `sn` (its PR #79); the two follow-up fixes (tail window, long paths) are on the `port/windows-log-follow-leftovers` branches. A live `urnet-tools proxy health` run against a Windows provider has not been done.
+
+---
+
+## 193. The NAT Reassembles Fragmented IPv4/IPv6 Datagrams
+
+**Purpose**: A datagram split by the link was dropped whole, because a non-first fragment carries no transport identity and the parsers refuse a lone fragment.
+
+**Files Modified**: `ip.go`, `ip_nat_fragment.go`, `ip_fragment.go`, `ip_ipv6_fragment.go` (ported from upstream)
+
+**Change**: Each NAT send shard reassembles only the datagrams pinned to it (the IPv4 identification or the IPv6 fragment identification pins every fragment of a datagram to one shard), retaining at most 16 KiB of fragment bytes per family per shard; a datagram still incomplete after the 15 s reassembly timeout is dropped.
+
+**Impact**: Fragmented traffic survives the link. Port of upstream `24dc85332`.
+
+## 194. A Provider Answers a Source Whose Upstream Dial Failed
+
+**Purpose**: The source used to wait out its own timeout when the provider could not reach it.
+
+**Files Modified**: `ip_dial_failure.go` (new), `ip.go`
+
+**Change**: A refused TCP dial is answered RST+ACK, any other immediate failure with an ICMP destination-unreachable; a timeout, a failure later than 3 s or a parent cancel answers nothing.
+
+**Impact**: The source fails fast. Port of upstream `bd58531e0`. A client older than the signal drops the unreachable at parse, as upstream notes.
+
+## 195. Oversized IPv4 UDP Replies Are Fragmented, Not Split
+
+**Purpose**: Splitting one UDP payload into several independent datagrams corrupts application framing (QUIC, DNS, and anything else where the payload is a single message).
+
+**Files Modified**: `ip.go`
+
+**Change**: An oversized IPv4 UDP reply is one fragmented datagram (`fragmentIpv4Packet`), as IPv6 already was; a payload past the ipv4 packet limit is refused instead of split.
+
+**Impact**: Large replies stay coherent. Port of upstream `911f14516`.
+
+## 196. IPv6 Fragment Identification Uses crypto/rand (kept at every sync)
+
+**Purpose**: Upstream draws the IPv6 fragment identification from a process-wide sequential counter, which an off-path observer can predict and walk.
+
+**Files Modified**: `ip_ipv6_fragment.go`
+
+**Change**: The identification comes from `crypto/rand`.
+
+**Impact**: The next identification cannot be predicted. **Deliberate fork hook**: it is re-applied at every sync of `ip_ipv6_fragment.go` (the `// fork:` comment is at line 401). Upstream issue 222, filed by us, tracks the same weakness.
+
+## 197. Signed Wallet Consent
+
+**Purpose**: Prove the coldkey without handing the provider key material.
+
+**Files Modified**: `provider/wallet_consent.go`, `provider/wallet_consent_owner_unix.go`, `provider/wallet_consent_owner_windows.go`, `provider/main.go`
+
+**Change**: `provider wallet challenge <coldkey_ss58>` prints the server's sign-in challenge; `provider wallet set` accepts `--coldkey_seed_file=<path>` (32-byte seed, regular file, mode 600, owned by the caller) or `--message`/`--signature` signed elsewhere. The provider signs only the documented three-line sign-in challenge and requires that text to carry the issued challenge.
+
+**Impact**: An operator can prove the coldkey without exporting it. The sign-in format, refusal wording and challenge text match upstream, so a future sync should not have to change them. The unsigned request still needs `--legacy-network-wallet`.
+
+## 198. The sn Pin Is Bumped
+
+**Files Modified**: `go.mod`
+
+**Change**: `github.com/urfoundation/sn` to `v0.0.0-20261014223308-23d0bf9d92a4`.
