@@ -283,3 +283,28 @@ func TestSignPageChoosesTheAccountOnThePage(t *testing.T) {
 		t.Fatalf("the chosen account could not sign: %d %v", status, out)
 	}
 }
+
+// A new message is a fresh start: both the message and the page timers restart,
+// so the operator never has to also extend the page.
+func TestSignPageNewMessageRestartsBothTimers(t *testing.T) {
+	ui, _, page, _ := newSignUiForTest(t, walletTestSeed(0x11))
+	ui.mutex.Lock()
+	ui.deadline = time.Now().Add(20 * time.Second)
+	ui.lastRefresh = time.Now().Add(-time.Minute)
+	oldExpiry := ui.statement.ExpiresAt
+	ui.mutex.Unlock()
+	time.Sleep(1100 * time.Millisecond)
+	status, out := signUiPost(t, page.URL, "/refresh", "test-token", "", nil)
+	if status != http.StatusOK {
+		t.Fatalf("a new message answered %d", status)
+	}
+	if int64(out["expiresAt"].(float64)) <= oldExpiry {
+		t.Fatal("the message timer did not move forward")
+	}
+	if left := time.Until(time.Unix(int64(out["pageDeadline"].(float64)), 0)); left < snSignPageLifetime-5*time.Second {
+		t.Fatalf("the page timer was left at %s", left)
+	}
+	if out["currentEpoch"].(float64) <= 0 {
+		t.Fatal("the current epoch is missing, the page cannot say when the consent starts")
+	}
+}

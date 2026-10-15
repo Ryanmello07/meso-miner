@@ -129,7 +129,7 @@ code { font-family: 'PP Neue Bit', ui-monospace, monospace; color: var(--white);
 <script id="boot" type="application/json">{{BOOT}}</script>
 <script>
 const boot = JSON.parse(document.getElementById('boot').textContent);
-let st = { message: boot.message, hex: boot.hex, expiresAt: boot.expiresAt, from: boot.from, through: boot.through };
+let st = { message: boot.message, hex: boot.hex, expiresAt: boot.expiresAt, from: boot.from, through: boot.through, currentEpoch: boot.currentEpoch };
 let ext = null, account = null, finished = false, all = [];
 const $ = (id) => document.getElementById(id);
 const say = (text, cls) => { const s = $('status'); s.textContent = text; s.className = 'status ' + (cls || ''); };
@@ -182,7 +182,8 @@ $('connect').onclick = async () => {
     ext = await provider.enable('URnetwork wallet consent');
     let accounts = await ext.accounts.get();
     // Bittensor coldkeys are substrate accounts; skip Ethereum-type accounts
-    accounts = accounts.filter(a => a.type !== 'ethereum');
+    // a coldkey is an sr25519 account; the consent is verified as an sr25519 signature
+    accounts = accounts.filter(a => !a.type || a.type === 'sr25519');
     if (!boot.address) {
       if (accounts.length === 0) { say('Your wallet extension shows no Substrate accounts. Enable one for sites in the extension.', 'bad'); return; }
       const sel = $('accounts'); sel.innerHTML = '';
@@ -211,6 +212,7 @@ $('use').onclick = async () => {
     st = res.state;
     account = all.find(a => a.address === res.address);
     $('picker').hidden = true;
+    st.currentEpoch = st.currentEpoch || res.state.currentEpoch;
     show();
     say('Account chosen. Check the message, then click Sign.', 'ok');
     $('sign').disabled = false;
@@ -228,12 +230,21 @@ $('sign').onclick = async () => {
     const box = $('result');
     box.hidden = false; box.className = 'card done';
     box.innerHTML = '';
-    const t = document.createElement('div'); t.className = 'label'; t.textContent = 'Stored';
-    const v = document.createElement('div'); v.className = 'value ok';
-    v.textContent = 'Your wallet consent is stored for epochs ' + res.from + ' through ' + res.through + '.';
-    const r = document.createElement('div'); r.className = 'mono'; r.style.marginTop = '.5rem'; r.style.wordBreak = 'break-all';
-    r.textContent = 'receipt ' + res.receipt;
-    box.append(t, v, r);
+    const add = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; e.textContent = text; box.appendChild(e); return e; };
+    add('div', 'label', 'Stored');
+    add('div', 'value ok', 'Your wallet consent is stored for epochs ' + res.from + ' through ' + res.through + '.');
+    const r = add('div', 'mono', 'receipt ' + res.receipt); r.style.marginTop = '.5rem'; r.style.wordBreak = 'break-all';
+    const gap = res.from - (st.currentEpoch || 0);
+    add('div', 'label', 'What happens next').style.marginTop = '1rem';
+    const ol = document.createElement('ol');
+    [
+      'You are done. Nothing needs to change on your provider machines: the consent covers every provider client on your network, including ones you add later.',
+      gap > 0 ? ('It applies from epoch ' + res.from + ', which starts in ' + gap + ' epoch' + (gap === 1 ? '' : 's') + ' (the network is in epoch ' + st.currentEpoch + ' now). Earnings in epochs before that are not covered by this consent.') : ('It applies from epoch ' + res.from + '.'),
+      'Check it any time with: provider wallet status. It shows the consent and whether it is in effect.',
+      'Sign again only to change the wallet or after epoch ' + res.through + '. A later consent must start at a later epoch than this one.',
+      'You can close this tab. The command that opened it prints the same result in your terminal and then exits.'
+    ].forEach(t => { const li = document.createElement('li'); li.textContent = t; ol.appendChild(li); });
+    box.appendChild(ol);
     say('Done. You can close this tab. Check any time with: provider wallet status', 'ok');
     $('connect').disabled = true; $('refresh').disabled = true; $('extend').disabled = true;
   } catch (e) {
@@ -253,11 +264,14 @@ $('extend').onclick = async () => {
   } catch (e) { say('Could not extend: ' + e.message, 'bad'); }
 };
 $('refresh').onclick = async () => {
+  const btn = $('refresh'); btn.disabled = true;
+  setTimeout(() => { if (!finished) btn.disabled = false; }, 3200);
   try {
     const res = await post('/refresh');
-    st = { message: res.message, hex: res.hex, expiresAt: res.expiresAt, from: res.from, through: res.through };
+    st = { message: res.message, hex: res.hex, expiresAt: res.expiresAt, from: res.from, through: res.through, currentEpoch: res.currentEpoch };
+    boot.pageDeadline = res.pageDeadline;
     show();
-    say('New message ready. The 5 minute timer restarted.' + (account ? ' Click Sign.' : ' Connect your wallet first.'), 'ok');
+    say('New message ready. Both timers restarted.' + (account ? ' Click Sign.' : ' Connect your wallet first.'), 'ok');
     if (account) $('sign').disabled = false;
   } catch (e) { say('Could not get a new message: ' + e.message, 'bad'); }
 };

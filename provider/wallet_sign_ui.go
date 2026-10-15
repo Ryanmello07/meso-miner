@@ -132,6 +132,8 @@ type snSignState struct {
 	ExpiresAt int64  `json:"expiresAt"`
 	From      uint64 `json:"from"`
 	Through   uint64 `json:"through"`
+	// the epoch the network is in now, so the page can say when the consent starts
+	CurrentEpoch uint64 `json:"currentEpoch"`
 }
 
 func (self *snSignUi) stateWithLock() snSignState {
@@ -139,11 +141,12 @@ func (self *snSignUi) stateWithLock() snSignState {
 		return snSignState{}
 	}
 	return snSignState{
-		Message:   self.message,
-		Hex:       "0x" + hex.EncodeToString([]byte(self.message)),
-		ExpiresAt: self.statement.ExpiresAt,
-		From:      self.statement.FromEpoch,
-		Through:   self.statement.ThroughEpoch,
+		Message:      self.message,
+		Hex:          "0x" + hex.EncodeToString([]byte(self.message)),
+		ExpiresAt:    self.statement.ExpiresAt,
+		From:         self.statement.FromEpoch,
+		Through:      self.statement.ThroughEpoch,
+		CurrentEpoch: self.want.Epoch.Epoch,
 	}
 }
 
@@ -290,7 +293,7 @@ func (self *snSignUi) handler() http.Handler {
 			return
 		}
 		if self.refreshes >= snSignMaxRefreshes || time.Since(self.lastRefresh) < snSignRefreshSpacing {
-			snSignError(w, http.StatusTooManyRequests, "wait a few seconds before asking for a new message")
+			snSignError(w, http.StatusTooManyRequests, fmt.Sprintf("wait %d seconds between new messages (at most %d per run); the message you have stays valid until its timer ends", int(snSignRefreshSpacing/time.Second), snSignMaxRefreshes))
 			return
 		}
 		self.refreshes += 1
@@ -299,7 +302,15 @@ func (self *snSignUi) handler() http.Handler {
 			snSignError(w, http.StatusBadGateway, err.Error())
 			return
 		}
-		snSignWriteJson(w, http.StatusOK, self.stateWithLock())
+		// a new message is a fresh start: the page lives another full lifetime
+		// (bounded by the refresh limit above)
+		self.deadline = time.Now().Add(snSignPageLifetime)
+		state := self.stateWithLock()
+		snSignWriteJson(w, http.StatusOK, map[string]any{
+			"message": state.Message, "hex": state.Hex, "expiresAt": state.ExpiresAt,
+			"from": state.From, "through": state.Through, "currentEpoch": state.CurrentEpoch,
+			"pageDeadline": self.deadline.Unix(),
+		})
 	}))
 	mux.HandleFunc("/signature", post(func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -337,6 +348,7 @@ func (self *snSignUi) handler() http.Handler {
 		self.stored = true
 		fmt.Printf("subnet wallet consent for %s stored: epochs %d through %d, generation %d, receipt %s\n",
 			self.coldkey, self.statement.FromEpoch, self.statement.ThroughEpoch, result.MappingGeneration, snPlain(result.MappingHash))
+		fmt.Print(snConsentNextSteps(self.statement, self.want.Epoch.Epoch))
 		snSignWriteJson(w, http.StatusOK, map[string]any{
 			"ok": true, "receipt": snPlain(result.MappingHash), "from": self.statement.FromEpoch,
 			"through": self.statement.ThroughEpoch, "generation": result.MappingGeneration,

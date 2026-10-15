@@ -634,6 +634,7 @@ func snSetNetworkWalletConsent(ctx context.Context, clientStrategy *connect.Clie
 	}
 	fmt.Printf("subnet wallet consent for %s stored: epochs %d through %d, generation %d, receipt %s\n",
 		coldkeySs58, statement.FromEpoch, statement.ThroughEpoch, result.MappingGeneration, snPlain(result.MappingHash))
+	fmt.Print(snConsentNextSteps(statement, want.Epoch.Epoch))
 	return nil
 }
 
@@ -742,4 +743,21 @@ func snWalletStatus(ctx context.Context, out io.Writer, clientStrategy *connect.
 		fmt.Fprintf(out, "no consent is stored: sign one with `provider wallet challenge` and `provider wallet set`\n")
 	}
 	return nil
+}
+
+// snConsentNextSteps is what the operator does and does not have to do after a
+// consent is stored, printed by `wallet set` and `wallet sign`.
+func snConsentNextSteps(statement *protocol.NetworkWalletMappingStatement, currentEpoch uint64) string {
+	var b strings.Builder
+	b.WriteString("\nWhat happens next:\n")
+	b.WriteString("  - You are done. Nothing changes on your provider machines; the consent covers every provider client on your network, including ones you add later.\n")
+	if statement.FromEpoch > currentEpoch {
+		gap := statement.FromEpoch - currentEpoch
+		fmt.Fprintf(&b, "  - It applies from epoch %d, which starts in %d epoch(s) (the network is in epoch %d now). Earlier epochs are not covered by this consent.\n", statement.FromEpoch, gap, currentEpoch)
+	} else {
+		fmt.Fprintf(&b, "  - It applies from epoch %d.\n", statement.FromEpoch)
+	}
+	b.WriteString("  - Check it any time with: provider wallet status\n")
+	fmt.Fprintf(&b, "  - Sign again only to change the wallet or after epoch %d. A later consent must start at a later epoch than this one.\n", statement.ThroughEpoch)
+	return b.String()
 }
