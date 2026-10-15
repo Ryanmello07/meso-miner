@@ -117,6 +117,35 @@ func TestIcmpFlowTrackerUserCapIsPerSource(t *testing.T) {
 	}
 }
 
+// one source's cancel reaches its icmp flows (the nat registers this with
+// its udp and tcp buffers) and returns how many it cancelled
+func TestIcmpBufferCancelSourceCancelsItsFlows(t *testing.T) {
+	settings := DefaultIcmpBufferSettingsWithBufferSize(1)
+	settings.Log = NewNoopLogger()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	buffer := NewIcmp4Buffer(ctx, nil, settings)
+
+	source := TransferPath{SourceId: NewId()}
+	other := TransferPath{SourceId: NewId()}
+	itsFlow := newTrackerTestSequence(t, source, 1)
+	otherFlow := newTrackerTestSequence(t, other, 2)
+	buffer.mutex.Lock()
+	buffer.sourceSequences[source] = map[BufferId4]*IcmpSequence{BufferId4{}: itsFlow}
+	buffer.sourceSequences[other] = map[BufferId4]*IcmpSequence{BufferId4{}: otherFlow}
+	buffer.mutex.Unlock()
+
+	if n := buffer.CancelSource(source.SourceId); n != 1 {
+		t.Fatalf("CancelSource must cancel the source's flows, got %d", n)
+	}
+	if !icmpSequenceCanceled(itsFlow) {
+		t.Fatal("the source's flow must be canceled")
+	}
+	if icmpSequenceCanceled(otherFlow) {
+		t.Fatal("another source's flow must not be canceled")
+	}
+}
+
 // two buffers sharing one tracker enforce the nat-wide cap across both, so
 // the configured ceiling is not multiplied by the shard and family count
 func TestIcmpSharedBuffersEnforceTheNatsWideCap(t *testing.T) {

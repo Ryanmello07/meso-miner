@@ -731,7 +731,8 @@ func (self *LocalUserNat) runShard(shard int) {
 		defer self.sourceCancelMutex.Unlock()
 		self.sourceCancels = append(self.sourceCancels, func(sourceId Id) int {
 			return udp4Buffer.CancelSource(sourceId) + udp6Buffer.CancelSource(sourceId) +
-				tcp4Buffer.CancelSource(sourceId) + tcp6Buffer.CancelSource(sourceId)
+				tcp4Buffer.CancelSource(sourceId) + tcp6Buffer.CancelSource(sourceId) +
+				icmp4Buffer.CancelSource(sourceId) + icmp6Buffer.CancelSource(sourceId)
 		})
 	}()
 
@@ -812,6 +813,13 @@ func (self *LocalUserNat) runShard(shard int) {
 						c()
 					}
 				case IP_PROTOCOL_ICMP:
+					if !icmpEchoParsingEnabled(4) {
+						// the gate latched off (operator switch or a platform
+						// refusal) after this packet was queued: drop it here
+						// too, or a refused platform would still open sockets
+						MessagePoolReturn(ipPacket)
+						continue
+					}
 					if !parseIcmpPacket(4, sourceIp, destinationIp, transport, &icmpPacket) {
 						MessagePoolReturn(ipPacket)
 						continue
@@ -907,6 +915,12 @@ func (self *LocalUserNat) runShard(shard int) {
 						c()
 					}
 				case IP_PROTOCOL_ICMPV6:
+					if !icmpEchoParsingEnabled(6) {
+						// see the icmpv4 case: the gate can latch off while
+						// packets are queued
+						MessagePoolReturn(ipPacket)
+						continue
+					}
 					if !parseIcmpPacket(6, sourceIp, destinationIp, transport, &icmpPacket) {
 						MessagePoolReturn(ipPacket)
 						continue

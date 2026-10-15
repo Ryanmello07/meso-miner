@@ -40,6 +40,26 @@ func newIcmp6BufferShared(
 	}
 }
 
+// CancelSource cancels every flow of one source client and returns how many.
+// It only cancels: each sequence's own exit path removes it from the maps
+// (see the udp and tcp counterparts). A nat registers this with its source
+// cancel list so one client's echo flows are released with its udp and tcp.
+func (self *IcmpBuffer[BufferId]) CancelSource(sourceId Id) int {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	count := 0
+	for source, sequences := range self.sourceSequences {
+		if source.SourceId != sourceId {
+			continue
+		}
+		for _, sequence := range sequences {
+			sequence.Cancel()
+			count += 1
+		}
+	}
+	return count
+}
+
 const lruEvictionSampleSize = 32
 
 // applyLruMapLimit bounds eviction work independently of table cardinality.
