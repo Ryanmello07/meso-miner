@@ -115,8 +115,11 @@ func TestUseFamilyTransportsDecisionOrder(t *testing.T) {
 		"not native":  {nil, false, allowed, probeOk, false, "not-native"},
 		"ip literal":  {nil, true, "wss://127.0.0.1", probeOk, false, "no-family-urls"},
 		"custom host": {nil, true, "wss://connect.example.com", probeOk, false, "connect-host-not-allowlisted"},
+		// a failed v6 probe no longer pins the launch to the legacy transport:
+		// the group's v6 pin holds this identity on IPv4 until a global v6
+		// address appears, and the host-network-change kick re-dials it
 		"probe says no": {nil, true, allowed, func() (bool, string) { return false, "v6-source-not-global" },
-			false, "v6-source-not-global"},
+			true, "dualstack"},
 	} {
 		hostIpv6Probe = c.probe
 		use, reason := useFamilyTransports(c.proxy, c.native, c.url)

@@ -191,7 +191,11 @@ func familyTransportHostAllowed(connectUrl string) bool {
 
 // useFamilyTransports decides, for one identity launch, whether to build the
 // dual-stack group. The checks run in a fixed order so the reason is
-// deterministic.
+// deterministic. The host v6 probe does not decide: a node that boots before
+// SLAAC finishes, or during a v6 outage, builds the group anyway and its v6
+// pin holds this identity on IPv4 until a global v6 address appears - the
+// pin's own hold and the host-network-change kick re-dial it, so the identity
+// joins dual stack later without a relaunch.
 func useFamilyTransports(proxySettings *connect.ProxySettings, isNative bool, connectUrl string) (bool, string) {
 	if proxySettings != nil {
 		return false, "proxied-identity"
@@ -206,7 +210,10 @@ func useFamilyTransports(proxySettings *connect.ProxySettings, isNative bool, co
 		return false, "connect-host-not-allowlisted"
 	}
 	if ok, why := hostIpv6Probe(); !ok {
-		return false, why
+		// the group is still right: the v6 pin holds until the host has a
+		// global v6 route. Note the launch-time state so an operator can see
+		// why the v6 pin is quiet (the decision metric stays "dualstack").
+		tlog("[ipv6] dual-stack group at launch; the v6 pin holds until a global v6 address appears (probe: %s)\n", why)
 	}
 	return true, "dualstack"
 }
@@ -229,16 +236,17 @@ func newProviderPlatformTransport(
 		legacy = connect.NewPlatformTransport(ctx, clientStrategy, routeManager, connectUrl, auth, settings)
 		return legacy, legacy, nil
 	}
-	// The default budget admits one carrier of each kind. The group runs three
-	// transports, and at Background priority the two pins are the ones refused
-	// when the budget is full, so with the default they never dial H3 and sit on
-	// H1 without any signal. Size the budget for three. It is admission
-	// accounting, not an allocation.
-	settings.PlatformTransportBudget = familyGroupBudget()
+	// The default budget admits one carrier of each kind, and the group's
+	// carrier mix differs by stack: dual runs both pins and the standby, a
+	// fixed stack runs the one transport it uses. Size the budget for the
+	// launch stack's transport count. It is admission accounting, not an
+	// allocation.
+	stack := initialFamilyStack()
+	settings.PlatformTransportBudget = familyGroupBudgetForStack(stack)
 	group = newProviderFamilyGroup(
 		ctx, clientStrategySettings, clientStrategy, routeManager,
 		connectUrl, familyServiceUrl(connectUrl, 4), familyServiceUrl(connectUrl, 6),
-		auth, settings, groupSettingsFor(initialFamilyStack()),
+		auth, settings, groupSettingsFor(stack),
 	)
 	return group, nil, group
 }
@@ -397,14 +405,23 @@ func writeFamilyTransportMetrics(b *strings.Builder) {
 // when no process-wide memory target is set.
 const familyBudgetReferenceByteCount = 64 << 20
 
-// familyGroupBudget is the transport budget for one identity's family group:
-// the default sizing, scaled for the group's three transports.
-func familyGroupBudget() *connect.PlatformTransportBudget {
+// familyGroupBudgetForStack is the transport budget for one identity's family
+// group running the given stack: the default sizing scaled for the number of
+// transports the stack enables - three for dual (both pins and the
+// family-agnostic standby), one for any fixed stack (the single pin it uses,
+// or the agnostic alone for legacy). It is admission accounting, not an
+// allocation, and it is sized at launch: a live stack change applies the new
+// sizing at the next identity launch.
+func familyGroupBudgetForStack(stack connect.FamilyStackMode) *connect.PlatformTransportBudget {
 	target := connect.MemoryBudget()
 	if target <= 0 {
 		target = familyBudgetReferenceByteCount
 	}
-	return connect.NewPlatformTransportBudgetForMemoryTarget(3 * target)
+	transports := 1
+	if stack == connect.FamilyStackDual {
+		transports = 3
+	}
+	return connect.NewPlatformTransportBudgetForMemoryTarget(connect.ByteCount(transports) * target)
 }
 
 // writeFamilyStatsMetrics exports the native identity's per-family counters
@@ -515,7 +532,10 @@ func applyIpVersion(value string) error {
 		return nil
 	}
 	previous := group.SetStack(mode)
-	tlog("⚙️ [control] applied ip_version=%s (was %s)\n", mode, previous)
+	// the group budget is sized for the launch stack's transport count (see
+	// familyGroupBudgetForStack) and has no live resize; a changed stack
+	// applies its new sizing at the next identity launch
+	tlog("⚙️ [control] applied ip_version=%s (was %s); the transport budget resizes at the next identity launch\n", mode, previous)
 	return nil
 }
 
