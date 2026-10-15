@@ -1087,6 +1087,11 @@ type FamilyPlatformTransportGroup struct {
 
 	connectedMonitor *Monitor
 
+	// setStackMutex serializes whole SetStack applications (the stack
+	// assignment and the pin switch-overs together), so concurrent sets can
+	// never leave the pins out of step with the stack.
+	setStackMutex sync.Mutex
+
 	stateLock      sync.Mutex
 	standbyActive  bool
 	standbyDueTime time.Time
@@ -2024,10 +2029,44 @@ func (self *FamilyPlatformTransportGroup) Stack() FamilyStackMode {
 	return self.stack
 }
 
+// EnabledFamilies reports the owner's pin switches: whether the IPv4 and the
+// IPv6 pin would dial right now. The stack-consistency check reads it against
+// Stack().
+func (self *FamilyPlatformTransportGroup) EnabledFamilies() (ipv4 bool, ipv6 bool) {
+	if self.ipv4Transport != nil {
+		ipv4 = self.ipv4Transport.Enabled()
+	}
+	if self.ipv6Transport != nil {
+		ipv6 = self.ipv6Transport.Enabled()
+	}
+	return
+}
+
+// familySetStackApplyPause is a test seam: when set, SetStack calls it after
+// the stack assignment and before the pin switch-overs, still inside the
+// serialized region, so a test can hold one apply open and watch a concurrent
+// set from the outside. Nil in production.
+var familySetStackApplyPause func()
+
+// FamilySetStackApplyPauseForTest installs the apply-pause seam and returns
+// the previous value, for tests outside this package.
+func FamilySetStackApplyPauseForTest(pause func()) func() {
+	previous := familySetStackApplyPause
+	familySetStackApplyPause = pause
+	return previous
+}
+
 // SetStack changes the families live and returns the previous choice. Pins that
 // the choice does not use are disabled (they close their live connection and
 // stop dialing); the standby is managed by the group loop.
 func (self *FamilyPlatformTransportGroup) SetStack(mode FamilyStackMode) FamilyStackMode {
+	// serialize concurrent sets: the stack assignment and the pin
+	// switch-overs must move together, or two racing sets leave the pins out
+	// of step with the stack they read (the last assignment can lose to the
+	// other call's switches).
+	self.setStackMutex.Lock()
+	defer self.setStackMutex.Unlock()
+
 	self.stateLock.Lock()
 	previous := self.stack
 	if previous == "" {
@@ -2035,6 +2074,10 @@ func (self *FamilyPlatformTransportGroup) SetStack(mode FamilyStackMode) FamilyS
 	}
 	self.stack = mode
 	self.stateLock.Unlock()
+
+	if familySetStackApplyPause != nil {
+		familySetStackApplyPause()
+	}
 
 	wantV4 := mode == FamilyStackDual || mode == FamilyStackIpv4
 	wantV6 := mode == FamilyStackDual || mode == FamilyStackIpv6
