@@ -38,6 +38,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -135,10 +136,31 @@ func snWalletChallenge(ctx context.Context, clientStrategy *connect.ClientStrate
 	if result.Error != nil {
 		return nil, fmt.Errorf("wallet challenge: %s", result.Error.Message)
 	}
-	if result.MessageTemplate == "" {
-		return nil, errors.New("wallet challenge: the server returned no message to sign")
+	if err := snCheckChallengeMessage(result.MessageTemplate, result.Challenge); err != nil {
+		return nil, err
 	}
 	return result, nil
+}
+
+var snChallengeMessagePattern = regexp.MustCompile(`^Sign in to URnetwork\nChallenge: ([A-Za-z0-9_-]+)\nTimestamp: [0-9]+$`)
+
+// snCheckChallengeMessage refuses to sign anything but the sign-in challenge the
+// server documents (three fixed-shape lines carrying the challenge and a
+// timestamp). The coldkey signs whatever text this function lets through, so a
+// compromised or mistaken endpoint must not be able to get a signature over an
+// arbitrary message.
+func snCheckChallengeMessage(message string, challenge string) error {
+	if message == "" {
+		return errors.New("wallet challenge: the server returned no message to sign")
+	}
+	match := snChallengeMessagePattern.FindStringSubmatch(message)
+	if match == nil {
+		return errors.New("wallet challenge: the message to sign is not the expected sign-in challenge; refusing to sign it")
+	}
+	if challenge != "" && match[1] != challenge {
+		return errors.New("wallet challenge: the message to sign does not carry the issued challenge; refusing to sign it")
+	}
+	return nil
 }
 
 // snWrapBytes is the polkadot-js signRaw payload wrapper for type "bytes".
@@ -182,6 +204,9 @@ func snSeedFromFile(path string) ([32]byte, error) {
 	}
 	if !info.Mode().IsRegular() {
 		return seed, fmt.Errorf("seed file %s is not a regular file", path)
+	}
+	if !snFileOwnedByCaller(info) {
+		return seed, fmt.Errorf("seed file %s is owned by another user", path)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
 		return seed, fmt.Errorf("seed file %s is mode %04o; it must not be readable by group or other (chmod 600)", path, info.Mode().Perm())

@@ -107,7 +107,7 @@ func TestWalletSeedFileSignsTheChallengeVerifiably(t *testing.T) {
 	dir := t.TempDir()
 	seedPath := writeSeedFile(t, dir, seed, 0o600, true)
 
-	const challenge = "ur.io wallet consent\ncoldkey: test\nnonce: abc123"
+	const challenge = "Sign in to URnetwork\nChallenge: abc123\nTimestamp: 1760000000"
 	var sawSet map[string]interface{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -334,5 +334,34 @@ func TestWalletProofFlagRules(t *testing.T) {
 				t.Fatal("accepted but returned no proof")
 			}
 		})
+	}
+}
+
+func TestWalletChallengeMessageShapeIsEnforced(t *testing.T) {
+	good := "Sign in to URnetwork\nChallenge: abc_DEF-123\nTimestamp: 1760000000"
+	if err := snCheckChallengeMessage(good, "abc_DEF-123"); err != nil {
+		t.Fatalf("a well-formed challenge was refused: %v", err)
+	}
+	for name, msg := range map[string]string{
+		"empty":         "",
+		"arbitrary":     "Transfer all funds to 5Evil",
+		"extra line":    good + "\nTransfer all funds",
+		"wrong header":  "Sign in to Elsewhere\nChallenge: abc_DEF-123\nTimestamp: 1",
+		"bad timestamp": "Sign in to URnetwork\nChallenge: abc_DEF-123\nTimestamp: soon",
+		"other nonce":   "Sign in to URnetwork\nChallenge: zzz\nTimestamp: 1",
+	} {
+		if err := snCheckChallengeMessage(msg, "abc_DEF-123"); err == nil {
+			t.Fatalf("%s: the message was accepted for signing", name)
+		}
+	}
+}
+
+func TestWalletSeedFileOwnedByAnotherUserIsRefusedOnlyByOwnerCheck(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "seed")
+	if err := os.WriteFile(path, []byte(strings.Repeat("ab", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snSeedFromFile(path); err != nil {
+		t.Fatalf("an own 0600 seed file was refused: %v", err)
 	}
 }
