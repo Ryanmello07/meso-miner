@@ -1,6 +1,7 @@
 package connect
 
 import (
+	"context"
 	"time"
 
 	"github.com/urnetwork/connect/protocol"
@@ -12,6 +13,32 @@ import (
 const IpProtocolIcmp IpProtocol = 3
 
 type receivePacketsBatchFunction func(source TransferPath, provideMode protocol.ProvideMode, ipPath *IpPath, packets [][]byte) (batched bool)
+
+// fork: the nat builds one icmp buffer pair per shard and hands the pair one
+// shared flow tracker, so the configured caps are nat-wide instead of per
+// shard and family (see icmpFlowTracker). The upstream constructors stay for
+// standalone buffers, which enforce the caps per buffer.
+func newIcmp4BufferShared(
+	ctx context.Context,
+	receiveCallback ReceivePacketFunction,
+	icmpBufferSettings *IcmpBufferSettings,
+	flowTracker *icmpFlowTracker,
+) *Icmp4Buffer {
+	return &Icmp4Buffer{
+		IcmpBuffer: *newIcmpBuffer[BufferId4](ctx, receiveCallback, icmpBufferSettings, flowTracker),
+	}
+}
+
+func newIcmp6BufferShared(
+	ctx context.Context,
+	receiveCallback ReceivePacketFunction,
+	icmpBufferSettings *IcmpBufferSettings,
+	flowTracker *icmpFlowTracker,
+) *Icmp6Buffer {
+	return &Icmp6Buffer{
+		IcmpBuffer: *newIcmpBuffer[BufferId6](ctx, receiveCallback, icmpBufferSettings, flowTracker),
+	}
+}
 
 const lruEvictionSampleSize = 32
 

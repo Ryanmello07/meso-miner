@@ -142,7 +142,7 @@ type Icmp4Buffer struct {
 func NewIcmp4Buffer(ctx context.Context, receiveCallback ReceivePacketFunction,
 	icmpBufferSettings *IcmpBufferSettings) *Icmp4Buffer {
 	return &Icmp4Buffer{
-		IcmpBuffer: *newIcmpBuffer[BufferId4](ctx, receiveCallback, icmpBufferSettings),
+		IcmpBuffer: *newIcmpBuffer[BufferId4](ctx, receiveCallback, icmpBufferSettings, nil),
 	}
 }
 
@@ -172,7 +172,7 @@ type Icmp6Buffer struct {
 func NewIcmp6Buffer(ctx context.Context, receiveCallback ReceivePacketFunction,
 	icmpBufferSettings *IcmpBufferSettings) *Icmp6Buffer {
 	return &Icmp6Buffer{
-		IcmpBuffer: *newIcmpBuffer[BufferId6](ctx, receiveCallback, icmpBufferSettings),
+		IcmpBuffer: *newIcmpBuffer[BufferId6](ctx, receiveCallback, icmpBufferSettings, nil),
 	}
 }
 
@@ -197,12 +197,16 @@ func (self *Icmp6Buffer) send(source TransferPath, provideMode protocol.ProvideM
 
 // the flow table for one address family, mirroring `UdpBuffer`: per-source and
 // aggregate lru caps, and an identity-checked cleanup when a sequence exits.
+// flowTracker, when set, shares the caps across every buffer of one nat (the
+// nat-wide intent); nil enforces them per buffer.
 type IcmpBuffer[BufferId comparable] struct {
 	ctx                    context.Context
 	log                    Logger
 	receiveCallback        ReceivePacketFunction
 	receivePacketsCallback receivePacketsBatchFunction
 	icmpBufferSettings     *IcmpBufferSettings
+
+	flowTracker *icmpFlowTracker
 
 	mutex sync.Mutex
 
@@ -214,12 +218,14 @@ func newIcmpBuffer[BufferId comparable](
 	ctx context.Context,
 	receiveCallback ReceivePacketFunction,
 	icmpBufferSettings *IcmpBufferSettings,
+	flowTracker *icmpFlowTracker,
 ) *IcmpBuffer[BufferId] {
 	return &IcmpBuffer[BufferId]{
 		ctx:                ctx,
 		log:                loggerOrDefault(icmpBufferSettings.Log),
 		receiveCallback:    receiveCallback,
 		icmpBufferSettings: icmpBufferSettings,
+		flowTracker:        flowTracker,
 		sequences:          map[BufferId]*IcmpSequence{},
 		sourceSequences:    map[TransferPath]map[BufferId]*IcmpSequence{},
 	}
@@ -253,37 +259,42 @@ func (self *IcmpBuffer[BufferId]) icmpSend(
 			}
 		}
 
-		if 0 < self.icmpBufferSettings.UserLimit {
-			// limit the total flows per source to avoid blowing up the ulimit
-			if sourceSequences := self.sourceSequences[source]; self.icmpBufferSettings.UserLimit <= len(sourceSequences) {
-				applyLruMapLimit(sourceSequences, self.icmpBufferSettings.UserLimit-1, func(bufferId BufferId, sequence *IcmpSequence) bool {
-					if self.log.V(1).Enabled() {
-						self.log.Infof(
-							"[lnr]icmp limit source %s->%s\n",
-							source,
-							sequence.destinationIp,
-						)
-					}
-					self.removeSequenceWithLock(bufferId, sequence)
-					return true
-				})
+		// the per-buffer caps apply only to standalone buffers; a nat
+		// attaches one shared tracker to every shard and family buffer, so
+		// its caps are nat-wide (see icmpFlowTracker)
+		if self.flowTracker == nil {
+			if 0 < self.icmpBufferSettings.UserLimit {
+				// limit the total flows per source to avoid blowing up the ulimit
+				if sourceSequences := self.sourceSequences[source]; self.icmpBufferSettings.UserLimit <= len(sourceSequences) {
+					applyLruMapLimit(sourceSequences, self.icmpBufferSettings.UserLimit-1, func(bufferId BufferId, sequence *IcmpSequence) bool {
+						if self.log.V(1).Enabled() {
+							self.log.Infof(
+								"[lnr]icmp limit source %s->%s\n",
+								source,
+								sequence.destinationIp,
+							)
+						}
+						self.removeSequenceWithLock(bufferId, sequence)
+						return true
+					})
+				}
 			}
-		}
-		if 0 < self.icmpBufferSettings.GlobalLimit {
-			// limit the total flows across all sources, an aggregate flow
-			// and fd ceiling
-			if self.icmpBufferSettings.GlobalLimit <= len(self.sequences) {
-				applyLruMapLimit(self.sequences, self.icmpBufferSettings.GlobalLimit-1, func(bufferId BufferId, sequence *IcmpSequence) bool {
-					if self.log.V(1).Enabled() {
-						self.log.Infof(
-							"[lnr]icmp limit global %s->%s\n",
-							sequence.source,
-							sequence.destinationIp,
-						)
-					}
-					self.removeSequenceWithLock(bufferId, sequence)
-					return true
-				})
+			if 0 < self.icmpBufferSettings.GlobalLimit {
+				// limit the total flows across all sources, an aggregate flow
+				// and fd ceiling
+				if self.icmpBufferSettings.GlobalLimit <= len(self.sequences) {
+					applyLruMapLimit(self.sequences, self.icmpBufferSettings.GlobalLimit-1, func(bufferId BufferId, sequence *IcmpSequence) bool {
+						if self.log.V(1).Enabled() {
+							self.log.Infof(
+								"[lnr]icmp limit global %s->%s\n",
+								sequence.source,
+								sequence.destinationIp,
+							)
+						}
+						self.removeSequenceWithLock(bufferId, sequence)
+						return true
+					})
+				}
 			}
 		}
 
@@ -305,6 +316,10 @@ func (self *IcmpBuffer[BufferId]) icmpSend(
 			self.icmpBufferSettings,
 		)
 		sequence.receivePacketsCallback = self.receivePacketsCallback
+		sequence.flowTracker = self.flowTracker
+		if self.flowTracker != nil {
+			self.flowTracker.register(sequence, self.icmpBufferSettings)
+		}
 		self.sequences[bufferId] = sequence
 		sourceSequences := self.sourceSequences[source]
 		if sourceSequences == nil {
@@ -411,6 +426,10 @@ type IcmpSequence struct {
 	ipPath *IpPath
 	// reusable backing for single-packet receive delivery
 	singlePacket [1][]byte
+
+	// flowTracker, when set, keeps this flow counted in its nat-wide caps
+	// until Cancel or Close
+	flowTracker *icmpFlowTracker
 
 	userLimited
 }
@@ -714,10 +733,17 @@ func (self *IcmpSequence) echoReplyPacket(sequenceNumber uint16, payload []byte)
 
 func (self *IcmpSequence) Cancel() {
 	self.cancel()
+	if self.flowTracker != nil {
+		// idempotent: the tracker keeps only the first release
+		self.flowTracker.release(self)
+	}
 }
 
 func (self *IcmpSequence) Close() {
 	self.cancel()
+	if self.flowTracker != nil {
+		self.flowTracker.release(self)
+	}
 }
 
 // icmpEgressUnsupportedError is the shared fail-soft error for platforms with

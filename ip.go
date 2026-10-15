@@ -433,6 +433,10 @@ type LocalUserNat struct {
 	sendShards []chan *SendPacket
 	numShards  int
 
+	// one tracker shared by every per-shard, per-family icmp buffer, so the
+	// configured icmp flow caps are nat-wide (see icmpFlowTracker)
+	icmpFlowTracker *icmpFlowTracker
+
 	settings *LocalUserNatSettings
 
 	bw *ProxyBandwidth
@@ -504,6 +508,7 @@ func NewLocalUserNat(ctx context.Context, clientTag string, bw *ProxyBandwidth, 
 		log:              log,
 		sendShards:       sendShards,
 		numShards:        numShards,
+		icmpFlowTracker:  newIcmpFlowTracker(),
 		settings:         settings,
 		bw:               bw,
 		receiveCallbacks: NewCallbackList[ReceivePacketFunction](),
@@ -704,9 +709,11 @@ func (self *LocalUserNat) runShard(shard int) {
 	tcp4Buffer := NewTcp4Buffer(self.ctx, self.receive, self.settings.TcpBufferSettings, self.bw)
 	tcp6Buffer := NewTcp6Buffer(self.ctx, self.receive, self.settings.TcpBufferSettings, self.bw)
 	// the icmp echo path is provider-side only: these buffers are all a ping
-	// can reach, and the client send path stays off
-	icmp4Buffer := NewIcmp4Buffer(self.ctx, self.receive, self.settings.IcmpBufferSettings)
-	icmp6Buffer := NewIcmp6Buffer(self.ctx, self.receive, self.settings.IcmpBufferSettings)
+	// can reach, and the client send path stays off. the pair shares the
+	// nat's flow tracker with every other shard's pair, so the flow caps
+	// hold across the nat instead of once per shard and family
+	icmp4Buffer := newIcmp4BufferShared(self.ctx, self.receive, self.settings.IcmpBufferSettings, self.icmpFlowTracker)
+	icmp6Buffer := newIcmp6BufferShared(self.ctx, self.receive, self.settings.IcmpBufferSettings, self.icmpFlowTracker)
 	shardCh := self.sendShards[shard]
 	// Fragments are reassembled before they are parsed: a non-first fragment
 	// has no transport header and a first fragment has a truncated payload.
