@@ -143,6 +143,10 @@ func TestMultiClientDialFailureReraceOffForwardsTheSignal(t *testing.T) {
 		update := newMultiClientChannelUpdate(context.Background(), ipPath)
 		update.client = channel
 		registerDialFailureTestFlow(mc, channel, update, ipPath)
+		// the flow sent its syn and the send path captured its generation;
+		// the provider's signal carries no sequence of its own
+		update.setSynGeneration(4711)
+		ipPath.SequenceNumber = 0
 
 		var forwarded *IpPath
 		var forwardedPacket []byte
@@ -162,6 +166,11 @@ func TestMultiClientDialFailureReraceOffForwardsTheSignal(t *testing.T) {
 		recovered, ok := ipParseIcmpUnreachable(forwardedPacket)
 		if !ok || recovered.ToIp4Path() != ipPath.ToIp4Path() && recovered.ToIp6Path() != ipPath.ToIp6Path() {
 			t.Fatalf("v%d: the forwarded packet does not name the flow", version)
+		}
+		// the embed must carry the flow's syn generation, not the signal's
+		// own (zero) sequence, or a kernel stack drops it as out of window
+		if recovered.SequenceNumber != 4711 {
+			t.Fatalf("v%d: the forwarded embed carries sequence %d, want the flow's syn generation 4711", version, recovered.SequenceNumber)
 		}
 		if mc.flowsReraced.Load() != 0 || mc.dialFailures.Load() != 1 {
 			t.Fatalf("v%d: counters are dialFailures=%d flowsReraced=%d", version, mc.dialFailures.Load(), mc.flowsReraced.Load())

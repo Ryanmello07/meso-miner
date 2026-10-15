@@ -1336,6 +1336,13 @@ func (self *RemoteUserNatMultiClient) sendPacket(
 						update.sequenceNumber = ipPath.SequenceNumber
 					}
 				}()
+				if ipPath.Syn {
+					// the flow's current syn generation: the sequence an
+					// icmp error's embed must carry to survive a kernel
+					// stack's send-window check (see synSequence).
+					// Lock-free, so it never nests with the parent lock.
+					update.setSynGeneration(ipPath.SequenceNumber)
+				}
 			} else if err != nil {
 				// reset the path
 
@@ -1796,11 +1803,11 @@ func (self *RemoteUserNatMultiClient) clientDialFailure(sourceClient *multiClien
 	rerace := self.settings.DialFailureRerace
 
 	matched := false
+	var update *multiClientChannelUpdate
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 
-		var update *multiClientChannelUpdate
 		switch egressIpPath.Version {
 		case 4:
 			update = self.ip4PathUpdates[egressIpPath.ToIp4Path()]
@@ -1858,10 +1865,17 @@ func (self *RemoteUserNatMultiClient) clientDialFailure(sourceClient *multiClien
 	}
 
 	// rerace disabled: hand the icmp to the app so it fails fast instead of
-	// hanging. Rebuilt from the egress path with the same builder the provider
-	// used, and delivered with the egress ipPath -- exactly the convention
-	// removeClient uses for its teardown packets.
-	if packet, ok := ipOosUnreachable(egressIpPath); ok {
+	// hanging. Rebuilt with the same builder the provider used, but over the
+	// flow's own syn sequence: the provider's flow path carries none, so its
+	// signal embeds 0, and a kernel stack (linux tcp_v4_err / tcp_v6_err)
+	// drops an error whose embedded sequence is outside its send window.
+	// Delivered with the egress ipPath -- exactly the convention removeClient
+	// uses for its teardown packets.
+	forwardPath := *egressIpPath
+	if synSequence, synSeen := update.synSequence(); synSeen {
+		forwardPath.SequenceNumber = synSequence
+	}
+	if packet, ok := ipOosUnreachable(&forwardPath); ok {
 		self.receivePacketCallback(TransferPath{}, protocol.ProvideMode_Network, egressIpPath, packet)
 	}
 }
@@ -2039,6 +2053,13 @@ type multiClientChannelUpdate struct {
 	// race packets are not currently tracked
 	normalPacketCount int
 	sequenceNumber    uint32
+	// synGenerationNumber is the sequence of the flow's most recent syn,
+	// captured on the send path, and whether a syn was seen at all. A kernel
+	// stack checks an icmp error's embed against it, so a forwarded
+	// unreachable must carry it (see synSequence). Written lock-free (atomic)
+	// from the send and dial-failure paths.
+	synGenerationNumber atomic.Uint32
+	synGenerationSeen   atomic.Bool
 }
 
 func newMultiClientChannelUpdate(ctx context.Context, ipPath *IpPath) *multiClientChannelUpdate {
@@ -2070,6 +2091,20 @@ func (self *multiClientChannelUpdate) IsDone() bool {
 	default:
 		return false
 	}
+}
+
+// setSynGeneration records the sequence of the flow's most recent syn, seen
+// on the send path. Lock-free (atomic): the send path holds no update lock.
+func (self *multiClientChannelUpdate) setSynGeneration(sequenceNumber uint32) {
+	self.synGenerationNumber.Store(sequenceNumber)
+	self.synGenerationSeen.Store(true)
+}
+
+// synSequence is the sequence number of the flow's current syn, which a
+// kernel stack checks an icmp error's embed against, and whether a syn was
+// seen at all.
+func (self *multiClientChannelUpdate) synSequence() (uint32, bool) {
+	return self.synGenerationNumber.Load(), self.synGenerationSeen.Load()
 }
 
 func (self *multiClientChannelUpdate) Close() {
