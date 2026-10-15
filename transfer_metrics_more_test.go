@@ -66,7 +66,10 @@ func TestTransferMoreStats_SequenceExitsAreCountedByReason(t *testing.T) {
 		before := exitCount("cancelled")
 		done := make(chan struct{})
 		go HandleError(func() { seq.Run(); close(done) })
-		time.Sleep(20 * time.Millisecond)
+		// Run must be inside its loop before the cancel, or the sequence ends
+		// through its start-up path under another reason. 20 ms was enough on an
+		// idle machine and not under the full suite with the race detector.
+		time.Sleep(300 * time.Millisecond)
 		cancel()
 		<-done
 		if exitCount("cancelled")-before != 1 {
