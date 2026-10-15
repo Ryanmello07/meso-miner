@@ -215,7 +215,8 @@ func craftSecurityPacket(proto IpProtocol, srcIP net.IP, srcPort int, dstIP net.
 	return append([]byte(nil), buf.Bytes()...)
 }
 
-const IpProtocolIcmp IpProtocol = 3
+// fork: IpProtocolIcmp now comes from ip_icmp_fork_glue.go (the icmp port);
+// this file's local copy was removed to avoid a redeclaration.
 
 func cfaaVerdictName(v cfaaVerdict) string {
 	switch v {
