@@ -557,10 +557,21 @@ func flowHash(packet []byte) uint32 {
 			if isIpv6ExtensionHeader(protocol) {
 				// a fragmented datagram pins every fragment, the first included,
 				// by its shared identification, for the same reason as ipv4
-				if walk, ok := walkIpv6ExtensionHeaders(packet); ok && walk.fragmented {
-					var identification [4]byte
-					binary.BigEndian.PutUint32(identification[:], walk.fragment.identification)
-					h ^= hash(identification[:])
+				if walk, ok := walkIpv6ExtensionHeaders(packet); ok {
+					if walk.fragmented {
+						var identification [4]byte
+						binary.BigEndian.PutUint32(identification[:], walk.fragment.identification)
+						h ^= hash(identification[:])
+						return h
+					}
+					// an unfragmented chain hashes the ports like a plain
+					// packet, so a flow does not change shard when a stack
+					// adds or drops an extension header (an atomic fragment
+					// walks through to its transport header here)
+					if (walk.nextHeader == ipProtocolNumberTcp || walk.nextHeader == ipProtocolNumberUdp) &&
+						walk.transportOffset+4 <= len(packet) {
+						h ^= hash(packet[walk.transportOffset : walk.transportOffset+4])
+					}
 					return h
 				}
 			}
