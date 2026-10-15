@@ -254,8 +254,8 @@ func familyTestWait(timeout time.Duration, cond func() bool) bool {
 func TestFamilyGroupLoopbackEndToEnd(t *testing.T) {
 	platform4 := newFamilyTestPlatform(t, "tcp4", "127.0.0.1:0")
 	platform6 := newFamilyTestPlatform(t, "tcp6", "[::1]:0")
-	if platform4 == nil || platform6 == nil {
-		t.Skip("needs IPv4 and IPv6 loopback")
+	if platform4 == nil || platform6 == nil || !connect.FamilySupported(6) {
+		t.Skip("needs IPv4 and IPv6 loopback and a usable IPv6 stack")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -491,8 +491,8 @@ func TestIpVersionControlKeyValidation(t *testing.T) {
 func TestFamilyGroupStackModes(t *testing.T) {
 	platform4 := newFamilyTestPlatform(t, "tcp4", "127.0.0.1:0")
 	platform6 := newFamilyTestPlatform(t, "tcp6", "[::1]:0")
-	if platform4 == nil || platform6 == nil {
-		t.Skip("needs IPv4 and IPv6 loopback")
+	if platform4 == nil || platform6 == nil || !connect.FamilySupported(6) {
+		t.Skip("needs IPv4 and IPv6 loopback and a usable IPv6 stack")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -559,8 +559,8 @@ func TestFamilyGroupStackModes(t *testing.T) {
 func TestFamilyGroupStartsInTheChosenStack(t *testing.T) {
 	platform4 := newFamilyTestPlatform(t, "tcp4", "127.0.0.1:0")
 	platform6 := newFamilyTestPlatform(t, "tcp6", "[::1]:0")
-	if platform4 == nil || platform6 == nil {
-		t.Skip("needs IPv4 and IPv6 loopback")
+	if platform4 == nil || platform6 == nil || !connect.FamilySupported(6) {
+		t.Skip("needs IPv4 and IPv6 loopback and a usable IPv6 stack")
 	}
 	for _, stack := range []connect.FamilyStackMode{connect.FamilyStackIpv6, connect.FamilyStackIpv4, connect.FamilyStackLegacy} {
 		before4, before6 := len(platform4.intents()), len(platform6.intents())

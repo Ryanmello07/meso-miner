@@ -168,17 +168,17 @@ type DohServer struct {
 }
 
 type DnsResolverSettings struct {
-	EnableRemoteDoh   bool     `json:"enable_remote_doh,omitempty"`
-	EnableLocalDoh    bool     `json:"enable_local_doh,omitempty"`
-	EnableRemoteDns   bool     `json:"enable_remote_dns,omitempty"`
-	EnableLocalDns    bool     `json:"enable_local_dns,omitempty"`
+	EnableRemoteDoh bool `json:"enable_remote_doh,omitempty"`
+	EnableLocalDoh  bool `json:"enable_local_doh,omitempty"`
+	EnableRemoteDns bool `json:"enable_remote_dns,omitempty"`
+	EnableLocalDns  bool `json:"enable_local_dns,omitempty"`
 	// DnsUpgradeMaskAddress is the plain-DNS destination advertised under the
 	// tunnel mask (ported from upstream net_http_doh.go at 20b29f79).
-	DnsUpgradeMaskAddress string `json:"dns_upgrade_mask_address,omitempty"`
-	RemoteDohUrlsIpv4 []string `json:"remote_doh_urls_ipv4,omitempty"`
-	RemoteDohUrlsIpv6 []string `json:"remote_doh_urls_ipv6,omitempty"`
-	LocalDohUrlsIpv4  []string `json:"local_doh_urls_ipv4,omitempty"`
-	LocalDohUrlsIpv6  []string `json:"local_doh_urls_ipv6,omitempty"`
+	DnsUpgradeMaskAddress string   `json:"dns_upgrade_mask_address,omitempty"`
+	RemoteDohUrlsIpv4     []string `json:"remote_doh_urls_ipv4,omitempty"`
+	RemoteDohUrlsIpv6     []string `json:"remote_doh_urls_ipv6,omitempty"`
+	LocalDohUrlsIpv4      []string `json:"local_doh_urls_ipv4,omitempty"`
+	LocalDohUrlsIpv6      []string `json:"local_doh_urls_ipv6,omitempty"`
 	// the *DohServers fields carry a per-server format tag (json or RFC 8484 wire). the legacy
 	// *DohUrls []string fields above are still honored and treated as json; prefer these for new
 	// config and for any wire-only server (e.g. Quad9, OpenDNS).
