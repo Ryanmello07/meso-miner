@@ -1,8 +1,6 @@
 package urnettools
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -39,10 +37,8 @@ func withWalletSeams(t *testing.T, providers []Provider, recorder *[][]string, s
 	prevProviders := discoverProvidersForWallet
 	prevDocker := discoverDockerForWallet
 	prevSub := walletProviderSubcommand
-	prevPaths := walletSigningScriptPaths
 	discoverProvidersForWallet = func() []Provider { return providers }
 	discoverDockerForWallet = func() []Provider { return nil }
-	walletSigningScriptPaths = func() (string, string) { return scriptPath, readmePath }
 	if recorder != nil {
 		walletProviderSubcommand = func(p Provider, args ...string) error {
 			*recorder = append(*recorder, append([]string{}, args...))
@@ -53,7 +49,6 @@ func withWalletSeams(t *testing.T, providers []Provider, recorder *[][]string, s
 		discoverProvidersForWallet = prevProviders
 		discoverDockerForWallet = prevDocker
 		walletProviderSubcommand = prevSub
-		walletSigningScriptPaths = prevPaths
 	})
 }
 
@@ -174,28 +169,22 @@ func TestWalletFleetDetectionViaProviderEnv(t *testing.T) {
 	}
 }
 
-func TestWalletSignWithoutHelperPrintsTheReadme(t *testing.T) {
+func TestWalletSignDelegatesToTheProviderSigningPage(t *testing.T) {
 	var calls [][]string
-	withWalletSeams(t, []Provider{walletWorkstationProvider()}, &calls, "", "/repo/scripts/wallet-consent/README.md")
-	err := cmdWalletSign([]string{"5CvF...ss58"})
-	if err == nil || !strings.Contains(err.Error(), "scripts/wallet-consent") || !strings.Contains(err.Error(), "/repo/scripts/wallet-consent/README.md") {
-		t.Fatalf("wallet sign without the helper must point at the README, got %v", err)
-	}
-}
-
-func TestWalletSignRunsTheHelperWithTheProviderTool(t *testing.T) {
-	dir := t.TempDir()
-	script := filepath.Join(dir, "run_signing.sh")
-	if err := os.WriteFile(script, []byte("#!/usr/bin/env bash\necho \"helper tool=$TOOL arg=$1\"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	var calls [][]string
-	withWalletSeams(t, []Provider{walletWorkstationProvider()}, &calls, script, "")
-	// -f skips the confirm prompt; the script itself is the unit under test
-	if err := cmdWalletSign([]string{"-f", "5CvF...ss58"}); err != nil {
+	withWalletSeams(t, []Provider{walletWorkstationProvider()}, &calls, "", "")
+	// -f skips the confirm prompt
+	if err := cmdWalletSign([]string{"-f", "5CvF...ss58", "--no-open"}); err != nil {
 		t.Fatalf("wallet sign: %v", err)
 	}
-	if len(calls) != 0 {
-		t.Fatal("wallet sign runs the helper, it does not delegate to the provider directly")
+	if len(calls) != 1 || strings.Join(calls[0], " ") != "wallet sign 5CvF...ss58 --no-open" {
+		t.Fatalf("wallet sign must run 'provider wallet sign' with the arguments, got %v", calls)
+	}
+	// the address is optional: the account is chosen on the page
+	calls = nil
+	if err := cmdWalletSign([]string{"-f"}); err != nil {
+		t.Fatalf("wallet sign without an address: %v", err)
+	}
+	if len(calls) != 1 || strings.Join(calls[0], " ") != "wallet sign" {
+		t.Fatalf("wallet sign without an address must still delegate, got %v", calls)
 	}
 }

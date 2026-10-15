@@ -3,17 +3,14 @@ package urnettools
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 )
 
 // The wallet group wraps the provider binary's own wallet subcommands
-// (`provider wallet status|challenge|set`) the same way auth/choose-network
-// wrap theirs, and runs the browser signing helper
-// (scripts/wallet-consent/run_signing.sh) for sign. The consent is one
+// (`provider wallet status|challenge|set|sign`) the same way auth/choose-network
+// wrap theirs; sign runs the provider's own browser signing page. The consent is one
 // signature covering every provider client of the network, current and
 // future; a fleet node needs nothing. Signing material (a coldkey seed file)
 // never belongs on a fleet node: `wallet set --coldkey_seed_file` and
@@ -25,7 +22,6 @@ var (
 	discoverProvidersForWallet = Discover
 	discoverDockerForWallet    = DiscoverDocker
 	walletProviderSubcommand   = providerSubcommand
-	walletSigningScriptPaths   = defaultWalletSigningScriptPaths
 )
 
 // fleetProviderEnvNames are the provider runtime environment markers that
@@ -101,36 +97,6 @@ func refuseSeedSigningOnFleetNode(workstation bool, what string) error {
 	return fmt.Errorf(`%s touches your coldkey's signing material and is for your OWN workstation, never a fleet node. This box looks like a fleet member (a provider service or provider environment is present), and a fleet node needs nothing here. If this really is your own workstation, pass %s and run it again`, what, walletWorkstationFlag)
 }
 
-// defaultWalletSigningScriptPaths resolves the wallet signing helper relative
-// to the tool's install (<exe dir>/scripts/wallet-consent, then
-// <exe dir>/../scripts/wallet-consent for a source layout), with the current
-// directory as a last resort. Returns the script path and the README path
-// (either may be empty).
-func defaultWalletSigningScriptPaths() (scriptPath, readmePath string) {
-	const rel = "scripts/wallet-consent"
-	var dirs []string
-	if exe, err := os.Executable(); err == nil {
-		base := filepath.Dir(exe)
-		dirs = append(dirs, filepath.Join(base, rel), filepath.Join(base, "..", rel))
-	}
-	if wd, err := os.Getwd(); err == nil {
-		dirs = append(dirs, filepath.Join(wd, rel))
-	}
-	for _, dir := range dirs {
-		if readmePath == "" {
-			if _, err := os.Stat(filepath.Join(dir, "README.md")); err == nil {
-				readmePath = filepath.Join(dir, "README.md")
-			}
-		}
-		if scriptPath == "" {
-			if _, err := os.Stat(filepath.Join(dir, "run_signing.sh")); err == nil {
-				scriptPath = filepath.Join(dir, "run_signing.sh")
-			}
-		}
-	}
-	return
-}
-
 func newWalletCmd() *cobra.Command {
 	walletCmd := &cobra.Command{
 		Use:     "wallet",
@@ -161,10 +127,10 @@ func newWalletCmd() *cobra.Command {
 			cmdWalletSet,
 		),
 		newWalletSubCmd(
-			"sign <coldkey_ss58>",
+			"sign [coldkey_ss58]",
 			"sign the consent in the browser",
-			"Run the browser signing helper (scripts/wallet-consent/run_signing.sh): it fetches the challenge, serves one local page where a wallet extension (Talisman, or any Polkadot signRaw extension) signs the statement, submits the signature and verifies the platform's receipt. The seed phrase never leaves the extension. Run it on your own computer, never on a fleet node; the tool refuses on a fleet member unless you pass --i-am-on-my-own-workstation. Needs python3 and a browser with the extension on this machine.",
-			"  urnet-tools wallet sign 5CvF...ss58\n  urnet-tools wallet sign 5CvF...ss58 --unit urnetwork-native.service",
+			"Serve one local page (127.0.0.1 only, 15 minutes, visible countdowns) where a wallet extension (Talisman, SubWallet, Polkadot{.js}, Nova, or any Polkadot signRaw extension) signs the consent statement, then submit the signature and verify the platform's receipt. Without an address you choose the account on the page. The seed phrase never leaves the extension. Run it on your own computer, never on a fleet node; the tool refuses on a fleet member unless you pass --i-am-on-my-own-workstation. Needs a browser with the extension on this machine; no extra tools.",
+			"  urnet-tools wallet sign 5CvF...ss58\n  urnet-tools wallet sign                       # choose the account on the page\n  urnet-tools wallet sign 5CvF...ss58 --no-open",
 			cmdWalletSign,
 		),
 	)
@@ -295,15 +261,16 @@ func cmdWalletSign(args []string) error {
 	if hasHelpFlag(args) {
 		fmt.Fprint(os.Stderr, `urnet-tools wallet sign — sign the consent in the browser
 
-Usage: urnet-tools wallet sign <coldkey_ss58> [target]
+Usage: urnet-tools wallet sign [coldkey_ss58] [--wallet-from-epoch N --wallet-through-epoch N] [--port N] [--no-open] [target]
 
-Runs the browser signing helper (scripts/wallet-consent/run_signing.sh):
-fetch the challenge, sign the statement in a wallet extension (Talisman, or
-any Polkadot signRaw extension) on one local page, submit the signature and
-verify the platform's receipt. The seed phrase never leaves the extension.
-Run it on your own computer, never on a fleet node; on a fleet member the
-tool refuses unless you pass --i-am-on-my-own-workstation. Needs python3
-and a browser with the extension on this machine.
+Runs 'provider wallet sign': one local page on 127.0.0.1 (15 minutes, with
+visible countdowns, extendable from the page) where a wallet extension
+(Talisman, SubWallet, Polkadot{.js}, Nova, or any Polkadot signRaw extension)
+signs the consent statement. Without an address you choose the account on
+the page. The platform's receipt is verified and the result shown on the page
+and in the terminal. The seed phrase never leaves the extension. Run it on
+your own computer, never on a fleet node; on a fleet member the tool refuses
+unless you pass --i-am-on-my-own-workstation.
 `)
 		return nil
 	}
@@ -316,32 +283,12 @@ and a browser with the extension on this machine.
 	if err != nil {
 		return err
 	}
-	if len(rest) == 0 {
-		return fmt.Errorf("wallet sign requires a coldkey ss58 address: urnet-tools wallet sign <coldkey_ss58>")
-	}
-	scriptPath, readmePath := walletSigningScriptPaths()
-	if scriptPath == "" {
-		if readmePath != "" {
-			return fmt.Errorf("the wallet signing helper (run_signing.sh) was not found beside this tool; it ships in the repo under scripts/wallet-consent/. Read the guide: %s", readmePath)
-		}
-		return fmt.Errorf("the wallet signing helper (run_signing.sh) was not found beside this tool; it ships in the repo under scripts/wallet-consent/ (see scripts/wallet-consent/README.md)")
-	}
-	if p.Binary == "" {
-		return fmt.Errorf("provider %s has no resolvable binary path", providerLabel(p))
-	}
-	ok, err := confirmGate("sign the network wallet consent with the browser helper on "+providerLabel(p), p, force, dryRun)
+	ok, err := confirmGate("sign the network wallet consent in the browser with "+providerLabel(p), p, force, dryRun)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return nil
 	}
-	cmd := exec.Command("bash", append([]string{scriptPath}, rest...)...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
-	// the helper drives the provider binary for challenge/set; point it at
-	// the targeted provider so the consent lands on the right identity
-	cmd.Env = append(os.Environ(), "TOOL="+p.Binary)
-	return cmd.Run()
+	return walletProviderSubcommand(p, append([]string{"wallet", "sign"}, rest...)...)
 }
