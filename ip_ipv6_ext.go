@@ -27,14 +27,19 @@ import (
 // IPv6 next-header values that are extension headers (RFC 8200 §4 and IANA),
 // plus the terminal values the walker recognizes by name.
 const (
-	// the rest of this set (hop-by-hop, routing, fragment, esp-adjacent auth,
-	// destination-options, mobility, host-identity, shim6, fragment-header size)
-	// is declared byte-identically in ip_ipv6_fragment.go on this line and is
-	// not repeated here; upstream moved it into this file.
-	ipv6NextHeaderEsp          = 50
-	ipv6NextHeaderNoNextHeader = 59
+	ipv6NextHeaderHopByHop           = 0
+	ipv6NextHeaderRouting            = 43
+	ipv6NextHeaderFragment           = 44
+	ipv6NextHeaderEsp                = 50
+	ipv6NextHeaderAuthentication     = 51
+	ipv6NextHeaderNoNextHeader       = 59
+	ipv6NextHeaderDestinationOptions = 60
+	ipv6NextHeaderMobility           = 135
+	ipv6NextHeaderHostIdentity       = 139
+	ipv6NextHeaderShim6              = 140
 
 	// the fixed size of a Fragment extension header
+	ipv6FragmentHeaderSize = 8
 	// bounds the walk so a crafted chain cannot loop the parser; real packets
 	// carry at most a handful of extension headers
 	ipv6MaxExtensionHeaderCount = 16
@@ -78,9 +83,24 @@ type ipv6HeaderWalk struct {
 	fragmented bool
 }
 
-// isIpv6ExtensionHeader lives in ip_ipv6_fragment.go on this line, byte-identical
-// to the copy this file carries upstream. It is omitted here rather than
-// duplicated: upstream moved it into this file and our copy predates the move.
+// isIpv6ExtensionHeader reports whether a next-header value is one the walker
+// steps through. Used by hot paths to skip the walk for the overwhelmingly
+// common packet whose base header points straight at tcp, udp or icmpv6.
+func isIpv6ExtensionHeader(nextHeader byte) bool {
+	switch nextHeader {
+	case ipv6NextHeaderHopByHop,
+		ipv6NextHeaderRouting,
+		ipv6NextHeaderFragment,
+		ipv6NextHeaderAuthentication,
+		ipv6NextHeaderDestinationOptions,
+		ipv6NextHeaderMobility,
+		ipv6NextHeaderHostIdentity,
+		ipv6NextHeaderShim6:
+		return true
+	default:
+		return false
+	}
+}
 
 // walkIpv6ExtensionHeaders validates the base header and walks the extension
 // chain. ok is false when the packet is not IPv6, is shorter than its declared

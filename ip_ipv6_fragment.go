@@ -1,30 +1,41 @@
 package connect
 
-// The outbound half of IPv6 fragmentation: converted from upstream, one
-// complete IPv6 packet with no extension headers becomes RFC 8200 fragments.
-// Oversized UDP replies are fragmented here instead of being split into
-// several independent datagrams, which corrupts application framing; the
-// source stack reassembles. The receive-side reassembler is not ported.
-
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"slices"
 	"sync/atomic"
+	"time"
+
+	"github.com/urnetwork/connect/protocol"
 )
 
-const (
-	ipv6NextHeaderHopByHop           = 0
-	ipv6NextHeaderRouting            = 43
-	ipv6NextHeaderFragment           = 44
-	ipv6NextHeaderAuthentication     = 51
-	ipv6NextHeaderDestinationOptions = 60
-	ipv6NextHeaderMobility           = 135
-	ipv6NextHeaderHostIdentity       = 139
-	ipv6NextHeaderShim6              = 140
+// ip_ipv6_fragment.go — IPv6 fragment reassembly and emission (RFC 8200
+// §4.5), the v6 half of ip_fragment.go. The shape deliberately mirrors the
+// IPv4 reassembler: one small cache per NAT send shard, bounded in datagrams,
+// fragments and retained bytes, lifetime measured from the first fragment,
+// overlapping fragments poisoning the whole datagram (RFC 5722), and the
+// original fragment owners optionally handed back on completion so a policy
+// decision made on the whole datagram can forward the untouched wire
+// fragments.
+//
+// What differs is the wire format. A v6 fragment carries an unfragmentable
+// part (the base header plus any extension headers before the Fragment
+// header) that every fragment repeats, then the 8-byte Fragment header, then
+// a slice of the fragmentable part. Reassembly takes the unfragmentable part
+// from the offset-zero fragment, points its trailing Next Header field at the
+// fragmentable part's first header (dropping the Fragment header), and
+// rewrites the payload length. There is no header checksum to fix and no DF
+// flag to clear. The identification is 32 bits.
 
-	// the fixed size of a Fragment extension header
-	ipv6FragmentHeaderSize = 8
+const (
+	// same bounds as the v4 reassembler: the two caches share a shard
+	ipv6FragmentReassemblyTimeout          = ipv4FragmentReassemblyTimeout
+	ipv6FragmentReassemblyMaxDatagrams     = ipv4FragmentReassemblyMaxDatagrams
+	ipv6FragmentReassemblyMaxFragments     = ipv4FragmentReassemblyMaxFragments
+	ipv6FragmentReassemblyMaxRetainedBytes = ipv4FragmentReassemblyMaxRetainedBytes
 )
 
 var (
@@ -33,41 +44,376 @@ var (
 	errIpv6ExtensionHeadersFragment = errors.New("IPv6 packet with extension headers cannot be fragmented here")
 )
 
-// isIpv6ExtensionHeader reports whether a next-header value is one the walker
-// steps through. Used by hot paths to skip the walk for the overwhelmingly
-// common packet whose base header points straight at tcp, udp or icmpv6.
-func isIpv6ExtensionHeader(nextHeader byte) bool {
-	switch nextHeader {
-	case ipv6NextHeaderHopByHop,
-		ipv6NextHeaderRouting,
-		ipv6NextHeaderFragment,
-		ipv6NextHeaderAuthentication,
-		ipv6NextHeaderDestinationOptions,
-		ipv6NextHeaderMobility,
-		ipv6NextHeaderHostIdentity,
-		ipv6NextHeaderShim6:
-		return true
-	default:
-		return false
+type ipv6FragmentKey struct {
+	source        TransferPath
+	transferKey   TransferKey
+	provideMode   protocol.ProvideMode
+	sourceIp      [16]byte
+	destinationIp [16]byte
+	// rfc 8200 keys reassembly on (source, destination, identification) only;
+	// the protocol is inside the fragmentable part
+	identification uint32
+}
+
+type ipv6RetainedFragment struct {
+	packet []byte
+	// unfragmentableByteCount is the Fragment header offset; the bytes before
+	// it are the unfragmentable part this fragment carries
+	unfragmentableByteCount int
+	offset                  int
+	payloadByteCount        int
+}
+
+func (self *ipv6RetainedFragment) payload() []byte {
+	start := self.unfragmentableByteCount + ipv6FragmentHeaderSize
+	return self.packet[start : start+self.payloadByteCount]
+}
+
+type ipv6FragmentDatagram struct {
+	createdAt time.Time
+	updatedAt time.Time
+	fragments []ipv6RetainedFragment
+	// from the offset-zero fragment. Zero until it arrives.
+	firstUnfragmentableByteCount int
+	// the Next Header field that pointed at the Fragment header, rewritten
+	// to firstNextHeader on reassembly
+	firstNextHeaderFieldOffset int
+	firstNextHeader            byte
+	finalPayloadByteCount      int
+}
+
+type ipv6FragmentReassembler struct {
+	maxRetainedBytes  int
+	datagrams         map[ipv6FragmentKey]*ipv6FragmentDatagram
+	retainedByteCount int
+}
+
+func newIpv6FragmentReassembler() *ipv6FragmentReassembler {
+	return &ipv6FragmentReassembler{
+		maxRetainedBytes: ipv6FragmentReassemblyMaxRetainedBytes,
+		datagrams:        make(map[ipv6FragmentKey]*ipv6FragmentDatagram),
 	}
 }
 
-// ipv6FragmentIdentificationFallback only runs if the system random source
-// fails, which should not happen; a predictable identification is still better
-// than failing the reply.
-var ipv6FragmentIdentificationFallback atomic.Uint32
+// process consumes packet only when it is a non-atomic IPv6 fragment. An
+// unfragmented packet is returned unchanged. A nil result means the fragment
+// was retained for completion or rejected and returned to the message pool.
+func (self *ipv6FragmentReassembler) process(
+	source TransferPath,
+	transferKey TransferKey,
+	provideMode protocol.ProvideMode,
+	packet []byte,
+) []byte {
+	return self.processAt(source, transferKey, provideMode, packet, time.Now())
+}
+
+func (self *ipv6FragmentReassembler) processAt(
+	source TransferPath,
+	transferKey TransferKey,
+	provideMode protocol.ProvideMode,
+	packet []byte,
+	now time.Time,
+) []byte {
+	return self.processResultAt(
+		source,
+		transferKey,
+		provideMode,
+		packet,
+		now,
+		false,
+	).packet
+}
+
+func (self *ipv6FragmentReassembler) processResultAt(
+	source TransferPath,
+	transferKey TransferKey,
+	provideMode protocol.ProvideMode,
+	packet []byte,
+	now time.Time,
+	retainCompletedFragments bool,
+) ipFragmentProcessResult {
+	if len(packet) < Ipv6HeaderSize || packet[0]>>4 != 6 {
+		return ipFragmentProcessResult{packet: packet, accepted: true}
+	}
+	if !isIpv6ExtensionHeader(packet[6]) {
+		// the common case: no extension chain, so no fragment header
+		return ipFragmentProcessResult{packet: packet, accepted: true}
+	}
+	walk, ok := walkIpv6ExtensionHeaders(packet)
+	if !ok || !walk.fragmented {
+		// not a fragment (or malformed, which the parse will drop)
+		return ipFragmentProcessResult{packet: packet, accepted: true}
+	}
+
+	self.expire(now)
+	if self.maxRetainedBytes <= 0 {
+		self.maxRetainedBytes = ipv6FragmentReassemblyMaxRetainedBytes
+	}
+
+	key := ipv6FragmentKey{
+		source:         source,
+		transferKey:    transferKey,
+		provideMode:    provideMode,
+		identification: walk.fragment.identification,
+	}
+	copy(key.sourceIp[:], packet[8:24])
+	copy(key.destinationIp[:], packet[24:40])
+
+	drop := func() ipFragmentProcessResult {
+		self.releaseDatagram(key)
+		MessagePoolReturn(packet)
+		return ipFragmentProcessResult{fragment: true}
+	}
+
+	unfragmentableByteCount := walk.fragment.headerOffset
+	payloadByteCount := walk.payloadEnd - walk.transportOffset
+	moreFragments := walk.fragment.moreFragments
+	offset := walk.fragment.offset
+	// rfc 8200 §4.5: every fragment but the last carries a multiple of 8
+	// octets, and the reassembled payload length must fit the 16 bit field
+	if payloadByteCount <= 0 ||
+		(moreFragments && payloadByteCount%8 != 0) ||
+		0xffff < (unfragmentableByteCount-Ipv6HeaderSize)+offset+payloadByteCount {
+		return drop()
+	}
+
+	datagram := self.datagrams[key]
+	if datagram == nil {
+		self.makeDatagramRoom(now)
+		packetCost := cap(packet)
+		if self.maxRetainedBytes < packetCost {
+			MessagePoolReturn(packet)
+			return ipFragmentProcessResult{fragment: true}
+		}
+		for self.retainedByteCount+packetCost > self.maxRetainedBytes {
+			if !self.releaseOldestDatagram() {
+				MessagePoolReturn(packet)
+				return ipFragmentProcessResult{fragment: true}
+			}
+		}
+		datagram = &ipv6FragmentDatagram{
+			createdAt:             now,
+			updatedAt:             now,
+			finalPayloadByteCount: -1,
+		}
+		self.datagrams[key] = datagram
+	} else if self.retainedByteCount+cap(packet) > self.maxRetainedBytes {
+		return drop()
+	}
+
+	fragmentEnd := offset + payloadByteCount
+	fragmentPayload := packet[walk.transportOffset:walk.payloadEnd]
+	for _, retained := range datagram.fragments {
+		retainedEnd := retained.offset + retained.payloadByteCount
+		if offset == retained.offset && fragmentEnd == retainedEnd {
+			// an exact retransmission is harmless; a conflicting duplicate
+			// poisons the datagram like every other overlap (rfc 5722)
+			if bytes.Equal(fragmentPayload, retained.payload()) {
+				MessagePoolReturn(packet)
+				datagram.updatedAt = now
+				return ipFragmentProcessResult{fragment: true, accepted: true}
+			}
+			return drop()
+		}
+		if offset < retainedEnd && retained.offset < fragmentEnd {
+			return drop()
+		}
+	}
+	if len(datagram.fragments) >= ipv6FragmentReassemblyMaxFragments {
+		return drop()
+	}
+	if !moreFragments {
+		if datagram.finalPayloadByteCount >= 0 && datagram.finalPayloadByteCount != fragmentEnd {
+			return drop()
+		}
+		// a final fragment ending before a retained fragment would let a
+		// contiguous prefix complete and then write past the reassembly
+		for _, retained := range datagram.fragments {
+			if fragmentEnd < retained.offset+retained.payloadByteCount {
+				return drop()
+			}
+		}
+		datagram.finalPayloadByteCount = fragmentEnd
+	} else if datagram.finalPayloadByteCount >= 0 && datagram.finalPayloadByteCount <= fragmentEnd {
+		return drop()
+	}
+	if offset == 0 {
+		if datagram.firstUnfragmentableByteCount != 0 &&
+			datagram.firstUnfragmentableByteCount != unfragmentableByteCount {
+			return drop()
+		}
+		datagram.firstUnfragmentableByteCount = unfragmentableByteCount
+		datagram.firstNextHeaderFieldOffset = walk.fragment.precedingNextHeaderFieldOffset
+		datagram.firstNextHeader = walk.fragment.nextHeader
+	}
+	if datagram.firstUnfragmentableByteCount != 0 &&
+		0 <= datagram.finalPayloadByteCount &&
+		0xffff < (datagram.firstUnfragmentableByteCount-Ipv6HeaderSize)+datagram.finalPayloadByteCount {
+		return drop()
+	}
+
+	// retain the original pool allocation rather than copying each fragment.
+	// cap is charged because it is the backing memory actually kept alive.
+	packet = packet[:walk.payloadEnd]
+	datagram.fragments = append(datagram.fragments, ipv6RetainedFragment{
+		packet:                  packet,
+		unfragmentableByteCount: unfragmentableByteCount,
+		offset:                  offset,
+		payloadByteCount:        payloadByteCount,
+	})
+	datagram.updatedAt = now
+	self.retainedByteCount += cap(packet)
+
+	if datagram.firstUnfragmentableByteCount == 0 || datagram.finalPayloadByteCount < 0 {
+		return ipFragmentProcessResult{fragment: true, accepted: true}
+	}
+	slices.SortFunc(datagram.fragments, func(a ipv6RetainedFragment, b ipv6RetainedFragment) int {
+		if a.offset < b.offset {
+			return -1
+		}
+		if b.offset < a.offset {
+			return 1
+		}
+		return 0
+	})
+	position := 0
+	for _, fragment := range datagram.fragments {
+		if fragment.offset != position {
+			return ipFragmentProcessResult{fragment: true, accepted: true}
+		}
+		position += fragment.payloadByteCount
+	}
+	if position != datagram.finalPayloadByteCount {
+		return ipFragmentProcessResult{fragment: true, accepted: true}
+	}
+
+	packetByteCount := datagram.firstUnfragmentableByteCount + datagram.finalPayloadByteCount
+	reassembled := MessagePoolGet(packetByteCount)
+	for _, fragment := range datagram.fragments {
+		if fragment.offset == 0 {
+			copy(
+				reassembled[:datagram.firstUnfragmentableByteCount],
+				fragment.packet[:datagram.firstUnfragmentableByteCount],
+			)
+			break
+		}
+	}
+	for _, fragment := range datagram.fragments {
+		copy(
+			reassembled[datagram.firstUnfragmentableByteCount+fragment.offset:],
+			fragment.payload(),
+		)
+	}
+	// the reassembled packet has no Fragment header: the header that pointed
+	// at it now points at the fragmentable part's first header
+	reassembled[datagram.firstNextHeaderFieldOffset] = datagram.firstNextHeader
+	binary.BigEndian.PutUint16(reassembled[4:6], uint16(packetByteCount-Ipv6HeaderSize))
+	if retainCompletedFragments {
+		retained := self.detachDatagram(key)
+		fragments := make([][]byte, len(retained))
+		// like the v4 owned groups: give every group a canonical nonzero
+		// identification before it crosses an asynchronous route, so two
+		// complete groups that interleave on parallel lanes stay distinct
+		identification := nextIpv6FragmentIdentification()
+		for i := range retained {
+			packet := retained[i].packet
+			binary.BigEndian.PutUint32(
+				packet[retained[i].unfragmentableByteCount+4:retained[i].unfragmentableByteCount+8],
+				identification,
+			)
+			fragments[i] = packet
+		}
+		return ipFragmentProcessResult{
+			packet:    reassembled,
+			fragments: fragments,
+			fragment:  true,
+			accepted:  true,
+		}
+	}
+	self.releaseDatagram(key)
+	return ipFragmentProcessResult{
+		packet:   reassembled,
+		fragment: true,
+		accepted: true,
+	}
+}
+
+func (self *ipv6FragmentReassembler) makeDatagramRoom(now time.Time) {
+	self.expire(now)
+	for len(self.datagrams) >= ipv6FragmentReassemblyMaxDatagrams {
+		if !self.releaseOldestDatagram() {
+			return
+		}
+	}
+}
+
+func (self *ipv6FragmentReassembler) releaseOldestDatagram() bool {
+	var oldestKey ipv6FragmentKey
+	var oldestTime time.Time
+	found := false
+	for key, datagram := range self.datagrams {
+		if !found || datagram.updatedAt.Before(oldestTime) {
+			oldestKey = key
+			oldestTime = datagram.updatedAt
+			found = true
+		}
+	}
+	if found {
+		self.releaseDatagram(oldestKey)
+	}
+	return found
+}
+
+func (self *ipv6FragmentReassembler) expire(now time.Time) {
+	for key, datagram := range self.datagrams {
+		// lifetime from the first fragment, so paced duplicates cannot pin a
+		// slot forever
+		if ipv6FragmentReassemblyTimeout <= now.Sub(datagram.createdAt) {
+			self.releaseDatagram(key)
+		}
+	}
+}
+
+func (self *ipv6FragmentReassembler) releaseDatagram(key ipv6FragmentKey) {
+	for _, fragment := range self.detachDatagram(key) {
+		MessagePoolReturn(fragment.packet)
+	}
+}
+
+func (self *ipv6FragmentReassembler) detachDatagram(key ipv6FragmentKey) []ipv6RetainedFragment {
+	datagram := self.datagrams[key]
+	if datagram == nil {
+		return nil
+	}
+	delete(self.datagrams, key)
+	for _, fragment := range datagram.fragments {
+		self.retainedByteCount -= cap(fragment.packet)
+	}
+	return datagram.fragments
+}
+
+func (self *ipv6FragmentReassembler) close() {
+	for key := range self.datagrams {
+		self.releaseDatagram(key)
+	}
+}
+
+// fork: upstream uses a process-wide sequential counter here, which makes the
+// identification predictable. This line draws it from the system random source
+// and keeps the counter only as the fallback if that source fails, which should
+// not happen; a predictable identification is still better than failing the
+// reply. Keep this hook on every sync of this file.
+var ipv6FragmentIdentification atomic.Uint32
 
 // nextIpv6FragmentIdentification returns a nonzero 32-bit identification that
 // is unpredictable and, over a 32-bit space, unlikely to repeat for a source and
 // destination within a reassembly window (RFC 7739 and RFC 8200 section 4.5 on
-// predictable identifications and their reuse). The fragments here travel inside
-// the tunnel to the client's stack, but the identification costs one random read
-// only on the rare oversized-reply path, so it is unpredictable regardless.
+// predictable identifications and their reuse).
 func nextIpv6FragmentIdentification() uint32 {
 	var b [4]byte
 	for {
 		if _, err := rand.Read(b[:]); err != nil {
-			if identification := ipv6FragmentIdentificationFallback.Add(1); identification != 0 {
+			if identification := ipv6FragmentIdentification.Add(1); identification != 0 {
 				return identification
 			}
 			continue
