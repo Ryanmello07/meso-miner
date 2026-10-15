@@ -281,13 +281,14 @@ func TestParseIpPathIpv6ExtensionHeaders(t *testing.T) {
 		t.Fatalf("atomic fragment = %+v, %v", ipPath, err)
 	}
 
-	// icmp stays unsupported at ParseIpPath on this line: the chain is walked
-	// (no support for protocol 58), never parsed, until the icmp wire-up lands
+	// icmp echo is wired in: the chain is walked and the echo is parsed behind
+	// the extension header exactly as behind none, and the kill switch still
+	// rejects it at the parse
 	echo := testingIcmp6EchoPacket(testIpv6Src, testIpv6Dst, 0x77, 1, []byte("ping"))
 	icmp := echo[Ipv6HeaderSize:]
 	wrapped := testIpv6Packet(testIpv6Src, testIpv6Dst, []testIpv6Ext{{kind: ipv6NextHeaderHopByHop}}, byte(ipProtocolNumberIcmp6), icmp)
-	if _, err = ParseIpPath(wrapped); err == nil {
-		t.Fatalf("icmp over hop-by-hop parsed; icmp must stay unsupported until its wire-up")
+	if ipPath, err = ParseIpPath(wrapped); err != nil || ipPath.Protocol != IpProtocolIcmp || ipPath.Version != 6 {
+		t.Fatalf("icmp echo over hop-by-hop = %+v, %v", ipPath, err)
 	}
 }
 
