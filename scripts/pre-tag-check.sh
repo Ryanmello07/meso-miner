@@ -9,6 +9,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Some tests bind a unix socket under t.TempDir(), whose path embeds the test
+# name; a long TMPDIR pushes it past the 108 byte sun_path limit ("bind: invalid
+# argument"). A hosted runner uses /tmp, so use /tmp here too, whatever the
+# session set.
+export TMPDIR=/tmp
+
 quick=0
 [ "${1:-}" = "--quick" ] && quick=1
 
