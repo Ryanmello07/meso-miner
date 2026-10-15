@@ -57,10 +57,23 @@ func (self *ClientStrategy) H1DialContextWithDialer(ctx context.Context, address
 	eval := func(handleCtx context.Context, dialer *clientDialer) *evalResult {
 		info := self.dialerInfo(dialer)
 		startDial := time.Now()
-		conn, err := dialH1MessagesWithinDeadline(handleCtx, address, requestHeader, dialer.WsDialer(self.settings), H1FramerProtocol, maximum, enabled, stats, upgradeRouteScope(dialer))
+		timing := &dialTiming{}
+		conn, err := dialH1MessagesWithinDeadline(timing.traceCtx(handleCtx, startDial), address, requestHeader, dialer.WsDialer(self.settings), H1FramerProtocol, maximum, enabled, stats, upgradeRouteScope(dialer))
 		terminal, refusalOnly := httpUpgradeTerminalCauses(err)
 		if !refusalOnly {
-			dialer.Update(handleCtx, err, time.Since(startDial))
+			// the same bookkeeping WsDialContext does for a websocket dial: the
+			// strategy's probe record and the dialer's connect-latency sample (the
+			// connect-only time when the trace saw it, else the whole dial)
+			if dialer.Update(handleCtx, err, time.Since(startDial)) {
+				self.probes.record(err == nil)
+			}
+			if err == nil {
+				freshConnect, establishTime := timing.sample()
+				if !freshConnect {
+					establishTime = time.Since(startDial)
+				}
+				dialer.observeConnect(establishTime)
+			}
 			observeDialAttempt(handleCtx, err)
 		}
 		return causes.track(&evalResult{h1Conn: conn, dialerInfo: info, err: err, terminal: terminal})

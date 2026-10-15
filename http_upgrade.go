@@ -416,8 +416,13 @@ func dialH1MessagesWithinDeadline(ctx context.Context, address string, header ht
 	}
 	ws, response, err := dialH1WebSocket(ctx, address, header, dialer)
 	if err != nil {
-		if response != nil && response.Body != nil {
-			err = errors.Join(err, response.Body.Close())
+		if response != nil {
+			// keep the platform's answer, as WsDialContext does: "bad handshake"
+			// alone cannot tell a refused token from an overloaded backend
+			err = &wsStatusError{status: response.StatusCode, err: err}
+			if response.Body != nil {
+				err = errors.Join(err, response.Body.Close())
+			}
 		}
 		if upgradeErr != nil {
 			return nil, errors.Join(upgradeErr, err)
