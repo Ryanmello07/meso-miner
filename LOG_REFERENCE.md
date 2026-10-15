@@ -289,6 +289,28 @@ The provider failed to authenticate a transport connection to the URnetwork plat
 
 ---
 
+## 🛰️ Proxy UDP Relay Check (`[proxy][udp]`)
+
+Before a proxy is allowed to carry H3, the provider checks that UDP actually relays through it and that it exits where TCP does. One line is printed **per change of answer for an identity**, so a fleet of proxies produces one line each rather than one per attempt.
+
+```
+[proxy][udp] proxy[12] (198.51.100.7:1080) udp relay ok, exit 198.51.100.7 matches tcp; h3 allowed
+[proxy][udp] proxy[12] (198.51.100.7:1080) udp exits from 203.0.113.9 but tcp from 198.51.100.7; h3 not used for this proxy
+[proxy][udp] proxy[12] (198.51.100.7:1080) no udp relay (socks5: udp not supported); h3 not used for this proxy, tcp modes only
+[proxy][udp] proxy[12] (198.51.100.7:1080) udp relay works (exit 198.51.100.7) but the tcp exit could not be learned (timeout); h3 allowed, checking again soon
+```
+
+| Line | Meaning |
+|---|---|
+| `udp relay ok, exit X matches tcp; h3 allowed` | The proxy relays UDP and both protocols leave by the same address. H3 may be used through it. |
+| `udp exits from X but tcp from Y; h3 not used for this proxy` | UDP relays, but to a different exit than TCP. H3 is withheld: the two protocols would present different addresses, so a client that prefers H3 would appear to change identity. |
+| `no udp relay (<reason>); h3 not used for this proxy, tcp modes only` | UDP does not relay at all, usually a SOCKS or upstream that does not support it. The proxy still serves, on the TCP transports only. |
+| `udp relay works (exit X) but the tcp exit could not be learned (<error>); h3 allowed, checking again soon` | The UDP side is fine and TCP could not be measured at that moment, so H3 is allowed provisionally and the check repeats. Not a refusal. |
+
+None of these is an error, and none stops the proxy serving: a proxy that fails the check is simply not offered for H3, which is the intended fallback. A proxy that flips between lines is one whose UDP path is intermittent, and the last line is the common one on a slow or filtered network.
+
+---
+
 ## 🔌 H3 (QUIC) Beside H1 (beta, `URNETWORK_H3` or the `h3` key)
 
 Only a box that runs H3 logs these, and only for the direct identity. H3 is off by default. It starts when `URNETWORK_H3` is set at startup, or when the `h3` control key is switched on live with `urnet-tools set h3 on`.
@@ -306,6 +328,18 @@ Only a box that runs H3 logs these, and only for the direct identity. H3 is off 
 - `[c]h3 connect err = <error>` is the transport-level detail behind a failed attempt.
 - `⚙️ [control] applied h3=<on|off>` is the control-socket confirmation when the `h3` key changes. The datagram keys log `applied h3_datagram=...` and `applied h3_datagram_send=...`. A change of any of the three is not counted as an H3 drop.
 - What to watch while testing it: the `[t]auth error` rate and the backend-degraded state must not rise, and billable per hour must not fall against a box without it. Any of those is a reason to turn it off (`urnet-tools set h3 off` or unset `URNETWORK_H3` and restart).
+
+### Widening or narrowing the `h3` key relaunches proxies
+
+The `h3` setting names a transport set, not only on or off: `off`, `direct`, `on`, a proxy count, or `all`. Widening or narrowing it changes which proxies may carry H3, so the affected proxies are relaunched.
+
+```
+[h3] on: relaunching 3 proxies whose transport set changed
+[h3] on: 2 proxies have clients, retrying in 1m0s
+```
+
+- `[h3] <setting>: relaunching N proxies whose transport set changed` is logged when the setting changes and N running proxies need a restart to pick it up. The setting is named as written, so `on`, `all` and a count are distinguishable.
+- `[h3] <setting>: N proxies have clients, retrying in 1m0s` means N of them were carrying client traffic at that moment and were left alone rather than cut off. The relaunch is retried a minute later, so a busy proxy is moved only once it is quiet. Both lines are expected during a setting change and neither is an error. A proxy that never goes quiet keeps its clients and stays on its current transport set.
 
 ### What H3 adds to the `[health]` line
 

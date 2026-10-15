@@ -190,6 +190,32 @@ truth.
 > PID with no reachable socket is a startup failure or a same-user collision,
 > not a healthy provider.
 
+## 🪜 Transports beyond H1, and the order they are tried
+
+Beyond the H1 transport, a node can reach the platform over **H3 (QUIC)**, then **H3 over DNS**, then the **DNS pump**. They are tried in that order, and each is only attempted while the one before it is not working:
+
+```
+H1  ->  H3  ->  H3 over DNS  ->  DNS pump
+```
+
+The order matters because the later transports are the more constrained ones: H3 needs UDP to survive, H3 over DNS additionally needs the DoH path, and the DNS pump is the last resort. A node whose H1 connection is healthy therefore runs **H3, H3 over DNS and the DNS pump idle, with no sockets open for them at all**, which is why they cost nothing until they are needed. H1 also stays the health signal throughout: a failure of any fallback is not counted as a backend or proxy failure.
+
+Which identities may use them is the `h3` control key, and it is the only setting that changes this:
+
+```
+urnet-tools set h3 off         H1 only
+urnet-tools set h3 direct      the direct identity runs them as fallbacks (the default)
+urnet-tools set h3 on          as direct, plus H3 running beside H1 rather than only as a fallback
+urnet-tools set h3 N           as direct, plus the N best proxies
+urnet-tools set h3 all         as direct, plus every proxy
+```
+
+`direct` is the default and is almost always the right choice, because reaching a proxy for H3 requires that proxy's SOCKS5 UDP relay to answer and to exit from the same address as its TCP path, which is checked per proxy (see `[proxy][udp]` in LOG_REFERENCE.md). Widening the setting relaunches the proxies it adds, one every 300 ms, and each redial costs the platform's speed tests, so prefer a top-N over `all` and pick it once rather than flipping back and forth.
+
+**The `h3` row in the control-socket table above is the authoritative reference** for the setting, including the per-mode detail, the relaunch cost and the metrics and log lines it drives. This section is only the shape of the fallback chain and the order it is tried in.
+
+---
+
 ## 🎛️ Profile Selection
 
 | Profile | Docker Value | Best For | RAM |

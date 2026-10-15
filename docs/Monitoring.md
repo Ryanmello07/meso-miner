@@ -218,6 +218,24 @@ Log lines (all start with `[ipv6]`; one per event, connect failures throttled to
 
 These show the provider holds a connection on each family. Whether the platform classifies the provider as dual-stack is a server-side decision these checks cannot see.
 
+### Log lines worth alerting on when the `h3` setting is widened
+
+Two line families appear while transports are being changed, and both are expected rather than faults. They are useful to watch because a node that produces them continuously is one whose transport set cannot settle.
+
+```
+[h3] on: relaunching 3 proxies whose transport set changed
+[h3] on: 2 proxies have clients, retrying in 1m0s
+[proxy][udp] proxy[12] (198.51.100.7:1080) udp relay ok, exit 198.51.100.7 matches tcp; h3 allowed
+[proxy][udp] proxy[12] (198.51.100.7:1080) udp exits from 203.0.113.9 but tcp from 198.51.100.7; h3 not used for this proxy
+[proxy][udp] proxy[12] (198.51.100.7:1080) no udp relay (socks5: udp not supported); h3 not used for this proxy, tcp modes only
+[proxy][udp] proxy[12] (198.51.100.7:1080) udp relay works (exit 198.51.100.7) but the tcp exit could not be learned (timeout); h3 allowed, checking again soon
+```
+
+- The `[h3] <setting>: relaunching N proxies` line is emitted once when the setting changes. Seeing it repeatedly without a `urnet-tools set h3` in between means the setting is being rewritten by something else.
+- The `[h3] <setting>: N proxies have clients, retrying in 1m0s` line repeats once a minute for each proxy that is too busy to relaunch. On a node whose proxies always carry clients this repeats indefinitely, which is the designed behaviour (the proxy is not cut off) but means the widening never completes. Prefer a top-N over `all` on such a node.
+- The four `[proxy][udp]` lines are printed **per proxy per change of answer**, so their count is bounded by the number of proxies. A proxy that alternates between the "ok" and "could not be learned" lines has an intermittent UDP path; one that reports "no udp relay" or an exit mismatch is simply not offered for H3, which is the intended fallback and needs no action.
+- None of these lines is an error, and none counts as a backend or proxy auth failure, so they should not be wired into the existing error-rate alerts. Watch them as a transport-settling signal only.
+
 ## Metrics reference
 
 | Metric | Type | Labels | Meaning |
