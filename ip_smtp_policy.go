@@ -36,6 +36,14 @@ const (
 	smtpEgressRejectLatched
 )
 
+// permitsSend reports whether the client send path may forward the packet. A
+// packet the SMTP guard does not govern (every non-SMTP flow) is permitted:
+// only an explicit reject, or a latched reject, stops it. Treating
+// smtpEgressNotApplicable as a refusal dropped all ordinary client traffic.
+func (self smtpEgressVerdict) permitsSend() bool {
+	return self == smtpEgressAllow || self == smtpEgressNotApplicable
+}
+
 func smtpRoutesLocally(ipPath *IpPath) bool {
 	return ipPath != nil &&
 		ipPath.Protocol == IpProtocolTcp &&

@@ -3620,7 +3620,7 @@ func (self *RemoteUserNatClient) SendPacket(source TransferPath, provideMode pro
 		}
 		return self.localUserNat.SendPacket(source, provideMode, packet, 0)
 	}
-	if smtpVerdict := self.smtpEgressGuard.inspect(ipPath, payload); smtpVerdict != smtpEgressAllow {
+	if smtpVerdict := self.smtpEgressGuard.inspect(ipPath, payload); !smtpVerdict.permitsSend() {
 		// smtpEgressReject: send the reset once. smtpEgressRejectLatched:
 		// already rejected and reset: drop silently (no amplification).
 		if smtpVerdict == smtpEgressReject {
