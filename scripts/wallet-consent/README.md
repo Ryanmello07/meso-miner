@@ -15,7 +15,7 @@ Run it on your own computer, never on a fleet node. A fleet node needs nothing.
 
 ## The page
 
-- Dark page in the URnetwork style, with a countdown for the message (valid 5 minutes) and for the page (closes after 10 minutes). **New message** fetches a fresh statement without restarting.
+- Dark page in the URnetwork style, with a countdown for the message (valid 5 minutes) and for the page (closes after 15 minutes). **New message** fetches a fresh statement without restarting.
 - Served on `127.0.0.1` only, with a per-run session token, a Host and Origin check, and a content security policy. It stores only a signature over the statement this program verified before showing it; the page cannot send a different message.
 - The logo is the URnetwork wordmark from the URnetwork web repository (MPL-2.0). The site fonts are licensed and are used only if installed.
 

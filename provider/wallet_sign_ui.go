@@ -45,7 +45,7 @@ var snSignLogoSvg string
 const (
 	// how long the page is served; the statement itself lives five minutes and
 	// can be renewed from the page
-	snSignPageLifetime = 10 * time.Minute
+	snSignPageLifetime = 15 * time.Minute
 	// the server keeps a few unused challenges per network; do not flood it
 	snSignMaxRefreshes   = 8
 	snSignRefreshSpacing = 3 * time.Second

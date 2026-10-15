@@ -112,7 +112,7 @@ code { font-family: 'PP Neue Bit', ui-monospace, monospace; color: var(--white);
     <button id="connect">1. Connect wallet</button>
     <button id="sign" disabled>2. Sign</button>
     <button id="refresh" class="secondary">New message</button>
-    <button id="extend" class="secondary">Add 10 minutes to the page</button>
+    <button id="extend" class="secondary">Add 15 minutes to the page</button>
   </div>
   <div class="status" id="status"></div>
 
@@ -258,7 +258,7 @@ $('extend').onclick = async () => {
     const res = await post('/extend');
     boot.pageDeadline = res.pageDeadline;
     boot.extensionsLeft = res.extensionsLeft;
-    say('The page timer was reset to 10 minutes.' + (res.extensionsLeft === 0 ? ' It cannot be extended again.' : ''), 'ok');
+    say('The page timer was reset to 15 minutes.' + (res.extensionsLeft === 0 ? ' It cannot be extended again.' : ''), 'ok');
     if (res.extensionsLeft === 0) $('extend').disabled = true;
     $('connect').disabled = false; $('refresh').disabled = false;
   } catch (e) { say('Could not extend: ' + e.message, 'bad'); }

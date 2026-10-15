@@ -214,7 +214,7 @@ var _ = hex.EncodeToString
 func TestSignPagePreview(t *testing.T) {
 	port := os.Getenv("URNETWORK_SIGN_PREVIEW")
 	if port == "" {
-		t.Skip("set URNETWORK_SIGN_PREVIEW=<port> to serve the page for 10 minutes")
+		t.Skip("set URNETWORK_SIGN_PREVIEW=<port> to serve the page for 15 minutes")
 	}
 	ui, _, _, _ := newSignUiWithBinding(t, walletTestSeed(0x11), os.Getenv("URNETWORK_SIGN_PREVIEW_UNBOUND") == "")
 	ui.token = "preview"
@@ -223,7 +223,7 @@ func TestSignPagePreview(t *testing.T) {
 	go func() { _ = server.ListenAndServe() }()
 	defer server.Close()
 	t.Logf("preview at http://127.0.0.1:%s/ (session token: preview)", port)
-	time.Sleep(10 * time.Minute)
+	time.Sleep(15 * time.Minute)
 }
 
 func TestSignPageExtendResetsThePageTimerWithinLimits(t *testing.T) {
