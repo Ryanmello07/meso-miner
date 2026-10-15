@@ -70,14 +70,13 @@ func newScriptedIcmpTestBuffer(t *testing.T, mtu int, scripted func() *icmpScrip
 	mutex := sync.Mutex{}
 	opens := 0
 	current := scripted()
-	restore := newIcmpEgressFactory
-	newIcmpEgressFactory = func(ctx context.Context, ipVersion int, destinationIp net.IP, s *IcmpBufferSettings) (icmpEgress, error) {
+	restore := setIcmpEgressFactory(func(ctx context.Context, ipVersion int, destinationIp net.IP, s *IcmpBufferSettings) (icmpEgress, error) {
 		mutex.Lock()
 		defer mutex.Unlock()
 		opens += 1
 		current = scripted()
 		return current, nil
-	}
+	})
 	buffer := NewIcmp4Buffer(ctx, nil, settings)
 	openCount := func() int {
 		mutex.Lock()
@@ -96,7 +95,7 @@ func newScriptedIcmpTestBuffer(t *testing.T, mtu int, scripted func() *icmpScrip
 		}
 		buffer.mutex.Unlock()
 		cancel()
-		newIcmpEgressFactory = restore
+		setIcmpEgressFactory(restore)
 	}
 	return buffer, openCount, lastingEgress, cleanup
 }
@@ -151,6 +150,7 @@ func waitOpen(t *testing.T, openCount func() int, want int) {
 // a message error (EMSGSIZE) drops only that packet: the flow keeps its
 // socket, so the next echo is written without reopening
 func TestIcmpFailedSendKeepsTheFlow(t *testing.T) {
+	resetIcmpGate(t)
 	buffer, openCount, lastingEgress, cleanup := newScriptedIcmpTestBuffer(t, 0, func() *icmpScriptedEgress {
 		return newIcmpScriptedEgress(&net.OpError{Op: "write", Net: "udp4", Err: syscall.EMSGSIZE})
 	})
@@ -173,8 +173,13 @@ func TestIcmpFailedSendKeepsTheFlow(t *testing.T) {
 	if opens := openCount(); opens != 1 {
 		t.Fatalf("a failed send must keep the flow; the egress was opened %d times", opens)
 	}
-	if refused := icmpEchoFamilyRefused.Load(); refused != 0 {
-		t.Fatalf("a message error must not latch the family off, got %d", refused)
+	// A message error must never count as a platform refusal. The decision is a
+	// pure function of the error, so it is asserted directly: the process-wide
+	// latch is also set by other tests' flows that really try to open an
+	// unprivileged socket (a CI runner refuses them), and their goroutines can
+	// outlive those tests, so reading the global here would be racy.
+	if icmpEgressRefusalError(&net.OpError{Op: "write", Net: "udp4", Err: syscall.EMSGSIZE}) {
+		t.Fatal("a message error is classified as a platform refusal")
 	}
 	egress := lastingEgress()
 	if egress.writeCount() != 2 {
@@ -185,6 +190,7 @@ func TestIcmpFailedSendKeepsTheFlow(t *testing.T) {
 // a socket that is gone (EBADF) closes the flow, and the next send opens a
 // fresh one
 func TestIcmpUnusableSocketClosesTheFlow(t *testing.T) {
+	resetIcmpGate(t)
 	buffer, openCount, lastingEgress, cleanup := newScriptedIcmpTestBuffer(t, 0, func() *icmpScriptedEgress {
 		return newIcmpScriptedEgress(&net.OpError{Op: "write", Net: "udp4", Err: syscall.EBADF})
 	})
@@ -230,6 +236,7 @@ func TestIcmpUnusableSocketClosesTheFlow(t *testing.T) {
 
 // an oversized echo drops before the write and keeps the flow
 func TestIcmpOversizedEchoDropsAndKeepsFlow(t *testing.T) {
+	resetIcmpGate(t)
 	buffer, openCount, lastingEgress, cleanup := newScriptedIcmpTestBuffer(t, 100, func() *icmpScriptedEgress {
 		return newIcmpScriptedEgress()
 	})

@@ -32,6 +32,7 @@ func icmpSequenceCanceled(sequence *IcmpSequence) bool {
 // recently active flow of the whole nat, not of one buffer, and the counts
 // follow every registration and release.
 func TestIcmpFlowTrackerGlobalCapIsNatsWide(t *testing.T) {
+	resetIcmpGate(t)
 	settings := DefaultIcmpBufferSettingsWithBufferSize(1)
 	settings.Log = NewNoopLogger()
 	settings.UserLimit = 0
@@ -88,6 +89,7 @@ func TestIcmpFlowTrackerGlobalCapIsNatsWide(t *testing.T) {
 // the per-source cap counts a source's flows across the whole nat, and never
 // another source's
 func TestIcmpFlowTrackerUserCapIsPerSource(t *testing.T) {
+	resetIcmpGate(t)
 	settings := DefaultIcmpBufferSettingsWithBufferSize(1)
 	settings.Log = NewNoopLogger()
 	settings.UserLimit = 1
@@ -120,6 +122,7 @@ func TestIcmpFlowTrackerUserCapIsPerSource(t *testing.T) {
 // one source's cancel reaches its icmp flows (the nat registers this with
 // its udp and tcp buffers) and returns how many it cancelled
 func TestIcmpBufferCancelSourceCancelsItsFlows(t *testing.T) {
+	resetIcmpGate(t)
 	settings := DefaultIcmpBufferSettingsWithBufferSize(1)
 	settings.Log = NewNoopLogger()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -149,6 +152,7 @@ func TestIcmpBufferCancelSourceCancelsItsFlows(t *testing.T) {
 // two buffers sharing one tracker enforce the nat-wide cap across both, so
 // the configured ceiling is not multiplied by the shard and family count
 func TestIcmpSharedBuffersEnforceTheNatsWideCap(t *testing.T) {
+	resetIcmpGate(t)
 	if !pingGroupRangePermits(t) {
 		t.Skip("unprivileged icmp sockets are not permitted here")
 	}

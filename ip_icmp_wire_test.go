@@ -53,6 +53,7 @@ func ipv6IcmpPacket(nextHeader ipProtocolNumber, src net.IP, dst net.IP, transpo
 }
 
 func TestIcmpWireParseEchoShapes(t *testing.T) {
+	resetIcmpGate(t)
 	src4 := net.IPv4(192, 0, 2, 1)
 	dst4 := net.IPv4(192, 0, 2, 2)
 
@@ -105,6 +106,7 @@ func TestIcmpWireParseEchoShapes(t *testing.T) {
 // the dispatch drops an outbound echo reply before any flow is touched: the
 // gate it reads is echoRequest above, so a reply must never read as a request.
 func TestIcmpWireReplyIsNotARequest(t *testing.T) {
+	resetIcmpGate(t)
 	src := net.IPv4(192, 0, 2, 1)
 	dst := net.IPv4(192, 0, 2, 2)
 	var parsed parsedIcmp
@@ -120,6 +122,7 @@ func TestIcmpWireReplyIsNotARequest(t *testing.T) {
 // public relationship. This is the guard against a provider becoming a
 // scanner; it applies to icmp exactly as it does to tcp/udp.
 func TestIcmpWireEgressDestinationsRefused(t *testing.T) {
+	resetIcmpGate(t)
 	for _, refused := range []string{
 		"::ffff:10.0.0.5",   // v4-mapped private
 		"::ffff:127.0.0.1",  // v4-mapped loopback
@@ -153,6 +156,7 @@ func TestIcmpWireEgressDestinationsRefused(t *testing.T) {
 // see it: an identifier of 0 or below 1024 would otherwise drop every ping. The
 // blocked-ip reputation check above it still applies.
 func TestIcmpWireCfaaPortPolicy(t *testing.T) {
+	resetIcmpGate(t)
 	detector := newCfaaDetector(DefaultCfaaSecurityPolicySettings())
 	public := net.ParseIP("2606:4700:4700::1111")
 	for _, identifier := range []int{0, 1, 1023, 65535} {
@@ -168,6 +172,7 @@ func TestIcmpWireCfaaPortPolicy(t *testing.T) {
 }
 
 func TestIcmpWireOosPacketReturnsNilInsteadOfPanicking(t *testing.T) {
+	resetIcmpGate(t)
 	for _, version := range []int{4, 6} {
 		ipPath := &IpPath{
 			Version:  version,
@@ -182,6 +187,7 @@ func TestIcmpWireOosPacketReturnsNilInsteadOfPanicking(t *testing.T) {
 // the caps are ours and fixed: this pins them so a later sync of the icmp files
 // cannot quietly swap in the memory-budget-derived ones.
 func TestIcmpWireFixedCapsPinned(t *testing.T) {
+	resetIcmpGate(t)
 	settings := DefaultLocalUserNatSettings()
 	if settings.IcmpBufferSettings == nil {
 		t.Fatal("the default settings carry no icmp buffer settings")
@@ -210,6 +216,7 @@ func (self *wireTestLimited) LastActivityTime() time.Time {
 func (self *wireTestLimited) Cancel() {}
 
 func TestIcmpWireLruEviction(t *testing.T) {
+	resetIcmpGate(t)
 	resources := map[uint16]*wireTestLimited{}
 	for i := uint16(0); i < 4; i += 1 {
 		resources[i] = &wireTestLimited{
@@ -233,6 +240,7 @@ func TestIcmpWireLruEviction(t *testing.T) {
 // the shard identity for icmp is the echo identifier, not a port pair: two
 // packets of one flow (same identifier, different sequence) must pin together.
 func TestIcmpWireFlowHashIdentity(t *testing.T) {
+	resetIcmpGate(t)
 	src := net.IPv4(192, 0, 2, 1)
 	dst := net.IPv4(192, 0, 2, 2)
 	one := ipv4IcmpPacket(ipProtocolNumberIcmp4, src, dst, icmpTransport(icmp4TypeEchoRequest, 7, 1))
@@ -262,6 +270,7 @@ func TestIcmpWireFlowHashIdentity(t *testing.T) {
 // socket at all. The path fails soft when it cannot (ICMP.md), so that case
 // skips rather than fails.
 func TestIcmpWireFlowCreateAndReap(t *testing.T) {
+	resetIcmpGate(t)
 	settings := DefaultIcmpBufferSettings()
 	settings.IdleTimeout = 100 * time.Millisecond
 	settings.WriteTimeout = 200 * time.Millisecond

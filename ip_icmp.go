@@ -577,7 +577,7 @@ func (self *IcmpSequence) Run() {
 	}()
 
 	self.log.V(2).Infof("[init]icmp connect\n")
-	egress, err := newIcmpEgressFactory(self.ctx, self.ipVersion, self.destinationIp, self.icmpBufferSettings)
+	egress, err := currentIcmpEgressFactory()(self.ctx, self.ipVersion, self.destinationIp, self.icmpBufferSettings)
 	if err != nil {
 		// fork: a platform that refuses unprivileged icmp sockets (EACCES,
 		// EPERM, EPROTONOSUPPORT) self-disables the feature for THAT family

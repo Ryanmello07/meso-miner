@@ -14,6 +14,7 @@ import (
 // test.
 
 func TestWalkIpv6ExtensionHeadersMalformed(t *testing.T) {
+	resetIcmpGate(t)
 	udp := make([]byte, UdpHeaderSize+4)
 	binary.BigEndian.PutUint16(udp[4:6], uint16(len(udp)))
 
@@ -65,6 +66,7 @@ func TestWalkIpv6ExtensionHeadersMalformed(t *testing.T) {
 // ParseIpPathWithPayload's own rejection contract for malformed v6 input:
 // truncated, over-declared, or not version 6 at all.
 func TestParseIpPathRejectsMalformedV6(t *testing.T) {
+	resetIcmpGate(t)
 	truncated := make([]byte, 20)
 	truncated[0] = 0x60
 	overDeclared := make([]byte, Ipv6HeaderSize+4)

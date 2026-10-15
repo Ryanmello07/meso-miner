@@ -36,6 +36,7 @@ func testIcmp4EchoPacket(sourceIp string, destinationIp string, icmpType byte, i
 }
 
 func TestParseIpPathIcmpEchoView(t *testing.T) {
+	resetIcmpGate(t)
 	payload := []byte("ping")
 
 	request := testIcmp4EchoPacket("10.0.0.9", "203.0.113.7", icmp4TypeEchoRequest, 0x4711, 1, payload)
@@ -90,6 +91,7 @@ func TestParseIpPathIcmpEchoView(t *testing.T) {
 }
 
 func TestIcmpEchoKillSwitchAndSelfDisable(t *testing.T) {
+	resetIcmpGate(t)
 	request := testIcmp4EchoPacket("10.0.0.9", "203.0.113.7", icmp4TypeEchoRequest, 0x22, 1, []byte("x"))
 	defer MessagePoolReturn(request)
 	requestCopy := MessagePoolCopy(request)
@@ -142,6 +144,7 @@ func pingGroupRangePermits(t *testing.T) bool {
 // answered and the reply comes back out as an IpPacketFromProvider. The
 // kernel answers loopback pings; where it refuses the sockets the test skips.
 func TestProviderReceiveIcmpEchoAnswersThroughTheNat(t *testing.T) {
+	resetIcmpGate(t)
 	if !pingGroupRangePermits(t) {
 		t.Skip("the kernel refuses unprivileged icmp sockets here (ping_group_range)")
 	}

@@ -17,6 +17,7 @@ func icmpTcpTestPath(version int) *IpPath {
 // round trip drifts, dial failures stop matching their flows and the signal
 // silently does nothing.
 func TestIcmpUnreachableRoundTripTcp(t *testing.T) {
+	resetIcmpGate(t)
 	for _, version := range []int{4, 6} {
 		egress := icmpTcpTestPath(version)
 
@@ -58,6 +59,7 @@ func TestIcmpUnreachableRoundTripTcp(t *testing.T) {
 }
 
 func TestIcmpUnreachableRoundTripUdp(t *testing.T) {
+	resetIcmpGate(t)
 	for _, version := range []int{4, 6} {
 		egress := udpTestPath(version)
 
@@ -83,6 +85,7 @@ func TestIcmpUnreachableRoundTripUdp(t *testing.T) {
 // unreachable truncated to exactly that must still parse -- ports and, for
 // tcp, the sequence number all sit inside those 8 bytes.
 func TestIcmpUnreachableParsesMinimalEmbed(t *testing.T) {
+	resetIcmpGate(t)
 	egress := icmpTcpTestPath(4)
 	packet, ok := ipOosUnreachable(egress)
 	if !ok {
@@ -110,6 +113,7 @@ func TestIcmpUnreachableParsesMinimalEmbed(t *testing.T) {
 }
 
 func TestIcmpUnreachableRejectsNonIcmp(t *testing.T) {
+	resetIcmpGate(t)
 	forEachIpVersion(t, testIcmpUnreachableRejectsNonIcmp)
 }
 
@@ -144,6 +148,7 @@ func testIcmpUnreachableRejectsNonIcmp(t *testing.T, ipVersion int) {
 // signal at ParseIpPath rather than misrouting it. If ParseIpPath ever learns
 // icmp, the intercept ordering in the channel receive loop must be revisited.
 func TestParseIpPathStillRejectsIcmp(t *testing.T) {
+	resetIcmpGate(t)
 	forEachIpVersion(t, testParseIpPathStillRejectsIcmp)
 }
 

@@ -36,6 +36,7 @@ func (icmpNoopVerbose) Infof(format string, args ...any) {}
 // only a refused family latches, and a refusal in one family must never
 // disable the other; every other open error is a per-flow condition
 func TestIcmpEgressRefusalLatchIsNarrowAndPerFamily(t *testing.T) {
+	resetIcmpGate(t)
 	reset := func() {
 		icmpEchoFamilyRefused.Store(0)
 		icmpEnvState.Store(icmpEnvUnread)

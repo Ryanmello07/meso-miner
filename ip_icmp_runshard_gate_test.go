@@ -14,6 +14,7 @@ import (
 // never sent through an egress socket. The request is injected straight into
 // the shard queue, which is exactly the path a queued packet takes.
 func TestIcmpRunShardConsultsTheGate(t *testing.T) {
+	resetIcmpGate(t)
 	if !pingGroupRangePermits(t) {
 		t.Skip("the kernel refuses unprivileged icmp sockets here (ping_group_range)")
 	}

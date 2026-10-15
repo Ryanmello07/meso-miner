@@ -2,6 +2,8 @@ package connect
 
 import (
 	"context"
+	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/urnetwork/connect/protocol"
@@ -65,7 +67,31 @@ const lruEvictionSampleSize = 32
 // fork: the egress backend factory, overridable by tests to exercise open
 // and write failures without a real socket (the egress contract itself, see
 // icmpEgress)
-var newIcmpEgressFactory = newIcmpEgress
+//
+// It is read by every flow's goroutine and replaced by tests, so it sits behind
+// an atomic pointer: a flow started by one test can still be running when the
+// next test installs its own factory.
+type icmpEgressFactoryFunc func(ctx context.Context, ipVersion int, destinationIp net.IP, settings *IcmpBufferSettings) (icmpEgress, error)
+
+var icmpEgressFactory atomic.Pointer[icmpEgressFactoryFunc]
+
+func init() {
+	setIcmpEgressFactory(newIcmpEgress)
+}
+
+// currentIcmpEgressFactory is the factory a new flow opens its egress with.
+func currentIcmpEgressFactory() icmpEgressFactoryFunc {
+	return *icmpEgressFactory.Load()
+}
+
+// setIcmpEgressFactory installs a factory and returns the previous one.
+func setIcmpEgressFactory(factory icmpEgressFactoryFunc) icmpEgressFactoryFunc {
+	var previous icmpEgressFactoryFunc
+	if old := icmpEgressFactory.Swap(&factory); old != nil {
+		previous = *old
+	}
+	return previous
+}
 
 // applyLruMapLimit bounds eviction work independently of table cardinality.
 // Go map iteration starts at a pseudo-random bucket, so choosing the oldest of

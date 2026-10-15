@@ -156,6 +156,7 @@ func testIpv6ChainByteCount(exts []testIpv6Ext) int {
 }
 
 func TestWalkIpv6ExtensionHeaders(t *testing.T) {
+	resetIcmpGate(t)
 	udp := make([]byte, UdpHeaderSize+4)
 	binary.BigEndian.PutUint16(udp[4:6], uint16(len(udp)))
 
@@ -253,6 +254,7 @@ func TestWalkIpv6ExtensionHeaders(t *testing.T) {
 // on this line until the icmp echo parse wire-up lands.
 
 func TestParseIpPathIpv6ExtensionHeaders(t *testing.T) {
+	resetIcmpGate(t)
 	payload := []byte("hello")
 	udp := testIpv6Udp(testIpv6Src, testIpv6Dst, testIpv6ChainAll, 40001, 53, payload)
 	ipPath, got, err := ParseIpPathWithPayload(udp)
@@ -295,6 +297,7 @@ func TestParseIpPathIpv6ExtensionHeaders(t *testing.T) {
 // the v6 analog of TestParseIpPathIpv4FragmentDrop: only a non-atomic
 // fragment is rejected, since it has no transport header to read
 func TestParseIpPathIpv6FragmentDrop(t *testing.T) {
+	resetIcmpGate(t)
 	udp := testIpv6Udp(testIpv6Src, testIpv6Dst, nil, 40001, 53, []byte("payload"))
 	transport := udp[Ipv6HeaderSize:]
 	cases := []struct {

@@ -41,4 +41,19 @@ for shard in 0 1 2; do
   # shellcheck disable=SC2086
   go test -short -race -timeout 600s $pkgs
 done
+# A GitHub runner differs from a workstation: unprivileged ICMP sockets are
+# refused (net.ipv4.ping_group_range closed) and there is no global IPv6. A test
+# that passes here can fail there. Run the root package once more in a network
+# namespace that refuses ICMP sockets, with the race detector, like the runner.
+echo "== root package in a network namespace that refuses ICMP sockets (-short -race)"
+if command -v unshare >/dev/null 2>&1 && unshare -Urn true 2>/dev/null; then
+  testbin=$(mktemp /tmp/connect-ci-like.XXXXXX)
+  go test -c -race -o "$testbin" .
+  # TestFamilySupportedOnThisHost needs a usable IPv6 stack, which the
+  # namespace does not have either; it skips itself on a runner.
+  unshare -Urn sh -c "ip link set lo up 2>/dev/null; \"$testbin\" -test.short -test.timeout=600s -test.skip=TestFamilySupportedOnThisHost"
+  rm -f "$testbin"
+else
+  echo "  unshare -Urn is not available here: skipping the ICMP-refused run (run it where it is)"
+fi
 echo "all pre-tag checks passed"

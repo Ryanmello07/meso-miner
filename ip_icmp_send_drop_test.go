@@ -12,6 +12,7 @@ import (
 // path's rule). A canceled nat context drops the send on both attempts, so
 // the drop is deterministic: the packet must come back to its pool.
 func TestIcmpSendDropReturnsThePoolBuffer(t *testing.T) {
+	resetIcmpGate(t)
 	settings := DefaultIcmpBufferSettingsWithBufferSize(1)
 	settings.Log = NewNoopLogger()
 	ctx, cancel := context.WithCancel(context.Background())

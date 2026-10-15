@@ -10,6 +10,7 @@ import (
 // pre-seed any sentinel: it stores the process-default zero value, sets the
 // env kill switch, and requires the parse to reject icmp.
 func TestIcmpEnvKillSwitchFromColdState(t *testing.T) {
+	resetIcmpGate(t)
 	// the zero value is the boot state (icmpEnvUnread); restoring it leaves
 	// the other tests free to re-read the env
 	icmpEnvState.Store(0)
