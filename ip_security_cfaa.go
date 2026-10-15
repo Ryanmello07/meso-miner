@@ -112,6 +112,13 @@ func (self *cfaaDetector) inspect(ip net.IP, port int, protocol IpProtocol, vers
 		}
 	}
 
+	// fork: icmp carries no port, so the port policy below cannot apply; the
+	// blocked-ip reputation check above still does. Echo-only parsing constrains
+	// what reaches here (see ICMP.md).
+	if protocol == IpProtocolIcmp {
+		return cfaaAllow
+	}
+
 	// Telegram's call reflectors use privileged ports 596-599, with one exact
 	// TCP/595 fallback. Keep this as a named endpoint-and-port exception instead
 	// of weakening the privileged-port rule for every host. The reputation check
