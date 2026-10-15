@@ -339,10 +339,21 @@ func (self *IcmpBuffer[BufferId]) icmpSend(
 	}
 	sequence := initSequence(nil)
 	if success, err := sequence.send(sendItem, timeout); err == nil {
+		// send() only enqueues ipPacket into sendItems on success — on every
+		// drop path (idle-close, full channel, timeout) ownership never
+		// transferred, so the caller (runShard) never sees a reason to
+		// return it to the pool. Free it here or it leaks on backpressure.
+		if !success {
+			MessagePoolReturn(ipPacket)
+		}
 		return success, nil
 	} else {
-		// sequence closed
-		return initSequence(sequence).send(sendItem, timeout)
+		// sequence closed, retry against a fresh one
+		success, err := initSequence(sequence).send(sendItem, timeout)
+		if !success {
+			MessagePoolReturn(ipPacket)
+		}
+		return success, err
 	}
 }
 
