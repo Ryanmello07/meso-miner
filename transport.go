@@ -2336,6 +2336,11 @@ func (self *PlatformTransport) runH1(initialTimeout time.Duration) {
 			refusal := credentialRefusalCause(err)
 			if refusal != 0 {
 				self.noteCredentialRefusal(TransportModeH1, auth.ByJwt, refusal)
+				// fork: a refusal is not an auth failure, but the revoked
+				// identity safety net must still see it
+				if idx, ok := self.proxyIndex(); ok && !self.pinned() {
+					RecordProxyCredentialRefusal(idx)
+				}
 			}
 			// a canceled dial is local teardown -- this transport or its owner
 			// shutting down mid-connect -- not a backend signal. Without this

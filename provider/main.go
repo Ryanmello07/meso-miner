@@ -3764,11 +3764,14 @@ func provide(opts docopt.Opts) {
 		// signal to renew it now: the transport holds the refused JWT for minutes,
 		// and only a new one ends the hold early. Nonblocking, as the engine requires.
 		renewNow := make(chan struct{}, 1)
+		// a refusal forces a renewal: it is counted by neither the OOB 401 counter
+		// nor the transport auth-failure counter the watcher otherwise reads
+		refused := make(chan struct{}, 1)
 		platformSettings.AuthorizationClosed = func(cause connect.AuthorizationCloseCause) {
 			switch cause {
 			case connect.AuthorizationCloseRevoked, connect.AuthorizationCloseExpired, connect.AuthorizationCloseRejected:
 				select {
-				case renewNow <- struct{}{}:
+				case refused <- struct{}{}:
 				default:
 				}
 			}
@@ -3953,6 +3956,7 @@ func provide(opts docopt.Opts) {
 			OOB:            clientOob,
 			Transport:      platformTransport,
 			RenewNow:       renewNow,
+			Refused:        refused,
 			ProxyIndex:     proxyIndex,
 			InstanceId:     instanceId,
 			RevocationDone: revocationDone,

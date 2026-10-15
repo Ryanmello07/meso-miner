@@ -177,3 +177,30 @@ func TestRecordProxyAuthFailure_RefusalsReachTheRenewalFastPathTimeoutsDoNot(t *
 		t.Fatalf("a refusal is an auth failure, got %d", got)
 	}
 }
+
+// A credential refusal no longer goes through RecordProxyAuthFailure, so it
+// must reach the rejection count the revoked-identity safety net reads, and
+// only while the backend is healthy.
+func TestRecordProxyCredentialRefusal_FeedsTheRejectionCount(t *testing.T) {
+	prev := backendDegradedNow
+	degraded := true
+	backendDegradedNow = func() bool { return degraded }
+	defer func() { backendDegradedNow = prev }()
+	ResetProxyHealthForTesting()
+	RegisterProxy(13, "10.0.0.13:1080", "10.0.0.13:1080")
+
+	RecordProxyCredentialRefusal(13)
+	if got := ProxyAuthRejectionCount(13); got != 0 {
+		t.Fatalf("a refusal during an outage must not count, got %d", got)
+	}
+	degraded = false
+	RecordProxyCredentialRefusal(13)
+	RecordProxyCredentialRefusal(13)
+	if got := ProxyAuthRejectionCount(13); got != 2 {
+		t.Fatalf("refusals from a healthy backend must count, got %d", got)
+	}
+	if got := ProxyAuthFailureCount(13); got != 0 {
+		t.Fatalf("a refusal is not an auth failure, got %d", got)
+	}
+	RecordProxyCredentialRefusal(404) // unknown proxy: no panic
+}
