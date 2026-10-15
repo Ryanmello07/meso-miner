@@ -2187,6 +2187,17 @@ section "PHASE 2 START: long observation window"
 # restart below resets StartedAt, and NO further restarts happen until the
 # remove-dead call at the end (~110m in). Seed the blackhole NOW so the
 # reaper has the whole window to accumulate failed cycles.
+# `proxy remove --all` also clears the URL cache AND the registered URL sources
+# (provider/main.go, the state reset in the remove-all path), and section Y's
+# cleanup just ran it. Without a source the background fetcher has nothing to
+# fetch, so the cache stays empty for the whole window and the end-of-window
+# gate fails whatever the product does. Re-register the source first; the
+# fetcher reads sources once at process start, and the restart below picks it up.
+if OUT=$(timeout 900 urnet-tools proxy add-source "$MONOSANS_URL" 2>&1); then
+  ok "Phase 2: re-registered the monosans source after Y's remove --all"
+else
+  echo "WARN: Phase 2 re-add of the monosans source failed (ENV_BLOCKER; the URL gates may skip)" | tee -a "$REPORT"
+fi
 __RP_OUT=$(restart_provider); RAMLOG_MARK=${__RP_OUT%% *}; MARK=${__RP_OUT##* }
 CID_P2=$(wait_client_id "$MARK" 120)
 [ -n "$CID_P2" ] && ok "Phase 2 final restart (client_id ${CID_P2:0:12}…, uptime clock reset)" || bad "Phase 2 restart produced no client_id"
