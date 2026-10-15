@@ -445,6 +445,15 @@ type ClientSettings struct {
 	// across process lifetimes.
 	ClientKeySeed []byte
 
+	// Keep the identity key local: `ClientKeyManager` sends no `ClientKey`
+	// control, so the platform holds no registration and `/key/<client_id>`
+	// has no key for this client. Only for a client whose key nothing reads.
+	// A reader outranks it: with the per-peer session layer on (encryption
+	// mode other than off), peers verify the cert signature and identity
+	// proof against the published key, so construction logs an error and
+	// publishes anyway. The zero value publishes.
+	SkipClientKeyPublication bool
+
 	ProtocolVersion int
 
 	DefaultTransferOpts TransferOptions
