@@ -191,7 +191,11 @@ func familyTransportHostAllowed(connectUrl string) bool {
 
 // useFamilyTransports decides, for one identity launch, whether to build the
 // dual-stack group. The checks run in a fixed order so the reason is
-// deterministic.
+// deterministic. The host v6 probe does not decide: a node that boots before
+// SLAAC finishes, or during a v6 outage, builds the group anyway and its v6
+// pin holds this identity on IPv4 until a global v6 address appears - the
+// pin's own hold and the host-network-change kick re-dial it, so the identity
+// joins dual stack later without a relaunch.
 func useFamilyTransports(proxySettings *connect.ProxySettings, isNative bool, connectUrl string) (bool, string) {
 	if proxySettings != nil {
 		return false, "proxied-identity"
@@ -206,7 +210,10 @@ func useFamilyTransports(proxySettings *connect.ProxySettings, isNative bool, co
 		return false, "connect-host-not-allowlisted"
 	}
 	if ok, why := hostIpv6Probe(); !ok {
-		return false, why
+		// the group is still right: the v6 pin holds until the host has a
+		// global v6 route. Note the launch-time state so an operator can see
+		// why the v6 pin is quiet (the decision metric stays "dualstack").
+		tlog("[ipv6] dual-stack group at launch; the v6 pin holds until a global v6 address appears (probe: %s)\n", why)
 	}
 	return true, "dualstack"
 }
