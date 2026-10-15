@@ -404,3 +404,38 @@ func TestNetworkConsentNeverLoadsTheKeyForABadStatement(t *testing.T) {
 		t.Fatal("something was sent for a statement that failed verification")
 	}
 }
+
+// The challenge text must carry the message as hex too, so a browser signer
+// with a one-line data field (Polkadot-js Sign and verify with a wallet
+// extension) can sign it, and the submit command must carry the interval.
+func TestNetworkConsentChallengeTextCarriesTheHexAndTheSubmitCommand(t *testing.T) {
+	consentTestHome(t)
+	seed := walletTestSeed(0x11)
+	address := walletTestAddress(t, seed)
+	fake := &consentServer{t: t, want: consentTestExpect(t, seed, time.Now())}
+	server := httptest.NewServer(fake.handler())
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var out strings.Builder
+	proof := &snWalletProof{}
+	if err := snWalletNetworkConsentChallenge(ctx, &out, connect.NewClientStrategyWithDefaults(ctx), server.URL, address, proof); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"message bytes (hex",
+		"provider wallet set " + address,
+		"--wallet-from-epoch=51",
+		"--signature=0x",
+		"Approve URnetwork network wallet mapping",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("the challenge text lacks %q:\n%s", want, text)
+		}
+	}
+	if fake.challenges != 1 || len(fake.submissions) != 0 {
+		t.Fatalf("a challenge must request once and sign nothing (%d challenges, %d submissions)", fake.challenges, len(fake.submissions))
+	}
+}

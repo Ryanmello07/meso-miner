@@ -366,6 +366,7 @@ func snWalletNetworkConsentChallenge(ctx context.Context, out io.Writer, clientS
 	fmt.Fprintf(out, "The bytes to sign are the UTF-8 text between the markers exactly as printed; a Polkadot signRaw of type \"bytes\", which wraps them in <Bytes>...</Bytes>, is accepted too.\n")
 	fmt.Fprintf(out, "It expires in %s.\n", remaining)
 	fmt.Fprintf(out, "\n----- message -----\n%s\n----- end -----\n", message)
+	fmt.Fprintf(out, "message bytes (hex, for a signer that takes hex): 0x%s\n", hex.EncodeToString([]byte(message)))
 	fmt.Fprintf(out, "\nThen, within that window, submit the 64-byte signature as hex:\n")
 	fmt.Fprintf(out, "  provider wallet set %s --wallet-from-epoch=%d --wallet-through-epoch=%d --message='%s' --signature=0x<128 hex chars>\n",
 		coldkeySs58, statement.FromEpoch, statement.ThroughEpoch, snEscapeMessage(message))
