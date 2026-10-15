@@ -219,9 +219,24 @@ func snConsentJournalLoad(path string, apiUrl string, coldkey string) (*snConsen
 	return nil, nil
 }
 
-// snConsentJournalStore writes the entry atomically at mode 0600: temp file in
-// the same directory, fsync, rename.
+// snConsentJournalStore takes the journal lock and writes the entry: the
+// read-modify-write of snConsentJournalStoreLocked runs inside the lock, so
+// two concurrent stores serialize and the second one's load already sees the
+// first one's entry.
 func snConsentJournalStore(path string, entry snConsentJournalEntry) error {
+	release, err := snConsentJournalLockFn(path)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return snConsentJournalStoreLocked(path, entry)
+}
+
+// snConsentJournalStoreLocked writes the entry atomically at mode 0600: temp
+// file in the same directory, fsync, rename. The caller holds the journal lock
+// (snConsentJournalLock); without it the load below could miss a concurrent
+// writer's entry and this write would drop it.
+func snConsentJournalStoreLocked(path string, entry snConsentJournalEntry) error {
 	var entries []snConsentJournalEntry
 	if raw, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(raw, &entries); err != nil {
@@ -229,6 +244,9 @@ func snConsentJournalStore(path string, entry snConsentJournalEntry) error {
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	if snConsentJournalAfterLoadHook != nil {
+		snConsentJournalAfterLoadHook()
 	}
 	replaced := false
 	for i := range entries {
@@ -280,8 +298,19 @@ func snConsentJournalStore(path string, entry snConsentJournalEntry) error {
 	return nil
 }
 
-// snConsentJournalDrop removes the entry for this api and coldkey.
+// snConsentJournalDrop takes the journal lock and removes the entry.
 func snConsentJournalDrop(path string, apiUrl string, coldkey string) error {
+	release, err := snConsentJournalLockFn(path)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return snConsentJournalDropLocked(path, apiUrl, coldkey)
+}
+
+// snConsentJournalDropLocked removes the entry for this api and coldkey. The
+// caller holds the journal lock.
+func snConsentJournalDropLocked(path string, apiUrl string, coldkey string) error {
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -403,6 +432,27 @@ func snConsentRetainedMismatch(entry *snConsentJournalEntry, want snNetworkConse
 		return "this request brings a different message"
 	}
 	return ""
+}
+
+// snConsentStoredRefusal says why this run must not sign a new consent: the
+// journal already holds the identical consent, acknowledged by the server, and
+// a second signature for it is never made. "" leaves signing open, and an
+// unacknowledged entry is not a refusal here: snResolveRetainedConsent replays
+// it instead.
+func snConsentStoredRefusal(entry *snConsentJournalEntry, want snNetworkConsentExpect, proof *snWalletProof) string {
+	if entry == nil || !entry.Acked {
+		return ""
+	}
+	if snConsentRetainedMismatch(entry, want, proof) != "" {
+		// a consent for another login, coldkey or interval is replaced, not reused
+		return ""
+	}
+	statement, err := protocol.DecodeNetworkWalletMappingStatement(entry.Message)
+	if err != nil || statement.FromEpoch != want.FromEpoch || statement.ThroughEpoch != want.ThroughEpoch {
+		return ""
+	}
+	return fmt.Sprintf("the identical consent for epochs %d through %d is already stored and acknowledged; not signing a second one",
+		statement.FromEpoch, statement.ThroughEpoch)
 }
 
 // snSubmitNetworkConsent verifies the signed original locally, sends it, and
@@ -527,13 +577,34 @@ func snConsentBind(want *snNetworkConsentExpect, apiUrl string, coldkeySs58 stri
 	return nil
 }
 
-// snResolveRetainedConsent handles a consent that was sent but never
+// snResolveRetainedConsent takes the journal lock and hands the retained
+// consent decision to snResolveRetainedConsentLocked; the browser signing page
+// calls this directly.
+func snResolveRetainedConsent(
+	ctx context.Context,
+	api *connect.BringYourApi,
+	apiUrl string,
+	coldkeySs58 string,
+	journalPath string,
+	want *snNetworkConsentExpect,
+	proof *snWalletProof,
+) (done bool, err error) {
+	release, err := snConsentJournalLockFn(journalPath)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	return snResolveRetainedConsentLocked(ctx, api, apiUrl, coldkeySs58, journalPath, want, proof)
+}
+
+// snResolveRetainedConsentLocked handles a consent that was sent but never
 // acknowledged. It replays it exactly, but only when this request is the same
 // one; a different interval, message or login replaces it, and a retained
 // consent that no longer matches the saved login is dropped, so a stale entry
 // can never take over a later request. done is true when the retained consent
-// was replayed and acknowledged, so the caller has nothing left to do.
-func snResolveRetainedConsent(
+// was replayed and acknowledged, so the caller has nothing left to do. The
+// caller holds the journal lock.
+func snResolveRetainedConsentLocked(
 	ctx context.Context,
 	api *connect.BringYourApi,
 	apiUrl string,
@@ -548,7 +619,7 @@ func snResolveRetainedConsent(
 	}
 	if reason := snConsentRetainedMismatch(previous, *want, proof); reason != "" {
 		fmt.Printf("discarding the retained, unacknowledged wallet consent: %s\n", reason)
-		if err := snConsentJournalDrop(journalPath, apiUrl, coldkeySs58); err != nil {
+		if err := snConsentJournalDropLocked(journalPath, apiUrl, coldkeySs58); err != nil {
 			return false, err
 		}
 		want.Previous = nil
@@ -559,7 +630,7 @@ func snResolveRetainedConsent(
 		var refused *snConsentRefused
 		if errors.As(err, &refused) {
 			// a definite refusal: the retained original cannot succeed
-			if dropErr := snConsentJournalDrop(journalPath, apiUrl, coldkeySs58); dropErr != nil {
+			if dropErr := snConsentJournalDropLocked(journalPath, apiUrl, coldkeySs58); dropErr != nil {
 				return false, errors.Join(err, dropErr)
 			}
 			return false, fmt.Errorf("%w; the retained consent was discarded, run the command again to sign a new one", err)
@@ -567,16 +638,24 @@ func snResolveRetainedConsent(
 		return false, err
 	}
 	previous.Acked = true
-	if err := snConsentJournalStore(journalPath, *previous); err != nil {
+	if err := snConsentJournalStoreLocked(journalPath, *previous); err != nil {
 		return false, err
 	}
 	fmt.Printf("subnet wallet consent for %s acknowledged\n", coldkeySs58)
 	return true, nil
 }
 
+// snSignWalletChallengeFn is a test seam: the concurrency test counts the
+// signatures two racing `wallet set` runs make, which must be exactly one for
+// one consent.
+var snSignWalletChallengeFn = snSignWalletChallenge
+
 // snSetNetworkWalletConsent is `provider wallet set`: it replays an
 // unacknowledged consent if one is retained, else requests, verifies, signs
 // (from a seed file or an external signature), retains and submits a new one.
+// It holds the journal lock across all of that, so a concurrent run for the
+// same consent waits here and then replays or refuses the retained consent
+// instead of signing a second one.
 func snSetNetworkWalletConsent(ctx context.Context, clientStrategy *connect.ClientStrategy, apiUrl string, coldkeySs58 string, proof *snWalletProof) error {
 	if proof == nil || proof.unsigned() {
 		return errors.New("wallet consent needs the coldkey's signature: use --coldkey_seed_file on your own machine, or `provider wallet challenge` and then --message with --signature")
@@ -595,9 +674,25 @@ func snSetNetworkWalletConsent(ctx context.Context, clientStrategy *connect.Clie
 	if err != nil {
 		return err
 	}
-
-	if done, err := snResolveRetainedConsent(ctx, api, apiUrl, coldkeySs58, journalPath, &want, proof); done || err != nil {
+	// From the first journal read to the stored consent this run holds the
+	// journal lock: a concurrent `wallet set` for the same consent waits here,
+	// re-reads what this run retained, and replays or refuses it instead of
+	// signing a second consent.
+	releaseJournal, err := snConsentJournalLockFn(journalPath)
+	if err != nil {
+		return fmt.Errorf("wallet consent: cannot lock the journal: %w", err)
+	}
+	defer releaseJournal()
+	// re-read under the lock: the load in the setup ran before it
+	if want.Previous, err = snConsentJournalLoad(journalPath, apiUrl, coldkeySs58); err != nil {
 		return err
+	}
+
+	if done, err := snResolveRetainedConsentLocked(ctx, api, apiUrl, coldkeySs58, journalPath, &want, proof); done || err != nil {
+		return err
+	}
+	if refusal := snConsentStoredRefusal(want.Previous, want, proof); refusal != "" {
+		return errors.New("wallet consent: " + refusal)
 	}
 
 	var message string
@@ -614,7 +709,7 @@ func snSetNetworkWalletConsent(ctx context.Context, clientStrategy *connect.Clie
 		if err != nil {
 			return err
 		}
-		if signature, err = snSignWalletChallenge(keypair, message); err != nil {
+		if signature, err = snSignWalletChallengeFn(keypair, message); err != nil {
 			return err
 		}
 	} else {
@@ -628,7 +723,7 @@ func snSetNetworkWalletConsent(ctx context.Context, clientStrategy *connect.Clie
 		}
 	}
 
-	result, err := snStoreNetworkConsent(ctx, api, apiUrl, coldkeySs58, journalPath, message, signature, statement)
+	result, err := snStoreNetworkConsentLocked(ctx, api, apiUrl, coldkeySs58, journalPath, message, signature, statement)
 	if err != nil {
 		return err
 	}
@@ -638,10 +733,31 @@ func snSetNetworkWalletConsent(ctx context.Context, clientStrategy *connect.Clie
 	return nil
 }
 
-// snStoreNetworkConsent verifies the signed original locally, retains it in the
-// journal BEFORE sending, submits it, checks the server's receipt and marks it
-// acknowledged. Both `wallet set` and the browser signing page end here.
+// snStoreNetworkConsent takes the journal lock and hands the store to
+// snStoreNetworkConsentLocked; the browser signing page calls this directly.
 func snStoreNetworkConsent(
+	ctx context.Context,
+	api *connect.BringYourApi,
+	apiUrl string,
+	coldkeySs58 string,
+	journalPath string,
+	message string,
+	signature string,
+	statement *protocol.NetworkWalletMappingStatement,
+) (*connect.SnSetWalletResult, error) {
+	release, err := snConsentJournalLockFn(journalPath)
+	if err != nil {
+		return nil, fmt.Errorf("wallet consent: %w", err)
+	}
+	defer release()
+	return snStoreNetworkConsentLocked(ctx, api, apiUrl, coldkeySs58, journalPath, message, signature, statement)
+}
+
+// snStoreNetworkConsentLocked verifies the signed original locally, retains it
+// in the journal BEFORE sending, submits it, checks the server's receipt and
+// marks it acknowledged. Both `wallet set` and the browser signing page end
+// here. The caller holds the journal lock.
+func snStoreNetworkConsentLocked(
 	ctx context.Context,
 	api *connect.BringYourApi,
 	apiUrl string,
@@ -665,7 +781,7 @@ func snStoreNetworkConsent(
 	}
 	// retain before sending: a lost acknowledgement is answered by this exact
 	// original, never by a second signature
-	if err := snConsentJournalStore(journalPath, entry); err != nil {
+	if err := snConsentJournalStoreLocked(journalPath, entry); err != nil {
 		return nil, fmt.Errorf("wallet consent: cannot retain the consent before sending it: %w", err)
 	}
 	result, err := snSubmitNetworkConsent(ctx, api, coldkeySs58, entry)
@@ -673,7 +789,7 @@ func snStoreNetworkConsent(
 		return nil, err
 	}
 	entry.Acked = true
-	if err := snConsentJournalStore(journalPath, entry); err != nil {
+	if err := snConsentJournalStoreLocked(journalPath, entry); err != nil {
 		return nil, err
 	}
 	return result, nil
