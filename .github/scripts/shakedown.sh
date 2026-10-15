@@ -585,7 +585,9 @@ V=$(urnet-tools version 2>&1)
 echo "$V" | grep -qF "$EXPECTED_BASE" && ok "tool version $V" || bad "tool version ($V). Version must match $EXPECTED_BASE"
 run_check "providers discovers the account" urnet-tools providers 2>&1
 run_check "status running" urnet-tools status 2>&1
-run_check "proxy health cmd" urnet-tools proxy health 2>&1
+# `proxy health` ends in `tail -f` on the event log once it exists, so it never
+# returns on its own. Bound it; 124 means it reached the stream, which is a pass.
+run_check "proxy health cmd" bash -c 'timeout 10 urnet-tools proxy health; rc=$?; [ "$rc" = 124 ] && rc=0; exit $rc' 2>&1
 
 # ---------- D. Proxy lifecycle ----------
 section "D. Proxy lifecycle"
@@ -918,6 +920,12 @@ run_check "restored to latest" urnet-tools update -f 2>&1
 # expected version before the 70-min soak so Phase 2 does not soak the wrong
 # binary and grade RELEASE_OK.
 BIN_VER_AFTER=$(/home/urnet/.local/share/urnetwork-provider/bin/urnetwork --version 2>&1 | grep -m1 -oE "v3\.23\.0-fix\.[0-9.]+" || true)
+if [ -z "$BIN_VER_AFTER" ] || ! echo "$BIN_VER_AFTER" | grep -qF "$EXPECTED_BASE"; then
+  # Prerelease target: restore-to-latest moved us off it. Re-pin, as the
+  # comment above promises, instead of failing Tier 1 and soaking the wrong build.
+  run_check "M: re-pin to $EXPECTED_VERSION after restore" urnet-tools update --tag "$EXPECTED_VERSION" -f 2>&1
+  BIN_VER_AFTER=$(/home/urnet/.local/share/urnetwork-provider/bin/urnetwork --version 2>&1 | grep -m1 -oE "v3\.23\.0-fix\.[0-9.]+" || true)
+fi
 if [ -n "$BIN_VER_AFTER" ] && echo "$BIN_VER_AFTER" | grep -qF "$EXPECTED_BASE"; then
   ok "binary still matches $EXPECTED_BASE after restore ($BIN_VER_AFTER)"
 else
@@ -2312,7 +2320,11 @@ section "AB. Command surface coverage"
 cmd_reachable() {
   local name="$1"; shift
   local out rc
-  out=$("$@" 2>&1); rc=$?
+  # Bounded: a streaming command (`proxy health` tails its event log) would
+  # otherwise block the whole suite until the job timeout. 124 = it started
+  # streaming, which is reachable; the output checks below still apply.
+  out=$(timeout 20 "$@" 2>&1); rc=$?
+  [ "$rc" = 124 ] && rc=0
   if echo "$out" | grep -qiE "unknown command|unknown proxy subcommand|unknown key"; then
     bad "AB: $name is not wired up (unknown command)"
     echo "$out" | head -3 | sed 's/^/    | /' | tee -a "$REPORT"
