@@ -1228,7 +1228,11 @@ section "T. Bare update (fetchLatestRelease leg)"
 # what tag this run is testing. OLD_STABLE_VERSION should be bumped
 # periodically as published stables age; it only needs to predate whatever
 # tag this workflow will ever test.
-OLD_STABLE_VERSION="v3.23.0-fix.30.9"
+# The baseline's OWN urnet-tools runs the bare update below, so the baseline
+# must carry the restart verification that reads the version from the release
+# stamp. 30.9's tool reads buildinfo, which -trimpath strips, so it reported
+# "restart did not take effect" on every successful update (fixed in 31.0).
+OLD_STABLE_VERSION="v3.23.0-fix.31.2"
 run_check "T: install known-older stable $OLD_STABLE_VERSION" timeout 300 urnet-tools update --tag "$OLD_STABLE_VERSION" -f 2>&1
 BIN_VER_OLD=$(/home/urnet/.local/share/urnetwork-provider/bin/urnetwork --version 2>&1 | grep -m1 -oE "v3\.23\.0-fix\.[0-9.]+" || true)
 echo "  binary after install of known-older stable: $BIN_VER_OLD" | tee -a "$REPORT"
@@ -1403,6 +1407,19 @@ V_BASE_C=$(echo "$V_TAG_C" | grep -oE "v3\.23\.0-fix\.[0-9.]+")
 run_check "V1: install pre-hotswap provider $OLD_HOTSWAP_VERSION" timeout 300 urnet-tools update --tag "$OLD_HOTSWAP_VERSION" -f 2>&1
 V_TYPE=$(runuser -u urnet -- env XDG_RUNTIME_DIR=/run/user/$(id -u urnet) systemctl --user show -p Type --value urnetwork.service 2>/dev/null)
 [ "$V_TYPE" = "simple" ] && ok "V1: unit is Type=simple ahead of the migration test" || bad "V1: unit Type is '$V_TYPE', want simple"
+# The tool that installed $OLD_HOTSWAP_VERSION is that release's own, which
+# has neither the Type=notify migration nor the stamp-based restart check, so
+# it can neither migrate the unit nor verify the restart. Refresh the TOOL
+# ALONE to $V_TAG_A, as an operator does before updating a pre-31 node, and
+# run the update with it.
+V1_TOOL_DST=/home/urnet/.local/share/urnetwork-provider/bin/urnet-tools
+if curl -fsSL "https://github.com/full-bars/urnetwork-3.23-fix/releases/download/${V_TAG_A}/urnet-tools-linux-amd64" -o /tmp/urnet-tools-v1 \
+   && install -o urnet -g urnet -m 0755 /tmp/urnet-tools-v1 "$V1_TOOL_DST"; then
+  ok "V1: refreshed urnet-tools alone to $V_TAG_A ahead of the migration test"
+else
+  bad "V1: could not refresh urnet-tools to $V_TAG_A (the pre-31 tool cannot migrate the unit)"
+fi
+rm -f /tmp/urnet-tools-v1
 V1_OUT=$(timeout 300 urnet-tools update --tag "$V_TAG_A" -f 2>&1); V1_RC=$?
 echo "$V1_OUT" | grep -iE "hotswap|migrat|Type=notify" | tee -a "$REPORT"
 if [ "$V1_RC" -eq 124 ]; then
@@ -2109,13 +2126,20 @@ else
   bad "Z: expected two distinct control sockets"
 fi
 
-# No-target invocation must now REFUSE with the multi-provider ambiguity
-# guard (defaultProvider()'s rule: 2+ providers for the current [root] view
-# is an error naming both, not a silent pick of one).
-if urnet-tools status >/dev/null 2>&1; then
-  bad "Z: no-target 'urnet-tools status' succeeded with 2 providers present (ambiguity guard did not fire)"
+# Plain `status` with 2+ providers and no target prints one summary row per
+# provider and exits 0 on purpose (cmdStatus, since v3.23.0-fix.32.2). The
+# ambiguity guard still refuses where a single provider is required, such as
+# `status --json`. Assert both halves of that contract.
+Z_SUM=$(urnet-tools status 2>&1); Z_SUM_RC=$?
+if [ "$Z_SUM_RC" -eq 0 ] && echo "$Z_SUM" | grep -q "urnet" && echo "$Z_SUM" | grep -q "$Z_USER"; then
+  ok "Z: no-target 'urnet-tools status' summarizes both providers (exit 0)"
 else
-  ok "Z: no-target invocation correctly refused with 2 providers present"
+  bad "Z: no-target 'urnet-tools status' did not summarize both providers (exit $Z_SUM_RC)"
+fi
+if urnet-tools status --json >/dev/null 2>&1; then
+  bad "Z: no-target 'urnet-tools status --json' succeeded with 2 providers present (ambiguity guard did not fire)"
+else
+  ok "Z: no-target 'status --json' correctly refused with 2 providers present"
 fi
 run_check "Z: --user urnet targets the first provider" urnet-tools status --user urnet 2>&1
 run_check "Z: --user $Z_USER targets the second provider" urnet-tools status --user "$Z_USER" 2>&1
