@@ -131,6 +131,9 @@ func startH3TestServer(
 // the loopback server, with a route manager so it can register routes.
 func newH3DatagramTestTransport(ctx context.Context, cancel context.CancelFunc, port int) *PlatformTransport {
 	settings := DefaultPlatformTransportSettings()
+	// these tests exercise the operator gates, which decide the offer when the
+	// explicit setting is off (the setting itself defaults on, as upstream)
+	settings.EnableH3Datagrams = false
 	settings.EnableH3 = true
 	settings.H3Port = port
 	settings.FramerSettings = DefaultFramerSettings(int(DefaultClientSettings().MinimumMessageLenLimit()))

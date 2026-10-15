@@ -189,14 +189,18 @@ func TestH3DatagramControlKeyDrivesTheOffer(t *testing.T) {
 	if err := applyLiveSideEffect("h3_datagram", "on"); err != nil || !connect.H3DatagramsEnabled() {
 		t.Fatalf("set on: err=%v enabled=%v", err, connect.H3DatagramsEnabled())
 	}
-	if err := applyLiveDefault("h3_datagram"); err != nil || connect.H3DatagramsEnabled() {
+	if err := applyLiveSideEffect("h3_datagram", "off"); err != nil || connect.H3DatagramsEnabled() {
+		t.Fatalf("set off: err=%v enabled=%v", err, connect.H3DatagramsEnabled())
+	}
+	// clearing returns to the default, which is on as upstream
+	if err := applyLiveDefault("h3_datagram"); err != nil || !connect.H3DatagramsEnabled() {
 		t.Fatalf("clear: err=%v enabled=%v", err, connect.H3DatagramsEnabled())
 	}
 
 	state := newControlState()
 	applyPersistedRuntimeTuning(state)
-	if connect.H3DatagramsEnabled() {
-		t.Fatal("an unset key must leave the offer off")
+	if !connect.H3DatagramsEnabled() {
+		t.Fatal("an unset key must leave the offer on (the default, as upstream)")
 	}
 	if err := state.set("h3_datagram", "on"); err != nil {
 		t.Fatal(err)
@@ -232,14 +236,18 @@ func TestH3DatagramSendControlKeyDrivesTheSendGate(t *testing.T) {
 	if err := applyLiveSideEffect("h3_datagram_send", "on"); err != nil || !connect.H3DatagramSendEnabled() {
 		t.Fatalf("set on: err=%v enabled=%v", err, connect.H3DatagramSendEnabled())
 	}
-	if err := applyLiveDefault("h3_datagram_send"); err != nil || connect.H3DatagramSendEnabled() {
+	if err := applyLiveSideEffect("h3_datagram_send", "off"); err != nil || connect.H3DatagramSendEnabled() {
+		t.Fatalf("set off: err=%v enabled=%v", err, connect.H3DatagramSendEnabled())
+	}
+	// clearing returns to the default, which is on as upstream
+	if err := applyLiveDefault("h3_datagram_send"); err != nil || !connect.H3DatagramSendEnabled() {
 		t.Fatalf("clear: err=%v enabled=%v", err, connect.H3DatagramSendEnabled())
 	}
 
 	state := newControlState()
 	applyPersistedRuntimeTuning(state)
-	if connect.H3DatagramSendEnabled() {
-		t.Fatal("an unset key must leave datagram send off")
+	if !connect.H3DatagramSendEnabled() {
+		t.Fatal("an unset key must leave datagram send on (the default, as upstream)")
 	}
 	if err := state.set("h3_datagram_send", "on"); err != nil {
 		t.Fatal(err)

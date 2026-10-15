@@ -487,12 +487,11 @@ var liveDefaults = map[string]string{
 	"ip_version": "dual",
 	// Clearing h1_plus restores the default: H1+ upgrades allowed.
 	"h1_plus": "on",
-	// Clearing h3_datagram_send stops sending datagrams: it is an experiment and
-	// its default is off, with no environment variable behind it.
-	"h3_datagram_send": "off",
-	// Clearing h3_datagram stops offering DATAGRAM: it is an experiment and
-	// its default is off, with no environment variable behind it.
-	"h3_datagram": "off",
+	// Clearing h3_datagram_send returns to the default: on, as upstream.
+	"h3_datagram_send": "on",
+	// Clearing h3_datagram returns to the default: offering DATAGRAM is on, as
+	// upstream.
+	"h3_datagram": "on",
 	// Clearing the baseline key re-enables the recorder. Its default is ON,
 	// because a free upgrade baseline is the point: leaving it off after an
 	// operator cleared it would mean the file silently stops growing and
@@ -1322,12 +1321,11 @@ func applyPersistedRuntimeTuning(state *controlState) {
 			tlog("[control] failed to apply persisted metrics=on: %s\n", err)
 		}
 	}
-	// h3_datagram / h3_datagram_send have no environment default, so an unset key
-	// previously meant off. On a settled direct-only node they now default on for
-	// the same reason h3 does (one identity, one extra socket, quiet H1
-	// fallback); a pooled node keeps off. An explicit persisted key still wins.
+	// h3_datagram / h3_datagram_send have no environment default. They default on
+	// everywhere, as upstream offers and sends datagrams by default. An explicit
+	// persisted key (off included) still wins.
 	res := currentProxyResolution()
-	directOnly := directOnlyDatagramDefault(res)
+	directOnly := datagramDefaultOn(res)
 	datagramValue, datagramSet := state.get("h3_datagram")
 	if !datagramSet && directOnly {
 		datagramValue = "on"

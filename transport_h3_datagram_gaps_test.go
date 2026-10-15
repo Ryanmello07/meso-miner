@@ -71,27 +71,35 @@ func TestH3DatagramSoleTargetModeNeverOffers(t *testing.T) {
 	}
 }
 
-// The DNS translation modes are an availability fallback and never offer
-// DATAGRAM. The offer is counted before the dial, so a wrong condition would
-// show up even though this endpoint is closed: the DNS attempt must be counted
-// and the offer must not.
-func TestRunH3NeverOffersDatagramsForTheDnsMode(t *testing.T) {
-	switchH3DatagramGate(t, true)
-	before := H3DatagramCounters()
-	statsBefore := TransportModeStats()
-	transport, cancel := newClosedPortTransport(t, TransportModeH3Dns, true)
-	done := make(chan struct{})
-	go func() { defer close(done); transport.runH3(transport.ctx, TransportModeH3Dns, 0, 1) }()
-	time.Sleep(600 * time.Millisecond)
-	cancel()
-	<-done
+// The DNS translation modes follow the explicit EnableH3Datagrams setting like
+// every other H3 dial (as upstream): with the setting off they never offer, with
+// it on (the default) they do. The offer is counted before the dial, so a wrong
+// condition shows up even though this endpoint is closed: the DNS attempt must
+// be counted either way.
+func TestRunH3DnsModeFollowsTheDatagramSetting(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		switchH3DatagramGate(t, true)
+		before := H3DatagramCounters()
+		statsBefore := TransportModeStats()
+		transport, cancel := newClosedPortTransport(t, TransportModeH3Dns, true)
+		transport.settings.EnableH3Datagrams = enabled
+		done := make(chan struct{})
+		go func() { defer close(done); transport.runH3(transport.ctx, TransportModeH3Dns, 0, 1) }()
+		time.Sleep(600 * time.Millisecond)
+		cancel()
+		<-done
 
-	after := TransportModeStats()
-	if after.Dns.Attempts <= statsBefore.Dns.Attempts {
-		t.Fatal("expected the DNS mode attempt to be counted")
-	}
-	if got := H3DatagramCounters().Offered - before.Offered; got != 0 {
-		t.Fatalf("DNS mode counted %d offers, want 0", got)
+		after := TransportModeStats()
+		if after.Dns.Attempts <= statsBefore.Dns.Attempts {
+			t.Fatalf("setting=%v: expected the DNS mode attempt to be counted", enabled)
+		}
+		got := H3DatagramCounters().Offered - before.Offered
+		if enabled && got == 0 {
+			t.Fatalf("setting on: the DNS mode made no offer")
+		}
+		if !enabled && got != 0 {
+			t.Fatalf("setting off: DNS mode counted %d offers, want 0", got)
+		}
 	}
 }
 

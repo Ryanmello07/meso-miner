@@ -814,7 +814,7 @@ func DefaultPlatformTransportSettings() *PlatformTransportSettings {
 		H3InitialConnectionReceiveWindowByteCount: kib(512),
 		H3MaxConnectionReceiveWindowByteCount:     defaultH3MaxConnectionReceiveWindowByteCount(),
 		PtDnsSlowMultiple:                         4,
-		EnableH3Datagrams:                         false, // fork: operator-gated (h3DatagramOffer); upstream defaults it on
+		EnableH3Datagrams:                         true, // as upstream: every H3 dial offers QUIC DATAGRAM
 		QuicVersionPolicy:                         QuicVersionPolicyPreferV2,
 		H3DatagramSettings:                        DefaultH3DatagramSettings(),
 		H3QuicPacketStats:                         &H3QuicPacketStats{},

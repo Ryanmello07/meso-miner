@@ -60,11 +60,11 @@ func resolveH3Setting(state *controlState, resolution int32) bool {
 	return defaultH3Setting(state, resolution)
 }
 
-// directOnlyDatagramDefault reports whether the H3 DATAGRAM offer/send
-// experiments default on for a direct-only node. Same reasoning as H3 itself:
-// one identity, one extra socket, quiet H1 fallback. Off for pooled nodes.
-func directOnlyDatagramDefault(resolution int32) bool {
-	return autoEnableH3 && resolution == proxyResolutionZeroValid
+// datagramDefaultOn reports whether the H3 DATAGRAM offer and send switches
+// default on. They do on every node, as upstream offers and sends datagrams by
+// default; an explicit control key (persisted "off" included) still wins.
+func datagramDefaultOn(resolution int32) bool {
+	return true
 }
 
 // applyDirectOnlyH3Defaults reapplies the H3 transport defaults when a node
@@ -89,7 +89,7 @@ func applyDirectOnlyH3Defaults() {
 			// Operator set it (either value): leave it alone.
 			continue
 		}
-		value := onOff(directOnlyDatagramDefault(resolution))
+		value := onOff(datagramDefaultOn(resolution))
 		if key == "h3" {
 			value = onOff(defaultH3Setting(state, resolution))
 		}

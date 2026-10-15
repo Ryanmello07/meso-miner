@@ -62,8 +62,9 @@ func TestH3DefaultsFollowResolutionTransitions(t *testing.T) {
 		name, env, override  string
 		wantH3, wantDatagram bool
 	}{
-		{"unset", "", "", false, false},
-		{"environment fallback", "on", "", true, false},
+		// datagrams default on everywhere, as upstream; only an explicit off turns them off
+		{"unset", "", "", false, true},
+		{"environment fallback", "on", "", true, true},
 		{"explicit on", "", "on", true, true},
 		{"explicit off beats environment", "on", "off", false, false},
 	} {

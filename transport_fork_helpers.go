@@ -187,8 +187,8 @@ func forkModePreferences(settings *PlatformTransportSettings) map[TransportMode]
 // h3DatagramOffer reports whether a dial in ptMode offers QUIC DATAGRAM. The
 // explicit EnableH3Datagrams setting always wins. Otherwise only the gated
 // auxiliary H3 on the plain H3 path offers it, and only while the operator
-// datagram gate is on. Upstream turns the setting on by default; this tree keeps
-// it off until an operator asks (SetH3DatagramsEnabled).
+// datagram gate is on. Like upstream, the setting and both gates default on;
+// an operator turns them off with SetH3DatagramsEnabled.
 func (self *PlatformTransport) h3DatagramOffer(ptMode TransportMode) bool {
 	if self.settings.EnableH3Datagrams {
 		return true
