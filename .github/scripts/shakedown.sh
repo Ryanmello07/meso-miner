@@ -1738,8 +1738,22 @@ for corrupt in truncated invalid-json literal-null; do
   # Snapshot the RAM-log mark per iteration: a stale block from the previous
   # iteration must not satisfy this iteration's wait if this start fails.
   RAMLOG_MARK=$(ramlog_mark_snapshot)
+  # This battery restarts the unit many times in a few seconds. The unit has no
+  # StartLimit settings, so systemd applies its defaults (5 starts per 10 s)
+  # and refuses the sixth with "Job for urnetwork.service failed", which is not
+  # a provider fault. Clear any failed state first, and retry once after the
+  # rate-limit window if the start was refused, so the case measures the
+  # provider and not systemd.
+  runuser -u urnet -- env XDG_RUNTIME_DIR=/run/user/$(id -u urnet) systemctl --user reset-failed urnetwork.service >/dev/null 2>&1 || true
   timeout 90 runuser -u urnet -- env XDG_RUNTIME_DIR=/run/user/$(id -u urnet) systemctl --user start urnetwork.service
   W3_RC=$?
+  if [ "$W3_RC" -ne 0 ] && [ "$W3_RC" -ne 124 ]; then
+    echo "  W3: start refused (rc $W3_RC); resetting failed state and retrying once after the rate-limit window" | tee -a "$REPORT"
+    sleep 12
+    runuser -u urnet -- env XDG_RUNTIME_DIR=/run/user/$(id -u urnet) systemctl --user reset-failed urnetwork.service >/dev/null 2>&1 || true
+    timeout 90 runuser -u urnet -- env XDG_RUNTIME_DIR=/run/user/$(id -u urnet) systemctl --user start urnetwork.service
+    W3_RC=$?
+  fi
   if [ "$W3_RC" -eq 124 ]; then
     t1bad "W3 (T3): provider HUNG starting with a $corrupt pending_overrides.json"
     continue
