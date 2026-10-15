@@ -545,3 +545,41 @@ func TestNetworkConsentDefiniteRefusalDropsTheRetainedEntry(t *testing.T) {
 		t.Fatal("the refused entry is still in the journal")
 	}
 }
+
+func TestWalletStatusShowsTheConsentApartFromALoginProofWallet(t *testing.T) {
+	consentTestHome(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sn/epoch":
+			_ = json.NewEncoder(w).Encode(consentTestEpoch())
+		case "/sn/wallet":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"wallets": []map[string]interface{}{
+				{"coldkey_ss58": "5Network", "consent_scope": "network", "from_epoch": 51, "through_epoch": 65585, "mapping_hash": "abc\x1b[2J", "mapping_generation": 1},
+				{"coldkey_ss58": "5Login", "set_at_millis": 1},
+			}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var out strings.Builder
+	if err := snWalletStatus(ctx, &out, connect.NewClientStrategyWithDefaults(ctx), server.URL); err != nil {
+		t.Fatal(err)
+	}
+	text := out.String()
+	for _, want := range []string{
+		"network consent for the network: coldkey 5Network, epochs 51 through 65585",
+		"starts in 1 epoch(s)",
+		"login-proof wallet 5Login",
+		"release settlement does not pay it",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("status lacks %q:\n%s", want, text)
+		}
+	}
+	if strings.ContainsRune(text, 0x1b) {
+		t.Fatal("a control character from the server reached the terminal")
+	}
+}

@@ -9,8 +9,12 @@
 
 - **Network wallet consent (`provider wallet challenge`, `provider wallet set`)**: the coldkey now signs the canonical prospective network consent, the statement release settlement pays, instead of the generic sign-in challenge (which is also a wallet login and is never paid). One signature covers every provider client of the network, current and future, and carries the earning-epoch interval (`--wallet-from-epoch`, `--wallet-through-epoch`; the default is the next epoch through 65,536 epochs). Every field of the statement is checked against the saved login, the epoch route and the coldkey before the key is loaded, the consent is retained before it is sent so a lost acknowledgement is answered by the identical original, and the server's receipt must name the same consent. Sign on your own machine; a fleet node needs nothing.
 
+- **`provider wallet status`**: shows what the server holds for the network, with a consent (provider, network or hotkey scope, its epochs, whether it is in effect or starts in N epochs, and its receipt) apart from a login-proof wallet, which release settlement does not pay.
+- **Sign the consent with a browser wallet**: `scripts/wallet-consent/run_signing.sh <coldkey>` serves one local page on `127.0.0.1` where a wallet extension (Talisman or any Polkadot `signRaw` extension) signs the verified statement. The seed phrase never leaves the extension; the page saves only the public signature. See `scripts/wallet-consent/README.md`.
+
 ### Fixed
 
+- The client send path (`RemoteUserNatClient` and the multi-client) forwards packets the SMTP guard does not govern. It treated the guard's "not applicable" verdict as a refusal and dropped all ordinary client traffic, which the `-short` CI never saw because the end-to-end echo tests skip there. Provider nodes were not affected: they use the receive-side path.
 - The seed file is read through the descriptor that was checked, closing a check-then-read swap window.
 - The receive path releases its scratch references after a committed-prefix scan.
 

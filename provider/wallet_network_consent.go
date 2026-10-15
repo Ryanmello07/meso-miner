@@ -623,3 +623,69 @@ func snSetNetworkWalletConsent(ctx context.Context, clientStrategy *connect.Clie
 		coldkeySs58, statement.FromEpoch, statement.ThroughEpoch, result.MappingGeneration, snPlain(result.MappingHash))
 	return nil
 }
+
+// snWalletStatus is `provider wallet status`: what the server holds for this
+// network, with the consent that pays settlement shown apart from a
+// login-proof wallet, which release settlement never pays.
+func snWalletStatus(ctx context.Context, out io.Writer, clientStrategy *connect.ClientStrategy, apiUrl string) error {
+	byJwt, err := readNetworkJwt()
+	if err != nil {
+		return err
+	}
+	api := connect.NewBringYourApi(ctx, clientStrategy, apiUrl)
+	defer api.Close()
+	api.SetByJwt(byJwt)
+	result, err := api.SnGetWalletSync()
+	if err != nil {
+		return fmt.Errorf("wallet status: %w", err)
+	}
+	if result.Error != nil {
+		return fmt.Errorf("wallet status: %s", snPlain(result.Error.Message))
+	}
+	var epoch *connect.SnEpochResult
+	if e, err := api.SnEpochSync(); err == nil {
+		epoch = e
+	}
+	entries := result.Wallets
+	if len(entries) == 0 && result.Wallet != nil {
+		entries = []*connect.SnWalletEntry{result.Wallet}
+	}
+	if len(entries) == 0 {
+		fmt.Fprintf(out, "no wallet is set for this network\n")
+		return nil
+	}
+	paying := 0
+	for _, entry := range entries {
+		scope := entry.ConsentScope
+		subject := "the network"
+		if entry.ClientId != "" {
+			subject = "client " + snPlain(entry.ClientId)
+		}
+		switch scope {
+		case "":
+			fmt.Fprintf(out, "login-proof wallet %s for %s (NOT a consent: release settlement does not pay it)\n", snPlain(entry.ColdkeySs58), subject)
+		default:
+			paying++
+			current := ""
+			if epoch != nil && entry.FromEpoch > 0 {
+				switch {
+				case int64(epoch.Epoch) < entry.FromEpoch:
+					current = fmt.Sprintf(", starts in %d epoch(s)", entry.FromEpoch-int64(epoch.Epoch))
+				case entry.ThroughEpoch > 0 && int64(epoch.Epoch) > entry.ThroughEpoch:
+					current = ", ended"
+				default:
+					current = ", in effect now"
+				}
+			}
+			fmt.Fprintf(out, "%s consent for %s: coldkey %s, epochs %d through %d (generation %d)%s\n",
+				snPlain(scope), subject, snPlain(entry.ColdkeySs58), entry.FromEpoch, entry.ThroughEpoch, entry.MappingGeneration, current)
+			if entry.MappingHash != "" {
+				fmt.Fprintf(out, "  receipt %s\n", snPlain(entry.MappingHash))
+			}
+		}
+	}
+	if paying == 0 {
+		fmt.Fprintf(out, "no consent is stored: sign one with `provider wallet challenge` and `provider wallet set`\n")
+	}
+	return nil
+}

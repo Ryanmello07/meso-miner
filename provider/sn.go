@@ -104,6 +104,24 @@ func legacyNetworkWalletGate(legacyNetwork bool, via string) error {
 	return fmt.Errorf("%s sends the unsigned network wallet request, which the platform may refuse under its signed wallet rules; set the wallet in the URnetwork app or web account, sign it here with --coldkey_seed_file (or --message with --signature), or pass --legacy-network-wallet to send the unsigned request anyway", via)
 }
 
+// walletStatus implements `provider wallet status`.
+func walletStatus(opts docopt.Opts) {
+	apiUrl, err := resolveApiUrl(opts)
+	if err != nil {
+		fmt.Printf("network config error: %s\n", err)
+		os.Exit(1)
+	}
+	ctx, cancel := walletCommandContext()
+	defer cancel()
+	ctx, cancelTimeout := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelTimeout()
+	clientStrategy := connect.NewClientStrategyWithDefaults(ctx)
+	if err := snWalletStatus(ctx, os.Stdout, clientStrategy, apiUrl); err != nil {
+		fmt.Printf("%s\n", err)
+		os.Exit(1)
+	}
+}
+
 // walletSet implements `provider wallet set <coldkey_ss58>
 // [--coldkey_seed_file=<path> | --message=<text> --signature=<hex>]`.
 func walletSet(opts docopt.Opts) {

@@ -950,6 +950,8 @@ func main() {
 				fmt.Printf("wallet challenge failed: %s\n", err)
 				os.Exit(1)
 			}
+		} else if status, _ := opts.Bool("status"); status {
+			walletStatus(opts)
 		}
 	} else if snStatus, _ := opts.Bool("sn-status"); snStatus {
 		snStatusCmd(opts)
@@ -7278,6 +7280,9 @@ Usage:
         [-v...]
     provider wallet challenge <coldkey_ss58>
         [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>]
+        [--api_url=<api_url>]
+        [-v...]
+    provider wallet status
         [--api_url=<api_url>]
         [-v...]
     provider sn-status [--json]

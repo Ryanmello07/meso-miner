@@ -138,3 +138,41 @@ func (self *BringYourApi) SnWalletConsentSync(args *SnWalletConsentArgs) (*SnWal
 		NewNoopApiCallback[*SnWalletConsentResult](),
 	)
 }
+
+// SnWalletEntry is one wallet the server holds for the caller: a consent
+// (provider, network or hotkey scope), or a login-proof wallet with no scope.
+type SnWalletEntry struct {
+	ColdkeySs58 string `json:"coldkey_ss58"`
+	// the provider client the wallet is attached to; empty = network-level
+	ClientId    string `json:"client_id,omitempty"`
+	SetAtMillis int64  `json:"set_at_millis"`
+	// first and last epoch a consent pays (0 = unknown)
+	FromEpoch    int64 `json:"from_epoch,omitempty"`
+	ThroughEpoch int64 `json:"through_epoch,omitempty"`
+	// "provider", "network" or "hotkey"; empty for a login-proof wallet
+	ConsentScope string `json:"consent_scope,omitempty"`
+	HotkeySs58   string `json:"hotkey_ss58,omitempty"`
+	// the consent chain head, hex
+	MappingHash       string `json:"mapping_hash,omitempty"`
+	MappingGeneration int64  `json:"mapping_generation,omitempty"`
+}
+
+type SnGetWalletResult struct {
+	Wallet  *SnWalletEntry   `json:"wallet,omitempty"`
+	Wallets []*SnWalletEntry `json:"wallets,omitempty"`
+	Error   *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+}
+
+// SnGetWalletSync reads the caller's wallets via `GET /sn/wallet`.
+func (self *BringYourApi) SnGetWalletSync() (*SnGetWalletResult, error) {
+	return HttpGetWithStrategy(
+		self.ctx,
+		self.clientStrategy,
+		fmt.Sprintf("%s/sn/wallet", self.apiUrl),
+		self.ByJwt(),
+		&SnGetWalletResult{},
+		NewNoopApiCallback[*SnGetWalletResult](),
+	)
+}
