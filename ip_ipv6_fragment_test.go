@@ -51,7 +51,7 @@ func TestStreamStateDataPacketsFragmentsOversizedIpv6Datagram(t *testing.T) {
 			t.Fatalf("fragment %d carries next header %d, want the fragment header (%d); an oversized UDP datagram must not be split into several independent datagrams", i, packet[6], testIpv6FragmentHeaderNextHeader)
 		}
 		fragmentHeader := packet[Ipv6HeaderSize : Ipv6HeaderSize+testIpv6FragmentHeaderSize]
-		if fragmentHeader[0] != byte(IP_PROTOCOL_UDP) {
+		if fragmentHeader[0] != byte(ipProtocolNumberUdp) {
 			t.Fatalf("fragment %d resumes header %d, want udp", i, fragmentHeader[0])
 		}
 		id := binary.BigEndian.Uint32(fragmentHeader[4:8])
@@ -89,7 +89,7 @@ func TestStreamStateDataPacketsFragmentsOversizedIpv6Datagram(t *testing.T) {
 	if len(packets) != 1 {
 		t.Fatalf("a %d byte payload fits one datagram, got %d packets", len(small), len(packets))
 	}
-	if packets[0][6] != byte(IP_PROTOCOL_UDP) {
+	if packets[0][6] != byte(ipProtocolNumberUdp) {
 		t.Fatalf("the unfragmented boundary packet carries next header %d, want udp", packets[0][6])
 	}
 

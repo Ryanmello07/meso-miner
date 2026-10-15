@@ -13,7 +13,7 @@ import (
 // test asserts the two agree on a table, and FuzzIpParseSurfaces asserts the
 // same on every input it generates outside the extension-chain family.
 
-func legacyParseIpv6(ipPacket []byte) (ipProtocol IPProtocol, sourceIp net.IP, destinationIp net.IP, transport []byte, ok bool) {
+func legacyParseIpv6(ipPacket []byte) (ipProtocol ipProtocolNumber, sourceIp net.IP, destinationIp net.IP, transport []byte, ok bool) {
 	if len(ipPacket) < Ipv6HeaderSize {
 		return
 	}
@@ -21,7 +21,7 @@ func legacyParseIpv6(ipPacket []byte) (ipProtocol IPProtocol, sourceIp net.IP, d
 	if len(ipPacket) < Ipv6HeaderSize+payloadByteCount {
 		return
 	}
-	ipProtocol = IPProtocol(ipPacket[6])
+	ipProtocol = ipProtocolNumber(ipPacket[6])
 	sourceIp = net.IP(ipPacket[8:24])
 	destinationIp = net.IP(ipPacket[24:40])
 	transport = ipPacket[Ipv6HeaderSize : Ipv6HeaderSize+payloadByteCount]

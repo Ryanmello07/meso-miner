@@ -46,16 +46,6 @@ const TcpHeaderSizeWithoutExtensions = 20
 
 const debugVerifyHeaders = false
 
-type IPProtocol uint8
-
-const (
-	IP_PROTOCOL_ICMP IPProtocol = 1
-	IP_PROTOCOL_TCP  IPProtocol = 6
-	IP_PROTOCOL_UDP  IPProtocol = 17
-	// icmpv6's next-header value, for the v6 dispatch
-	IP_PROTOCOL_ICMPV6 IPProtocol = 58
-)
-
 type UDPPort uint16
 type TCPPort uint16
 
@@ -111,7 +101,7 @@ func (self *parsedTcp) flagsString() string {
 	return strings.Join(flags, ", ")
 }
 
-func parseIpv4(ipPacket []byte) (ipProtocol IPProtocol, sourceIp net.IP, destinationIp net.IP, transport []byte, ok bool) {
+func parseIpv4(ipPacket []byte) (ipProtocol ipProtocolNumber, sourceIp net.IP, destinationIp net.IP, transport []byte, ok bool) {
 	if len(ipPacket) < Ipv4HeaderSizeWithoutExtensions {
 		return
 	}
@@ -127,7 +117,7 @@ func parseIpv4(ipPacket []byte) (ipProtocol IPProtocol, sourceIp net.IP, destina
 	if binary.BigEndian.Uint16(ipPacket[6:8])&0x3fff != 0 {
 		return
 	}
-	ipProtocol = IPProtocol(ipPacket[9])
+	ipProtocol = ipProtocolNumber(ipPacket[9])
 	sourceIp = net.IP(ipPacket[12:16])
 	destinationIp = net.IP(ipPacket[16:20])
 	transport = ipPacket[headerByteCount:totalByteCount]
@@ -135,7 +125,7 @@ func parseIpv4(ipPacket []byte) (ipProtocol IPProtocol, sourceIp net.IP, destina
 	return
 }
 
-func parseIpv6(ipPacket []byte) (ipProtocol IPProtocol, sourceIp net.IP, destinationIp net.IP, transport []byte, ok bool) {
+func parseIpv6(ipPacket []byte) (ipProtocol ipProtocolNumber, sourceIp net.IP, destinationIp net.IP, transport []byte, ok bool) {
 	if len(ipPacket) < Ipv6HeaderSize {
 		return
 	}
@@ -151,7 +141,7 @@ func parseIpv6(ipPacket []byte) (ipProtocol IPProtocol, sourceIp net.IP, destina
 		if len(ipPacket) < payloadEnd {
 			return
 		}
-		ipProtocol = IPProtocol(ipPacket[6])
+		ipProtocol = ipProtocolNumber(ipPacket[6])
 		transportOffset = Ipv6HeaderSize
 	} else {
 		walk, walkOk := walkIpv6ExtensionHeaders(ipPacket)
@@ -296,7 +286,7 @@ func checksumFinish(sum uint32) uint16 {
 	return ^uint16(sum)
 }
 
-func transportChecksum(protocol IPProtocol, packetSourceIp net.IP, packetDestinationIp net.IP, transport []byte) uint16 {
+func transportChecksum(protocol ipProtocolNumber, packetSourceIp net.IP, packetDestinationIp net.IP, transport []byte) uint16 {
 	sum := checksumAdd(0, packetSourceIp)
 	sum = checksumAdd(sum, packetDestinationIp)
 	sum += uint32(protocol)
@@ -304,7 +294,7 @@ func transportChecksum(protocol IPProtocol, packetSourceIp net.IP, packetDestina
 	return checksumFinish(checksumAdd(sum, transport))
 }
 
-func writeIpv4Header(packet []byte, ipProtocol IPProtocol, packetSourceIp net.IP, packetDestinationIp net.IP) {
+func writeIpv4Header(packet []byte, ipProtocol ipProtocolNumber, packetSourceIp net.IP, packetDestinationIp net.IP) {
 	packet[0] = 0x45
 	packet[1] = 0
 	binary.BigEndian.PutUint16(packet[2:4], uint16(len(packet)))
@@ -321,7 +311,7 @@ func writeIpv4Header(packet []byte, ipProtocol IPProtocol, packetSourceIp net.IP
 	binary.BigEndian.PutUint16(packet[10:12], checksumFinish(checksumAdd(0, packet[0:Ipv4HeaderSizeWithoutExtensions])))
 }
 
-func writeIpv6Header(packet []byte, ipProtocol IPProtocol, packetSourceIp net.IP, packetDestinationIp net.IP) {
+func writeIpv6Header(packet []byte, ipProtocol ipProtocolNumber, packetSourceIp net.IP, packetDestinationIp net.IP) {
 	packet[0] = 0x60
 	packet[1] = 0
 	packet[2] = 0
@@ -764,7 +754,7 @@ func (self *LocalUserNat) runShard(shard int) {
 					continue
 				}
 				switch ipProtocol {
-				case IP_PROTOCOL_UDP:
+				case ipProtocolNumberUdp:
 					if !parseUdpPacket(sourceIp, destinationIp, transport, &udpPacket) {
 						MessagePoolReturn(ipPacket)
 						continue
@@ -788,7 +778,7 @@ func (self *LocalUserNat) runShard(shard int) {
 					} else {
 						c()
 					}
-				case IP_PROTOCOL_TCP:
+				case ipProtocolNumberTcp:
 					if !parseTcpPacket(sourceIp, destinationIp, transport, &tcpPacket) {
 						MessagePoolReturn(ipPacket)
 						continue
@@ -812,7 +802,7 @@ func (self *LocalUserNat) runShard(shard int) {
 					} else {
 						c()
 					}
-				case IP_PROTOCOL_ICMP:
+				case ipProtocolNumberIcmp4:
 					if !icmpEchoParsingEnabled(4) {
 						// the gate latched off (operator switch or a platform
 						// refusal) after this packet was queued: drop it here
@@ -866,7 +856,7 @@ func (self *LocalUserNat) runShard(shard int) {
 					continue
 				}
 				switch ipProtocol {
-				case IP_PROTOCOL_UDP:
+				case ipProtocolNumberUdp:
 					if !parseUdpPacket(sourceIp, destinationIp, transport, &udpPacket) {
 						MessagePoolReturn(ipPacket)
 						continue
@@ -890,7 +880,7 @@ func (self *LocalUserNat) runShard(shard int) {
 					} else {
 						c()
 					}
-				case IP_PROTOCOL_TCP:
+				case ipProtocolNumberTcp:
 					if !parseTcpPacket(sourceIp, destinationIp, transport, &tcpPacket) {
 						MessagePoolReturn(ipPacket)
 						continue
@@ -914,7 +904,7 @@ func (self *LocalUserNat) runShard(shard int) {
 					} else {
 						c()
 					}
-				case IP_PROTOCOL_ICMPV6:
+				case ipProtocolNumberIcmp6:
 					if !icmpEchoParsingEnabled(6) {
 						// see the icmpv4 case: the gate can latch off while
 						// packets are queued
@@ -1792,9 +1782,9 @@ func (self *StreamState) udpPacket(payload []byte) []byte {
 	packet := MessagePoolGet(ipHeaderByteCount + UdpHeaderSize + len(payload))
 	switch self.ipVersion {
 	case 4:
-		writeIpv4Header(packet, IP_PROTOCOL_UDP, self.destinationIp, self.sourceIp)
+		writeIpv4Header(packet, ipProtocolNumberUdp, self.destinationIp, self.sourceIp)
 	case 6:
-		writeIpv6Header(packet, IP_PROTOCOL_UDP, self.destinationIp, self.sourceIp)
+		writeIpv6Header(packet, ipProtocolNumberUdp, self.destinationIp, self.sourceIp)
 	}
 
 	udp := packet[ipHeaderByteCount:]
@@ -1804,7 +1794,7 @@ func (self *StreamState) udpPacket(payload []byte) []byte {
 	udp[6] = 0
 	udp[7] = 0
 	copy(udp[UdpHeaderSize:], payload)
-	checksum := transportChecksum(IP_PROTOCOL_UDP, self.destinationIp, self.sourceIp, udp)
+	checksum := transportChecksum(ipProtocolNumberUdp, self.destinationIp, self.sourceIp, udp)
 	if checksum == 0 {
 		checksum = 0xffff
 	}
@@ -3079,9 +3069,9 @@ func (self *ConnectionState) SynAck(mtu int) ([]byte, error) {
 	packet := MessagePoolGet(ipHeaderByteCount + tcpHeaderByteCount)
 	switch self.ipVersion {
 	case 4:
-		writeIpv4Header(packet, IP_PROTOCOL_TCP, self.destinationIp, self.sourceIp)
+		writeIpv4Header(packet, ipProtocolNumberTcp, self.destinationIp, self.sourceIp)
 	case 6:
-		writeIpv6Header(packet, IP_PROTOCOL_TCP, self.destinationIp, self.sourceIp)
+		writeIpv6Header(packet, ipProtocolNumberTcp, self.destinationIp, self.sourceIp)
 	}
 
 	flags := tcpFlagSyn | tcpFlagAck
@@ -3091,7 +3081,7 @@ func (self *ConnectionState) SynAck(mtu int) ([]byte, error) {
 
 	// checksum covers the full segment (header + options), not just the fixed header
 	tcpBytes := packet[ipHeaderByteCount:]
-	checksum := transportChecksum(IP_PROTOCOL_TCP, self.destinationIp, self.sourceIp, tcpBytes)
+	checksum := transportChecksum(ipProtocolNumberTcp, self.destinationIp, self.sourceIp, tcpBytes)
 	binary.BigEndian.PutUint16(tcpBytes[16:18], checksum)
 
 	return packet, nil
@@ -3130,15 +3120,15 @@ func (self *ConnectionState) PureAck() ([]byte, error) {
 	packet := MessagePoolGet(ipHeaderByteCount + tcpHeaderByteCount)
 	switch self.ipVersion {
 	case 4:
-		writeIpv4Header(packet, IP_PROTOCOL_TCP, self.destinationIp, self.sourceIp)
+		writeIpv4Header(packet, ipProtocolNumberTcp, self.destinationIp, self.sourceIp)
 	case 6:
-		writeIpv6Header(packet, IP_PROTOCOL_TCP, self.destinationIp, self.sourceIp)
+		writeIpv6Header(packet, ipProtocolNumberTcp, self.destinationIp, self.sourceIp)
 	}
 
 	writeTcpHeader(packet[ipHeaderByteCount:], uint16(self.destinationPort), uint16(self.sourcePort), self.receiveSeq, self.sendSeq, tcpFlagAck, self.encodedWindowSize(), options)
 
 	tcpBytes := packet[ipHeaderByteCount : ipHeaderByteCount+tcpHeaderByteCount]
-	checksum := transportChecksum(IP_PROTOCOL_TCP, self.destinationIp, self.sourceIp, tcpBytes)
+	checksum := transportChecksum(ipProtocolNumberTcp, self.destinationIp, self.sourceIp, tcpBytes)
 	binary.BigEndian.PutUint16(tcpBytes[16:18], checksum)
 
 	return packet, nil
@@ -3158,16 +3148,16 @@ func (self *ConnectionState) FinAck() ([]byte, error) {
 	packet := MessagePoolGet(ipHeaderByteCount + tcpHeaderByteCount)
 	switch self.ipVersion {
 	case 4:
-		writeIpv4Header(packet, IP_PROTOCOL_TCP, self.destinationIp, self.sourceIp)
+		writeIpv4Header(packet, ipProtocolNumberTcp, self.destinationIp, self.sourceIp)
 	case 6:
-		writeIpv6Header(packet, IP_PROTOCOL_TCP, self.destinationIp, self.sourceIp)
+		writeIpv6Header(packet, ipProtocolNumberTcp, self.destinationIp, self.sourceIp)
 	}
 
 	flags := tcpFlagFin | tcpFlagAck
 	writeTcpHeader(packet[ipHeaderByteCount:], uint16(self.destinationPort), uint16(self.sourcePort), self.receiveSeq, self.sendSeq, flags, self.encodedWindowSize(), options)
 
 	tcpBytes := packet[ipHeaderByteCount : ipHeaderByteCount+tcpHeaderByteCount]
-	checksum := transportChecksum(IP_PROTOCOL_TCP, self.destinationIp, self.sourceIp, tcpBytes)
+	checksum := transportChecksum(ipProtocolNumberTcp, self.destinationIp, self.sourceIp, tcpBytes)
 	binary.BigEndian.PutUint16(tcpBytes[16:18], checksum)
 
 	return packet, nil
@@ -3184,16 +3174,16 @@ func (self *ConnectionState) RstAck() ([]byte, error) {
 	packet := MessagePoolGet(ipHeaderByteCount + TcpHeaderSizeWithoutExtensions)
 	switch self.ipVersion {
 	case 4:
-		writeIpv4Header(packet, IP_PROTOCOL_TCP, self.destinationIp, self.sourceIp)
+		writeIpv4Header(packet, ipProtocolNumberTcp, self.destinationIp, self.sourceIp)
 	case 6:
-		writeIpv6Header(packet, IP_PROTOCOL_TCP, self.destinationIp, self.sourceIp)
+		writeIpv6Header(packet, ipProtocolNumberTcp, self.destinationIp, self.sourceIp)
 	}
 
 	flags := tcpFlagRst | tcpFlagAck
 	writeTcpHeader(packet[ipHeaderByteCount:], uint16(self.destinationPort), uint16(self.sourcePort), self.receiveSeq, self.sendSeq, flags, self.encodedWindowSize(), nil)
 
 	tcpBytes := packet[ipHeaderByteCount : ipHeaderByteCount+TcpHeaderSizeWithoutExtensions]
-	checksum := transportChecksum(IP_PROTOCOL_TCP, self.destinationIp, self.sourceIp, tcpBytes)
+	checksum := transportChecksum(ipProtocolNumberTcp, self.destinationIp, self.sourceIp, tcpBytes)
 	binary.BigEndian.PutUint16(tcpBytes[16:18], checksum)
 
 	return packet, nil
@@ -3254,9 +3244,9 @@ func (self *ConnectionState) tcpPacket(payload []byte, seq uint32) []byte {
 	packet := MessagePoolGet(totalLen)
 	switch self.ipVersion {
 	case 4:
-		writeIpv4Header(packet, IP_PROTOCOL_TCP, self.destinationIp, self.sourceIp)
+		writeIpv4Header(packet, ipProtocolNumberTcp, self.destinationIp, self.sourceIp)
 	case 6:
-		writeIpv6Header(packet, IP_PROTOCOL_TCP, self.destinationIp, self.sourceIp)
+		writeIpv6Header(packet, ipProtocolNumberTcp, self.destinationIp, self.sourceIp)
 	}
 
 	writeTcpHeader(packet[ipHeaderByteCount:], uint16(self.destinationPort), uint16(self.sourcePort), seq, self.sendSeq, tcpFlagAck, self.encodedWindowSize(), options)
@@ -3264,7 +3254,7 @@ func (self *ConnectionState) tcpPacket(payload []byte, seq uint32) []byte {
 
 	// checksum covers the full segment (header + payload), not just the header
 	tcpBytes := packet[ipHeaderByteCount:]
-	checksum := transportChecksum(IP_PROTOCOL_TCP, self.destinationIp, self.sourceIp, tcpBytes)
+	checksum := transportChecksum(ipProtocolNumberTcp, self.destinationIp, self.sourceIp, tcpBytes)
 	binary.BigEndian.PutUint16(tcpBytes[16:18], checksum)
 
 	return packet
@@ -4132,7 +4122,7 @@ func ParseIpPathWithPayload(ipPacket []byte) (*IpPath, []byte, error) {
 		destinationIpCopy := ipBacking[sn:]
 
 		switch ipProtocol4 {
-		case IP_PROTOCOL_UDP:
+		case ipProtocolNumberUdp:
 			var udpPacket parsedUdp
 			if !parseUdpPacket(sourceIp4, destinationIp4, transport, &udpPacket) {
 				return nil, nil, fmt.Errorf("No support for protocol")
@@ -4146,7 +4136,7 @@ func ParseIpPathWithPayload(ipPacket []byte) (*IpPath, []byte, error) {
 				DestinationIp:   destinationIpCopy,
 				DestinationPort: int(udpPacket.destinationPort),
 			}, udpPacket.payload, nil
-		case IP_PROTOCOL_TCP:
+		case ipProtocolNumberTcp:
 			var tcpPacket parsedTcp
 			if !parseTcpPacket(sourceIp4, destinationIp4, transport, &tcpPacket) {
 				return nil, nil, fmt.Errorf("No support for protocol")
@@ -4185,7 +4175,7 @@ func ParseIpPathWithPayload(ipPacket []byte) (*IpPath, []byte, error) {
 		destinationIpCopy := ipBacking[sn:]
 
 		switch ipProtocol6 {
-		case IP_PROTOCOL_UDP:
+		case ipProtocolNumberUdp:
 			var udpPacket parsedUdp
 			if !parseUdpPacket(sourceIp6, destinationIp6, transport, &udpPacket) {
 				return nil, nil, fmt.Errorf("No support for protocol")
@@ -4199,7 +4189,7 @@ func ParseIpPathWithPayload(ipPacket []byte) (*IpPath, []byte, error) {
 				DestinationIp:   destinationIpCopy,
 				DestinationPort: int(udpPacket.destinationPort),
 			}, udpPacket.payload, nil
-		case IP_PROTOCOL_TCP:
+		case ipProtocolNumberTcp:
 			var tcpPacket parsedTcp
 			if !parseTcpPacket(sourceIp6, destinationIp6, transport, &tcpPacket) {
 				return nil, nil, fmt.Errorf("No support for protocol")
@@ -4237,7 +4227,7 @@ func ParseIpPathWithPayload(ipPacket []byte) (*IpPath, []byte, error) {
 // the platform self-disable both restore the historical drop exactly.
 //
 //go:noinline
-func parseIcmpIpPath(ipVersion int, ipProtocol IPProtocol, sourceIp net.IP, destinationIp net.IP, transport []byte) (*IpPath, []byte, error) {
+func parseIcmpIpPath(ipVersion int, ipProtocol ipProtocolNumber, sourceIp net.IP, destinationIp net.IP, transport []byte) (*IpPath, []byte, error) {
 	switch ipProtocol {
 	case ipProtocolNumberIcmp4, ipProtocolNumberIcmp6:
 	default:

@@ -28,7 +28,7 @@ func icmpTransport(typ byte, identifier uint16, sequence uint16) []byte {
 	return b
 }
 
-func ipv4IcmpPacket(protocolByte IPProtocol, src net.IP, dst net.IP, transport []byte) []byte {
+func ipv4IcmpPacket(protocolByte ipProtocolNumber, src net.IP, dst net.IP, transport []byte) []byte {
 	packet := make([]byte, 20+len(transport))
 	packet[0] = 0x45
 	binary.BigEndian.PutUint16(packet[2:4], uint16(len(packet)))
@@ -40,7 +40,7 @@ func ipv4IcmpPacket(protocolByte IPProtocol, src net.IP, dst net.IP, transport [
 	return packet
 }
 
-func ipv6IcmpPacket(nextHeader IPProtocol, src net.IP, dst net.IP, transport []byte) []byte {
+func ipv6IcmpPacket(nextHeader ipProtocolNumber, src net.IP, dst net.IP, transport []byte) []byte {
 	packet := make([]byte, 40+len(transport))
 	packet[0] = 0x60
 	binary.BigEndian.PutUint16(packet[4:6], uint16(len(transport)))
@@ -235,9 +235,9 @@ func TestIcmpWireLruEviction(t *testing.T) {
 func TestIcmpWireFlowHashIdentity(t *testing.T) {
 	src := net.IPv4(192, 0, 2, 1)
 	dst := net.IPv4(192, 0, 2, 2)
-	one := ipv4IcmpPacket(IP_PROTOCOL_ICMP, src, dst, icmpTransport(icmp4TypeEchoRequest, 7, 1))
-	two := ipv4IcmpPacket(IP_PROTOCOL_ICMP, src, dst, icmpTransport(icmp4TypeEchoRequest, 7, 2))
-	other := ipv4IcmpPacket(IP_PROTOCOL_ICMP, src, dst, icmpTransport(icmp4TypeEchoRequest, 8, 1))
+	one := ipv4IcmpPacket(ipProtocolNumberIcmp4, src, dst, icmpTransport(icmp4TypeEchoRequest, 7, 1))
+	two := ipv4IcmpPacket(ipProtocolNumberIcmp4, src, dst, icmpTransport(icmp4TypeEchoRequest, 7, 2))
+	other := ipv4IcmpPacket(ipProtocolNumberIcmp4, src, dst, icmpTransport(icmp4TypeEchoRequest, 8, 1))
 	if flowHash(one) != flowHash(two) {
 		t.Error("one flow's echo requests hashed to different shards")
 	}
@@ -247,9 +247,9 @@ func TestIcmpWireFlowHashIdentity(t *testing.T) {
 
 	src6 := net.ParseIP("2606:4700:4700::1111")
 	dst6 := net.ParseIP("2606:4700:4700::2222")
-	v6one := ipv6IcmpPacket(IP_PROTOCOL_ICMPV6, src6, dst6, icmpTransport(icmp6TypeEchoRequest, 7, 1))
-	v6two := ipv6IcmpPacket(IP_PROTOCOL_ICMPV6, src6, dst6, icmpTransport(icmp6TypeEchoRequest, 7, 2))
-	v6other := ipv6IcmpPacket(IP_PROTOCOL_ICMPV6, src6, dst6, icmpTransport(icmp6TypeEchoRequest, 8, 1))
+	v6one := ipv6IcmpPacket(ipProtocolNumberIcmp6, src6, dst6, icmpTransport(icmp6TypeEchoRequest, 7, 1))
+	v6two := ipv6IcmpPacket(ipProtocolNumberIcmp6, src6, dst6, icmpTransport(icmp6TypeEchoRequest, 7, 2))
+	v6other := ipv6IcmpPacket(ipProtocolNumberIcmp6, src6, dst6, icmpTransport(icmp6TypeEchoRequest, 8, 1))
 	if flowHash(v6one) != flowHash(v6two) {
 		t.Error("one icmpv6 flow's echo requests hashed to different shards")
 	}
@@ -274,7 +274,7 @@ func TestIcmpWireFlowCreateAndReap(t *testing.T) {
 		identifier:    1234,
 		payload:       []byte{0xa5, 0xa5, 0xa5, 0xa5},
 	}
-	ipPacket := ipv4IcmpPacket(IP_PROTOCOL_ICMP, icmp.sourceIp, icmp.destinationIp, icmpTransport(icmp4TypeEchoRequest, 1234, 1))
+	ipPacket := ipv4IcmpPacket(ipProtocolNumberIcmp4, icmp.sourceIp, icmp.destinationIp, icmpTransport(icmp4TypeEchoRequest, 1234, 1))
 	source := TransferPath{SourceId: NewId(), StreamId: NewId()}
 	success, err := buffer.send(source, protocol.ProvideMode_Public, icmp, settings.WriteTimeout, ipPacket)
 	if !success || err != nil {
