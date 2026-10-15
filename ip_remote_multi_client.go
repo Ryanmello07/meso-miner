@@ -53,6 +53,15 @@ import (
 
 type clientReceivePacketFunction func(client *multiClientChannel, source TransferPath, provideMode protocol.ProvideMode, ipPath *IpPath, packet []byte)
 
+// dialFailureFunction carries a provider's intercepted dial-failure signal up
+// from the channel that received it to the parent, which owns the flow maps.
+// The signal is an icmp destination-unreachable that ParseIpPath rejects;
+// egressIpPath is the failed flow's original source->destination key recovered
+// from the icmp embed by providerDialFailureEgressPath. Mirrors
+// clientReceivePacketFunction, but the parent rebuilds the packet from the path
+// (the removeClient teardown convention) rather than carrying raw bytes.
+type dialFailureFunction func(sourceClient *multiClientChannel, egressIpPath *IpPath)
+
 type DestinationStats struct {
 	EstimatedBytesPerSecond ByteCount
 	Tier                    int
@@ -140,6 +149,7 @@ func DefaultMultiClientSettings() *MultiClientSettings {
 		CPingTimeout: 30 * time.Second,
 		// a lower ack timeout helps cycle through bad providers faster
 		AckTimeout:                                30 * time.Second,
+		DialFailureRerace:                         true,
 		BlackholeTimeout:                          5 * time.Second,
 		BlackholeConnectTimeout:                   30 * time.Second,
 		WindowResizeTimeout:                       15 * time.Second,
@@ -210,13 +220,20 @@ type MultiClientSettings struct {
 	// ClientWriteTimeout time.Duration
 	// SendTimeout time.Duration
 	// WriteTimeout time.Duration
-	SendRetryTimeout                          time.Duration
-	PingWriteTimeout                          time.Duration
-	CPingWriteTimeout                         time.Duration
-	CPingMaxByteCountPerSecond                ByteCount
-	PingTimeout                               time.Duration
-	CPingTimeout                              time.Duration
-	AckTimeout                                time.Duration
+	SendRetryTimeout           time.Duration
+	PingWriteTimeout           time.Duration
+	CPingWriteTimeout          time.Duration
+	CPingMaxByteCountPerSecond ByteCount
+	PingTimeout                time.Duration
+	CPingTimeout               time.Duration
+	AckTimeout                 time.Duration
+	// DialFailureRerace, when a provider reports it could not open the
+	// upstream for a new flow (the ipOosUnreachable dial-failure signal),
+	// silently unbinds the flow and lets the application's own retransmit
+	// race it onto another exit -- turning a 3-63s syn-backoff hang into
+	// about one second. Off forwards the failure signal to the application
+	// instead, which is visible but still fast.
+	DialFailureRerace                         bool
 	BlackholeTimeout                          time.Duration
 	BlackholeConnectTimeout                   time.Duration
 	WindowResizeTimeout                       time.Duration
@@ -437,6 +454,13 @@ type RemoteUserNatMultiClient struct {
 	affinityIp6Paths map[Ip6Path]map[Ip6Path]time.Time
 	clientUpdates    map[*multiClientChannel]map[*multiClientChannelUpdate]bool
 
+	// dialFailures counts provider dial-failure signals intercepted at the
+	// channel; flowsReraced counts the flows silently unbound so the
+	// application's own retransmit races them onto another exit. The gap
+	// between them is failures that matched no live flow (late or stale).
+	dialFailures atomic.Uint64
+	flowsReraced atomic.Uint64
+
 	// config is an immutable snapshot of the rarely-changed routing config
 	// (performance profile + local security bypass). it is rebuilt under
 	// stateLock by the setters and read lock-free by selectWindowTypes, the
@@ -512,6 +536,7 @@ func NewRemoteUserNatMultiClient(
 		cancel,
 		generator,
 		multiClient.clientReceivePacket,
+		multiClient.clientDialFailure,
 		multiClient.ingressSecurityPolicy,
 		multiClient.removeClient,
 		WindowTypeQuality,
@@ -523,6 +548,7 @@ func NewRemoteUserNatMultiClient(
 			cancel,
 			generator,
 			multiClient.clientReceivePacket,
+			multiClient.clientDialFailure,
 			multiClient.ingressSecurityPolicy,
 			multiClient.removeClient,
 			WindowTypeSpeed,
@@ -1621,6 +1647,11 @@ func (self *RemoteUserNatMultiClient) clientReceivePacket(
 	var abandonedClients []*multiClientChannel
 	var receivePackets []*receivePacket
 	var returnPackets []*receivePacket
+	// connectSucceeded is set when this inbound packet is the first to resolve
+	// its flow to sourceClient -- a proven upstream connect. Recorded on the
+	// channel after the state lock is released so the parent and channel
+	// stateLocks never nest.
+	connectSucceeded := false
 	self.updateClientPath(ipPath, func(update *multiClientChannelUpdate) {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
@@ -1628,6 +1659,12 @@ func (self *RemoteUserNatMultiClient) clientReceivePacket(
 		client := update.client
 
 		if client == sourceClient {
+			// the first inbound packet for this flow marks it established,
+			// which gates the dial-failure re-race (a stale signal must not
+			// unbind a flow already carrying data)
+			if update.receivedInbound.CompareAndSwap(false, true) {
+				connectSucceeded = true
+			}
 			p := &receivePacket{
 				Source:      source,
 				ProvideMode: provideMode,
@@ -1689,6 +1726,9 @@ func (self *RemoteUserNatMultiClient) clientReceivePacket(
 
 			update.clearRace()
 			update.client = client
+			if update.receivedInbound.CompareAndSwap(false, true) {
+				connectSucceeded = true
+			}
 			receivePacket := &receivePacket{
 				Source:      source,
 				ProvideMode: provideMode,
@@ -1704,6 +1744,12 @@ func (self *RemoteUserNatMultiClient) clientReceivePacket(
 			}
 		}
 	})
+	// a flow's first inbound packet is a proven upstream connect on this
+	// channel; it resets the dial-strike window. Recorded outside every lock
+	// held above.
+	if connectSucceeded {
+		sourceClient.addConnectSuccess()
+	}
 	if 0 < len(abandonedClients) {
 		if rstPacket, ok := ipOosRst(ipPath); ok {
 			// Send takes ownership of parsedPacket.packet, so a bare aliased
@@ -1725,6 +1771,104 @@ func (self *RemoteUserNatMultiClient) clientReceivePacket(
 	}
 }
 
+// clientDialFailure handles a provider dial-failure signal intercepted on
+// sourceClient's channel: an icmp destination-unreachable whose embed named
+// the egress flow egressIpPath, accepted only as the exact packet a provider
+// builds for that flow (providerDialFailureEgressPath). The provider could
+// not open the upstream for the flow and answered instead of going silent, so
+// the source is not left in syn-retransmit backoff.
+//
+// It acts only on a flow that is (a) still known, (b) still pinned to the very
+// client that reported the failure, and (c) has never received inbound data --
+// a flow still waiting on its first upstream connect, not an established one a
+// late or stale signal happens to name. When those hold and DialFailureRerace
+// is on, it unbinds the flow (the removeClient per-update idiom, minus teardown
+// and minus cancelling the update) so the application's own retransmit re-races
+// it onto another exit within ~1s. With the knob off it rebuilds the icmp and
+// forwards it to the app (removeClient's teardown convention) for a
+// visible-but-fast failure. Every intercepted signal, matched or not, is
+// counted; an unmatched one is dropped.
+func (self *RemoteUserNatMultiClient) clientDialFailure(sourceClient *multiClientChannel, egressIpPath *IpPath) {
+	// counted for every intercepted signal, matched or not: the gap between
+	// this and flowsReraced is failures that named no live flow.
+	self.dialFailureIntercepted()
+
+	rerace := self.settings.DialFailureRerace
+
+	matched := false
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		var update *multiClientChannelUpdate
+		switch egressIpPath.Version {
+		case 4:
+			update = self.ip4PathUpdates[egressIpPath.ToIp4Path()]
+		case 6:
+			update = self.ip6PathUpdates[egressIpPath.ToIp6Path()]
+		default:
+			return
+		}
+
+		// act only on the flow this very client owns that has not yet received
+		// inbound data. a nil update (gone), a different client (already
+		// re-raced onto another exit), or an established flow (receivedInbound)
+		// all mean this signal is stale and must not disturb a working flow.
+		if update == nil || update.client != sourceClient || update.receivedInbound.Load() {
+			return
+		}
+
+		matched = true
+
+		if rerace {
+			// unbind exactly like removeClient does per-update, minus teardown
+			// and minus cancelling the update: drop it from the client's flow
+			// set and clear its client pointer. The flow's own next retransmit
+			// (SYN ~1s, QUIC PTO, DNS retry) then sees a nil client in the
+			// send path and races a fresh exit.
+			if updates, ok := self.clientUpdates[sourceClient]; ok {
+				delete(updates, update)
+				if len(updates) == 0 {
+					delete(self.clientUpdates, sourceClient)
+				}
+			}
+			update.client = nil
+		}
+	}()
+
+	if !matched {
+		// no live flow for this signal: dropped here, already counted above.
+		return
+	}
+
+	// strike accounting is per-channel and takes the channel's own stateLock;
+	// recorded outside the parent stateLock so the two never nest.
+	sourceClient.addDialFailure()
+
+	if rerace {
+		self.flowReraced()
+		// swallowed: the icmp is never forwarded. The app's retransmit drives
+		// recovery: ~1s instead of 3-63s.
+		return
+	}
+
+	// rerace disabled: hand the icmp to the app so it fails fast instead of
+	// hanging. Rebuilt from the egress path with the same builder the provider
+	// used, and delivered with the egress ipPath -- exactly the convention
+	// removeClient uses for its teardown packets.
+	if packet, ok := ipOosUnreachable(egressIpPath); ok {
+		self.receivePacketCallback(TransferPath{}, protocol.ProvideMode_Network, egressIpPath, packet)
+	}
+}
+
+func (self *RemoteUserNatMultiClient) dialFailureIntercepted() {
+	self.dialFailures.Add(1)
+}
+
+func (self *RemoteUserNatMultiClient) flowReraced() {
+	self.flowsReraced.Add(1)
+}
+
 // this can be called inside the state lock
 func (self *RemoteUserNatMultiClient) scheduleCompleteRace(
 	ipPath *IpPath,
@@ -1744,6 +1888,11 @@ func (self *RemoteUserNatMultiClient) scheduleCompleteRace(
 		var abandonedClients []*multiClientChannel
 		var receivePackets []*receivePacket
 		var returnPackets []*receivePacket
+		// connectSucceededClient is set when this race commits its flow and the
+		// first inbound packet is delivered, so the winning channel gets the
+		// proven-connect credit that clears its dial-strike window.
+		connectSucceeded := false
+		var connectSucceededClient *multiClientChannel
 		self.updateClientPath(ipPath, func(update *multiClientChannelUpdate) {
 			self.stateLock.Lock()
 			defer self.stateLock.Unlock()
@@ -1770,6 +1919,10 @@ func (self *RemoteUserNatMultiClient) scheduleCompleteRace(
 						client := orderedClients[len(orderedClients)-1]
 
 						update.client = client
+						if update.receivedInbound.CompareAndSwap(false, true) {
+							connectSucceeded = true
+							connectSucceededClient = client
+						}
 						receivePackets = race.clientStates[client].packets
 						for _, p := range receivePackets {
 							if p.Pooled {
@@ -1794,6 +1947,9 @@ func (self *RemoteUserNatMultiClient) scheduleCompleteRace(
 			}
 			// else the client is on a new race
 		})
+		if connectSucceeded {
+			connectSucceededClient.addConnectSuccess()
+		}
 		if 0 < len(abandonedClients) {
 			if rstPacket, ok := ipOosRst(ipPath); ok {
 				// Send takes ownership of parsedPacket.packet, so a bare aliased
@@ -1863,10 +2019,16 @@ type multiClientChannelUpdate struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	client       *multiClientChannel
-	race         *multiClientChannelUpdateRace
-	activityTime time.Time
-	ipPath       *IpPath
+	client *multiClientChannel
+	// receivedInbound is set true the first time an inbound packet resolves
+	// this flow to its committed client (the receive path). It marks the flow
+	// established, which gates the dial-failure re-race: a late or stale
+	// dial-failure signal must never unbind a flow already carrying data.
+	// Written lock-free (atomic) from the ingress path.
+	receivedInbound atomic.Bool
+	race            *multiClientChannelUpdateRace
+	activityTime    time.Time
+	ipPath          *IpPath
 
 	// this tracks packets send when the client is set
 	// race packets are not currently tracked
@@ -1973,6 +2135,7 @@ type multiClientWindow struct {
 
 	generator                   MultiClientGenerator
 	clientReceivePacketCallback clientReceivePacketFunction
+	dialFailureCallback         dialFailureFunction
 	ingressSecurityPolicy       SecurityPolicy
 	clientRemoveCallback        func(client *multiClientChannel)
 	windowType                  WindowType
@@ -2001,6 +2164,7 @@ func newMultiClientWindow(
 	cancel context.CancelFunc,
 	generator MultiClientGenerator,
 	clientReceivePacketCallback clientReceivePacketFunction,
+	dialFailureCallback dialFailureFunction,
 	ingressSecurityPolicy SecurityPolicy,
 	clientRemoveCallback func(client *multiClientChannel),
 	windowType WindowType,
@@ -2012,6 +2176,7 @@ func newMultiClientWindow(
 		log:                         loggerOrDefault(settings.Log),
 		generator:                   generator,
 		clientReceivePacketCallback: clientReceivePacketCallback,
+		dialFailureCallback:         dialFailureCallback,
 		ingressSecurityPolicy:       ingressSecurityPolicy,
 		clientRemoveCallback:        clientRemoveCallback,
 		windowType:                  windowType,
@@ -2314,7 +2479,13 @@ func (self *multiClientWindow) resize() {
 							windowSizeUlimit = windowSize.Ulimit
 						}
 						ulimit := 0 < windowSizeUlimit && windowSizeUlimit <= stats.netSourceCount
-						if ulimit {
+						// a dial-starved provider -- its own upstream refusing
+						// connects -- warns out of new-flow selection so fresh
+						// flows avoid it, while its established flows keep
+						// working. This is the warning site ONLY: it must never
+						// reach the removal decision above, because those flows
+						// are the provider's only working asset.
+						if ulimit || client.dialStarved() {
 							client.setWarning(true)
 							warnClient(client, stats)
 						} else {
@@ -2547,6 +2718,7 @@ func (self *multiClientWindow) expand(
 				args,
 				self.generator,
 				self.clientReceivePacketCallback,
+				self.dialFailureCallback,
 				self.ingressSecurityPolicy,
 				self.contractStatus,
 				self.contractStats,
@@ -2964,6 +3136,7 @@ type multiClientChannel struct {
 	api *BringYourApi
 
 	clientReceivePacketCallback clientReceivePacketFunction
+	dialFailureCallback         dialFailureFunction
 	ingressSecurityPolicy       SecurityPolicy
 	performanceProfile          *PerformanceProfile
 	createTime                  time.Time
@@ -2997,6 +3170,18 @@ type multiClientChannel struct {
 	clientReceiveUnsub func()
 
 	warning bool
+
+	// dialFailureTimes and connectSuccessTimes are this channel's sliding-
+	// window strike record: a timestamp appended on each intercepted dial
+	// failure, and on each flow that first receives inbound data (a proven
+	// upstream connect). Both are pruned to dialStrikeWindow on access.
+	// Guarded by stateLock. A provider whose own upstream is refusing work --
+	// a resold proxy over its concurrency cap, an exhausted socket table --
+	// shows failures with no successes here, which dialStarved reports so the
+	// resize pass warns it out of new-flow selection without destroying its
+	// established flows.
+	dialFailureTimes    []time.Time
+	connectSuccessTimes []time.Time
 }
 
 func newMultiClientChannel(
@@ -3004,6 +3189,7 @@ func newMultiClientChannel(
 	args *multiClientChannelArgs,
 	generator MultiClientGenerator,
 	clientReceivePacketCallback clientReceivePacketFunction,
+	dialFailureCallback dialFailureFunction,
 	ingressSecurityPolicy SecurityPolicy,
 	contractStatusCallback ContractStatusFunction,
 	contractStatsCallback ContractStatsFunction,
@@ -3081,6 +3267,7 @@ func newMultiClientChannel(
 		log:                         loggerOrDefault(settings.Log),
 		args:                        args,
 		clientReceivePacketCallback: clientReceivePacketCallback,
+		dialFailureCallback:         dialFailureCallback,
 		ingressSecurityPolicy:       ingressSecurityPolicy,
 		performanceProfile:          performanceProfile,
 		createTime:                  time.Now(),
@@ -3129,6 +3316,65 @@ func (self *multiClientChannel) isWarning() bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	return self.warning
+}
+
+// dialStrikeWindow is how long a dial failure or a connect success counts
+// toward the starvation decision. Matches the recovery tracker's horizon:
+// long enough that a burst of failures is not forgotten between resize
+// passes, short enough that a provider that recovers stops being warned
+// within a minute.
+const dialStrikeWindow = 60 * time.Second
+
+// dialStarvedFailureThreshold is how many intercepted dial failures (with
+// zero successes) mark a channel starved. A couple of failures are noise --
+// a site that is genuinely down, a transient blip; a sustained run with
+// nothing connecting is the resold-proxy-over-cap signature this warns on.
+const dialStarvedFailureThreshold = 3
+
+// pruneStrikeTimes drops timestamps strictly before horizon. The slices are
+// append-only and time-ordered, so a prefix scan is sufficient.
+func pruneStrikeTimes(times []time.Time, horizon time.Time) []time.Time {
+	i := 0
+	for i < len(times) && times[i].Before(horizon) {
+		i++
+	}
+	return times[i:]
+}
+
+// addDialFailure records one intercepted dial failure for this channel.
+func (self *multiClientChannel) addDialFailure() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	now := time.Now()
+	self.dialFailureTimes = append(pruneStrikeTimes(self.dialFailureTimes, now.Add(-dialStrikeWindow)), now)
+}
+
+// addConnectSuccess records one proven upstream connect for this channel (a
+// flow that received its first inbound data). A single success in the window
+// clears dialStarved.
+func (self *multiClientChannel) addConnectSuccess() {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	now := time.Now()
+	self.connectSuccessTimes = append(pruneStrikeTimes(self.connectSuccessTimes, now.Add(-dialStrikeWindow)), now)
+}
+
+// dialStarved reports whether this channel's upstream is refusing work: at
+// least dialStarvedFailureThreshold intercepted dial failures and zero proven
+// connects inside the sliding window. It gates new-flow selection only (the
+// resize pass warning); it must never feed the removal decision, because a
+// dial-starved provider's established flows are its only working asset and
+// destroying them is the bug this whole design exists to avoid.
+func (self *multiClientChannel) dialStarved() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+
+	horizon := time.Now().Add(-dialStrikeWindow)
+	self.dialFailureTimes = pruneStrikeTimes(self.dialFailureTimes, horizon)
+	self.connectSuccessTimes = pruneStrikeTimes(self.connectSuccessTimes, horizon)
+	return dialStarvedFailureThreshold <= len(self.dialFailureTimes) && len(self.connectSuccessTimes) == 0
 }
 
 // func (self *multiClientChannel) UpdateAffinity() {
@@ -3884,6 +4130,22 @@ func (self *multiClientChannel) clientReceive(source TransferPath, frames []*pro
 						self.addReceiveSyn(1)
 					}
 					self.clientReceivePacketCallback(self, source, peer.ProvideMode, ipPath, packet)
+				} else if egressIpPath, ok := providerDialFailureEgressPath(packet); ok {
+					// a provider dial-failure signal: an icmp
+					// destination-unreachable that ParseIpPath rejects,
+					// accepted only as the exact packet a provider builds for
+					// the flow its embed names. Hand it to the parent to
+					// re-race.
+					//
+					// Deliberately NOT counted as received data: the
+					// addReceiveAck / addReceiveSyn above are in the err == nil
+					// branch only, and this is the parse-failure branch, so an
+					// intercepted icmp never touches the receive counters. A
+					// provider that answers every dial with a failure must not
+					// look healthy to detectBlackhole.
+					if self.dialFailureCallback != nil {
+						self.dialFailureCallback(self, egressIpPath)
+					}
 				}
 				// else not an ip packet, drop
 			} else {
