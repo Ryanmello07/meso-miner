@@ -24,19 +24,27 @@ import (
 // icmpEchoSelfDisabled is set once by the platform refusal path.
 var icmpEchoSelfDisabled atomic.Bool
 
-// icmpEnvState caches the URNETWORK_ICMP read: -1 unread, 0 on, 1 off.
+// icmpEnvState caches the URNETWORK_ICMP read. The zero value must mean
+// "unread" so that a fresh process reads the env on the first gate consult:
+// the value zero is what a booted process actually has.
+const (
+	icmpEnvUnread = 0
+	icmpEnvOn     = 1
+	icmpEnvOff    = 2
+)
+
 var icmpEnvState atomic.Int32
 
 func icmpEnvDisabled() bool {
 	state := icmpEnvState.Load()
-	if state < 0 {
-		state = 0
+	if state == icmpEnvUnread {
+		state = icmpEnvOn
 		if strings.ToLower(strings.TrimSpace(os.Getenv("URNETWORK_ICMP"))) == "off" {
-			state = 1
+			state = icmpEnvOff
 		}
 		icmpEnvState.Store(state)
 	}
-	return state == 1
+	return state == icmpEnvOff
 }
 
 // icmpEchoParsingEnabled reports whether an icmp echo packet is accepted by

@@ -101,13 +101,13 @@ func TestIcmpEchoKillSwitchAndSelfDisable(t *testing.T) {
 	}
 
 	// the env kill switch restores the historical drop
-	icmpEnvState.Store(-1)
+	icmpEnvState.Store(icmpEnvUnread)
 	os.Setenv("URNETWORK_ICMP", "off")
 	defer os.Unsetenv("URNETWORK_ICMP")
 	if _, _, err := ParseIpPathWithPayload(request); err == nil {
 		t.Fatal("URNETWORK_ICMP=off must reject icmp")
 	}
-	icmpEnvState.Store(-1)
+	icmpEnvState.Store(icmpEnvUnread)
 
 	// and the platform refusal latches the same drop
 	icmpEchoSelfDisabled.Store(true)
