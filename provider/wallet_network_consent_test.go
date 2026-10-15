@@ -194,15 +194,16 @@ func TestNetworkConsentVerifierRefusalMatrix(t *testing.T) {
 		}
 	}
 
-	// the chain of consents: a new one extends the acknowledged original
-	chained := want
-	chained.Previous = &snConsentJournalEntry{Acked: true, Generation: 4, FromEpoch: 40, Hash: [32]byte{3}}
-	if _, err := snVerifyNetworkConsentMessage(consentTestMessage(t, want, nil), chained); err == nil {
-		t.Fatal("a statement that does not extend the last consent was accepted")
-	}
-	ok := consentTestMessage(t, want, func(s *protocol.NetworkWalletMappingStatement) { s.Generation = 5; s.PreviousHash = [32]byte{3} })
-	if _, err := snVerifyNetworkConsentMessage(ok, chained); err != nil {
-		t.Fatalf("a statement extending the last consent was refused: %v", err)
+	// the epoch route may point at the v2 vault after the migration; the v1
+	// domain vault is still accepted
+	moved := want
+	moved.Epoch = consentTestEpoch()
+	moved.Epoch.SettlementVaultAddress = "0x00000000000000000000000000000000000000e3"
+	v1 := consentTestMessage(t, want, func(s *protocol.NetworkWalletMappingStatement) {
+		s.Domain.SettlementVault = common.HexToAddress(snKnownV1SettlementVault)
+	})
+	if _, err := snVerifyNetworkConsentMessage(v1, moved); err != nil {
+		t.Fatalf("the v1 domain vault was refused after the epoch route moved: %v", err)
 	}
 }
 
@@ -437,5 +438,110 @@ func TestNetworkConsentChallengeTextCarriesTheHexAndTheSubmitCommand(t *testing.
 	}
 	if fake.challenges != 1 || len(fake.submissions) != 0 {
 		t.Fatalf("a challenge must request once and sign nothing (%d challenges, %d submissions)", fake.challenges, len(fake.submissions))
+	}
+}
+
+func TestNetworkConsentIntervalGuards(t *testing.T) {
+	epoch := consentTestEpoch() // epoch 50
+	interval := func(from, through int64) *snWalletProof {
+		return &snWalletProof{fromEpoch: &from, throughEpoch: &through}
+	}
+	if from, through, err := snConsentInterval(nil, epoch); err != nil || from != 51 || through != 51+65535 {
+		t.Fatalf("the default interval is %d..%d (%v)", from, through, err)
+	}
+	if _, _, err := snConsentInterval(interval(52, 52+65535), epoch); err != nil {
+		t.Fatalf("a full interval one epoch later was refused: %v", err)
+	}
+	for name, proof := range map[string]*snWalletProof{
+		"a typo far in the future": interval(500, 500+65535),
+		"a short interval":         interval(51, 151),
+	} {
+		if _, _, err := snConsentInterval(proof, epoch); err == nil {
+			t.Fatalf("%s: accepted", name)
+		}
+	}
+	t.Setenv("URNETWORK_WALLET_ALLOW_ODD_INTERVAL", "1")
+	if _, _, err := snConsentInterval(interval(51, 151), epoch); err != nil {
+		t.Fatalf("the explicit override was ignored: %v", err)
+	}
+}
+
+// A retained, unacknowledged consent must not take over a later request, and a
+// definite refusal must not leave it stuck.
+func TestNetworkConsentRetainedEntryDoesNotTakeOver(t *testing.T) {
+	consentTestHome(t)
+	t.Setenv("URNETWORK_WALLET_ALLOW_CUSTOM_API", "1")
+	seed := walletTestSeed(0x11)
+	address := walletTestAddress(t, seed)
+	seedPath := writeSeedFile(t, t.TempDir(), seed, 0o600, true)
+	fake := &consentServer{t: t, want: consentTestExpect(t, seed, time.Now()), loseFirstAck: true}
+	server := httptest.NewServer(fake.handler())
+	defer server.Close()
+
+	// the first submission is lost: an unacknowledged entry remains
+	if err := runConsentSet(t, server, address, seedPath); err == nil {
+		t.Fatal("a lost acknowledgement was reported as stored")
+	}
+	path, _ := snConsentJournalPath()
+	if entry, _ := snConsentJournalLoad(path, server.URL+"/", address); entry == nil || entry.Acked {
+		t.Fatal("the unacknowledged entry is missing, or the trailing slash split the journal key")
+	}
+
+	// a request for a different interval discards it and signs a new consent
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	from, through := int64(52), int64(52+65535)
+	proof := &snWalletProof{SeedFile: seedPath, fromEpoch: &from, throughEpoch: &through}
+	fake.loseFirstAck = false
+	if err := snSetNetworkWalletConsent(ctx, connect.NewClientStrategyWithDefaults(ctx), server.URL, address, proof); err != nil {
+		t.Fatalf("a new interval was blocked by the stale entry: %v", err)
+	}
+	if fake.challenges != 2 {
+		t.Fatalf("a new interval did not request a new challenge (%d)", fake.challenges)
+	}
+	last := fake.submissions[len(fake.submissions)-1]
+	statement, err := protocol.DecodeNetworkWalletMappingStatement(last.Message)
+	if err != nil || statement.FromEpoch != 52 {
+		t.Fatalf("the stored consent is not the requested interval: %v %+v", err, statement)
+	}
+}
+
+func TestNetworkConsentDefiniteRefusalDropsTheRetainedEntry(t *testing.T) {
+	consentTestHome(t)
+	t.Setenv("URNETWORK_WALLET_ALLOW_CUSTOM_API", "1")
+	seed := walletTestSeed(0x11)
+	address := walletTestAddress(t, seed)
+	seedPath := writeSeedFile(t, t.TempDir(), seed, 0o600, true)
+	fake := &consentServer{t: t, want: consentTestExpect(t, seed, time.Now()), loseFirstAck: true}
+	server := httptest.NewServer(fake.handler())
+	defer server.Close()
+	if err := runConsentSet(t, server, address, seedPath); err == nil {
+		t.Fatal("a lost acknowledgement was reported as stored")
+	}
+	// now the server answers every submission with a definite refusal
+	refusing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/sn/epoch":
+			_ = json.NewEncoder(w).Encode(consentTestEpoch())
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"error": map[string]interface{}{"message": "original challenge is expired or not yet effective"}})
+		}
+	}))
+	defer refusing.Close()
+	path, _ := snConsentJournalPath()
+	entry, _ := snConsentJournalLoad(path, server.URL, address)
+	if entry == nil {
+		t.Fatal("no retained entry")
+	}
+	moved := *entry
+	moved.ApiUrl = refusing.URL
+	if err := snConsentJournalStore(path, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := runConsentSet(t, refusing, address, seedPath); err == nil || !strings.Contains(err.Error(), "discarded") {
+		t.Fatalf("a definite refusal did not discard the entry: %v", err)
+	}
+	if left, _ := snConsentJournalLoad(path, refusing.URL, address); left != nil {
+		t.Fatal("the refused entry is still in the journal")
 	}
 }

@@ -147,6 +147,10 @@ func walletSet(opts docopt.Opts) {
 		}
 		return
 	}
+	if proof.fromEpoch != nil {
+		fmt.Printf("subnet wallet not set: the unsigned legacy request cannot carry an earning interval\n")
+		os.Exit(1)
+	}
 	if err := snSetWalletSigned(ctx, clientStrategy, apiUrl, coldkeySs58, proof); err != nil {
 		fmt.Printf("subnet wallet not set: %s\n", err)
 		os.Exit(1)
