@@ -156,7 +156,7 @@ func (self *streamMetricsState) writePrometheus(b *strings.Builder) {
 	fmt.Fprintf(b, "# HELP urnet_p2p_transports_stopped_total P2P transports stopped.\n")
 	fmt.Fprintf(b, "# TYPE urnet_p2p_transports_stopped_total counter\n")
 	fmt.Fprintf(b, "urnet_p2p_transports_stopped_total %d\n", self.p2pStopped.Load())
-	fmt.Fprintf(b, "# HELP urnet_p2p_connect_failures_total P2P connection attempts that failed before the transport carried data.\n")
+	fmt.Fprintf(b, "# HELP urnet_p2p_connect_failures_total P2P connection attempts that returned an error (a connection that came up and then failed its readiness exchange is not counted).\n")
 	fmt.Fprintf(b, "# TYPE urnet_p2p_connect_failures_total counter\n")
 	fmt.Fprintf(b, "urnet_p2p_connect_failures_total %d\n", self.p2pConnFailures.Load())
 }

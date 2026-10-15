@@ -108,13 +108,15 @@ func (self *StreamManager) handleControlFrame(frame *protocol.Frame) error {
 					return err
 				}
 
-				streamMetrics.openFrames.Add(1)
 				self.streamBuffer.OpenStream(sourceId, destinationId, streamId)
 				return nil
 			}
 
 			switch v := message.(type) {
 			case *protocol.StreamOpen:
+				// counted here and not in streamOpen, which a reset also calls
+				// once per stream it re-opens
+				streamMetrics.openFrames.Add(1)
 				err := streamOpen(v)
 				if err != nil {
 					return err

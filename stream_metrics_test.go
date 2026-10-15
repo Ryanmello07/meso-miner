@@ -4,6 +4,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"google.golang.org/protobuf/proto"
+
+	"github.com/urnetwork/connect/protocol"
 )
 
 type streamMetricsSnapshot struct {
@@ -165,5 +169,56 @@ func TestStreamMetricsLiveNeverDriftsFromOpenedMinusClosed(t *testing.T) {
 	m.closed[streamKindTwoEnded][streamEndTransportEnded].Add(1)
 	if got := m.liveByKind(streamKindTwoEnded); got != 2 {
 		t.Fatalf("live = opened - closed, got %d", got)
+	}
+}
+
+// A reset re-opens each stream it lists. Those re-opens are not StreamOpen
+// frames from the platform, so control_frames{type="open"} must not move for
+// them (review #3494 F1).
+func TestStreamControlFrameCountsDoNotCountResetEntriesAsOpens(t *testing.T) {
+	rec := &transportRecorder{}
+	settings := &StreamBufferSettings{
+		P2pTransportNewForTest: func(sequence *StreamSequence) []*P2pTransport {
+			transport, cancel := fakeChildTransport(sequence)
+			rec.add(cancel)
+			return []*P2pTransport{transport}
+		},
+	}
+	buffer := newLifetimeTestBuffer(t, settings)
+	manager := &StreamManager{streamBuffer: buffer}
+
+	destination := NewId()
+	open := func(streamId Id) *protocol.StreamOpen {
+		return &protocol.StreamOpen{DestinationId: destination.Bytes(), StreamId: streamId.Bytes()}
+	}
+	send := func(message proto.Message) {
+		t.Helper()
+		frame, err := ToFrame(message, DefaultProtocolVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := manager.handleControlFrame(frame); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	openBefore := streamMetrics.openFrames.Load()
+	resetBefore := streamMetrics.resetFrames.Load()
+	closeBefore := streamMetrics.closeFrames.Load()
+
+	send(open(NewId()))
+	send(&protocol.StreamReset{Streams: []*protocol.StreamOpen{open(NewId()), open(NewId()), open(NewId())}})
+	closed := NewId()
+	send(open(closed))
+	send(&protocol.StreamClose{StreamId: closed.Bytes()})
+
+	if got := streamMetrics.openFrames.Load() - openBefore; got != 2 {
+		t.Fatalf("two StreamOpen frames were sent; reset entries must not count as opens, got %d", got)
+	}
+	if got := streamMetrics.resetFrames.Load() - resetBefore; got != 1 {
+		t.Fatalf("one reset frame was sent, got %d", got)
+	}
+	if got := streamMetrics.closeFrames.Load() - closeBefore; got != 1 {
+		t.Fatalf("one close frame was sent, got %d", got)
 	}
 }
