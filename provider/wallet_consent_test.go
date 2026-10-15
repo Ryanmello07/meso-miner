@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -237,6 +238,9 @@ func TestWalletSeedFileRefusesAMismatchedAddress(t *testing.T) {
 
 // TestWalletSeedFileMustNotBeGroupReadable pins the permission rule.
 func TestWalletSeedFileMustNotBeGroupReadable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("windows reports a synthetic file mode; access is an ACL matter there")
+	}
 	dir := t.TempDir()
 	path := writeSeedFile(t, dir, walletTestSeed(0x11), 0o644, true)
 

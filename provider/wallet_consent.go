@@ -208,7 +208,7 @@ func snSeedFromFile(path string) ([32]byte, error) {
 	if !snFileOwnedByCaller(info) {
 		return seed, fmt.Errorf("seed file %s is owned by another user", path)
 	}
-	if info.Mode().Perm()&0o077 != 0 {
+	if snSeedModeTooOpen(info) {
 		return seed, fmt.Errorf("seed file %s is mode %04o; it must not be readable by group or other (chmod 600)", path, info.Mode().Perm())
 	}
 	raw, err := os.ReadFile(path)

@@ -13,3 +13,8 @@ func snFileOwnedByCaller(info os.FileInfo) bool {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	return !ok || int(stat.Uid) == os.Geteuid()
 }
+
+// snSeedModeTooOpen reports whether group or other can read the seed file.
+func snSeedModeTooOpen(info os.FileInfo) bool {
+	return info.Mode().Perm()&0o077 != 0
+}
