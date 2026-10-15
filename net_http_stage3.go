@@ -9,7 +9,6 @@ package connect
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"net/netip"
 	"time"
@@ -58,7 +57,7 @@ func (self *ClientStrategy) H1DialContextWithDialer(ctx context.Context, address
 		info := self.dialerInfo(dialer)
 		startDial := time.Now()
 		timing := &dialTiming{}
-		conn, err := dialH1MessagesWithinDeadline(timing.traceCtx(handleCtx, startDial), address, requestHeader, dialer.WsDialer(self.settings), H1FramerProtocol, maximum, enabled, stats, upgradeRouteScope(dialer))
+		conn, err := dialH1MessagesWithinDeadline(timing.traceCtx(handleCtx, startDial), address, requestHeader, dialer.WsDialer(self.settings), H1FramerProtocol, maximum, enabled, stats, upgradeRouteScope(self.ipFamily, dialer))
 		terminal, refusalOnly := httpUpgradeTerminalCauses(err)
 		if !refusalOnly {
 			// the same bookkeeping WsDialContext does for a websocket dial: the
@@ -89,10 +88,29 @@ func (self *ClientStrategy) H1DialContextWithDialer(ctx context.Context, address
 }
 
 // upgradeRouteScope names the route one dialer takes, for the framed-upgrade
-// rejection cache (see framedUpgradeCacheKey). The strategy's dialers are cached
-// and reused, so the dialer's identity is stable for the life of the route.
-func upgradeRouteScope(dialer *clientDialer) string {
-	return fmt.Sprintf("route-%p", dialer)
+// rejection cache (see framedUpgradeCacheKey): the strategy's family pin plus
+// the dialer's stable route identity (routeIdentity). The strategy's dialers
+// are cached and reused, and a rebuilt dialer set keeps the same identity, so
+// a rejection seen on one route is not forgotten by a rebuild and is never
+// inherited by another route or by the other family's pin. The old pointer
+// form had both failure modes: a rebuild forgot the rejection, and a reused
+// pointer could inherit one.
+func upgradeRouteScope(ipFamily int, dialer *clientDialer) string {
+	return familyRouteScopePrefix(ipFamily) + dialer.routeIdentity()
+}
+
+// familyRouteScopePrefix keeps the pins of the dual-stack strategies from
+// aliasing each other: the v4 pin, the v6 pin and a family-agnostic dialer are
+// three different routes even when the dialer identity is the same.
+func familyRouteScopePrefix(ipFamily int) string {
+	switch ipFamily {
+	case 4:
+		return "ipv4|"
+	case 6:
+		return "ipv6|"
+	default:
+		return "any|"
+	}
 }
 
 // h1DialError is the error of an H1 dial that produced no result. It reads as the

@@ -250,7 +250,9 @@ func NewDirectClientStrategy(ctx context.Context, settings *ClientStrategySettin
 			PacketConnFactory: packetConnFactory,
 		}
 	}
-	return NewClientStrategy(ctx, &direct)
+	strategy := NewClientStrategy(ctx, &direct)
+	strategy.ipFamily = ipFamily
+	return strategy
 }
 
 // pinnedDialContext is the enforcement below name resolution: the network is
@@ -1095,6 +1097,13 @@ type FamilyPlatformTransportGroup struct {
 	stateLock      sync.Mutex
 	standbyActive  bool
 	standbyDueTime time.Time
+	// pendingDisableV4/pendingDisableV6 defer the disable of a pin that is
+	// still carrying the identity whose replacement is not connected yet, so a
+	// live stack switch never breaks the working transport before the new one
+	// is up. Set by SetStack, applied by the group loop
+	// (applyPendingPinDisablesWithLock).
+	pendingDisableV4 bool
+	pendingDisableV6 bool
 	// fork: dual-stack visibility
 	everPinnedConnected bool
 	pinnedWasDown       bool
@@ -1296,6 +1305,10 @@ func (self *FamilyPlatformTransportGroup) run() {
 					}
 				}
 			}
+
+			// break before make: a pin whose stack stopped wanting it is
+			// parked only once its replacement is connected
+			self.applyPendingPinDisablesWithLock()
 
 			connected := self.connectedWithLock()
 			if connected != self.lastConnected {
@@ -2030,8 +2043,10 @@ func (self *FamilyPlatformTransportGroup) Stack() FamilyStackMode {
 }
 
 // EnabledFamilies reports the owner's pin switches: whether the IPv4 and the
-// IPv6 pin would dial right now. The stack-consistency check reads it against
-// Stack().
+// IPv6 pin would dial right now. A pin the stack excluded while its replacement
+// was still connecting stays enabled until the deferred disable is applied (see
+// applyPendingPinDisablesWithLock), so this can read true under a fixed stack
+// for that stretch. The stack-consistency check reads it against Stack().
 func (self *FamilyPlatformTransportGroup) EnabledFamilies() (ipv4 bool, ipv6 bool) {
 	if self.ipv4Transport != nil {
 		ipv4 = self.ipv4Transport.Enabled()
@@ -2058,7 +2073,9 @@ func FamilySetStackApplyPauseForTest(pause func()) func() {
 
 // SetStack changes the families live and returns the previous choice. Pins that
 // the choice does not use are disabled (they close their live connection and
-// stop dialing); the standby is managed by the group loop.
+// stop dialing) - but a connected pin whose stack has no replacement connected
+// yet keeps carrying the identity until one is (see applyPinWantWithLock); the
+// standby is managed by the group loop.
 func (self *FamilyPlatformTransportGroup) SetStack(mode FamilyStackMode) FamilyStackMode {
 	// serialize concurrent sets: the stack assignment and the pin
 	// switch-overs must move together, or two racing sets leave the pins out
@@ -2081,12 +2098,17 @@ func (self *FamilyPlatformTransportGroup) SetStack(mode FamilyStackMode) FamilyS
 
 	wantV4 := mode == FamilyStackDual || mode == FamilyStackIpv4
 	wantV6 := mode == FamilyStackDual || mode == FamilyStackIpv6
-	if self.ipv4Transport != nil {
-		self.ipv4Transport.SetEnabled(wantV4)
-	}
-	if self.ipv6Transport != nil {
-		self.ipv6Transport.SetEnabled(wantV6)
-	}
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+
+		if self.ipv4Transport != nil {
+			self.applyPinWantWithLock(4, self.ipv4Transport, wantV4)
+		}
+		if self.ipv6Transport != nil {
+			self.applyPinWantWithLock(6, self.ipv6Transport, wantV6)
+		}
+	}()
 	if previous != mode {
 		agnostic := "off"
 		switch mode {
@@ -2098,11 +2120,101 @@ func (self *FamilyPlatformTransportGroup) SetStack(mode FamilyStackMode) FamilyS
 		self.log.Infof("[ipv6] ip-version %s -> %s (ipv4 transport %t, ipv6 transport %t, family-agnostic transport: %s)\n",
 			previous, mode, wantV4, wantV6, agnostic)
 	}
-	// wake the group loop so it re-evaluates the standby now
+	// wake the group loop so it re-evaluates the standby now, and applies a
+	// deferred pin disable if this set's replacement is already connected
 	for _, transport := range self.Transports() {
 		transport.connectedMonitor.NotifyAll()
 	}
 	return previous
+}
+
+// applyPinWantWithLock brings one pin in line with the current stack. A wanted
+// pin is enabled at once and any pending disable of it is cleared, so the last
+// set wins. An unwanted pin is disabled once there is nothing left to break:
+// when a transport the stack wants is already connected, or when the pin is
+// not connected at all. Otherwise the disable is deferred (pendingDisableV4/V6)
+// and the group loop applies it when the replacement connects - a live switch
+// must never drop the working transport before its replacement is up (break
+// before make).
+func (self *FamilyPlatformTransportGroup) applyPinWantWithLock(ipFamily int, transport *PlatformTransport, want bool) {
+	if want {
+		self.setPendingDisableWithLock(ipFamily, false)
+		transport.SetEnabled(true)
+		return
+	}
+	if transport.IsConnected() && !self.stackReplacementConnectedWithLock() {
+		self.setPendingDisableWithLock(ipFamily, true)
+		return
+	}
+	self.setPendingDisableWithLock(ipFamily, false)
+	transport.SetEnabled(false)
+}
+
+// setPendingDisableWithLock records or clears the deferred disable of one pin.
+func (self *FamilyPlatformTransportGroup) setPendingDisableWithLock(ipFamily int, pending bool) {
+	if ipFamily == 4 {
+		self.pendingDisableV4 = pending
+	} else {
+		self.pendingDisableV6 = pending
+	}
+}
+
+// stackReplacementConnectedWithLock reports whether a transport the current
+// stack wants can already carry the identity: the wanted pin for a fixed
+// family (whose standby never dials), the family-agnostic standby for legacy.
+// Dual wants both pins, so it has no unwanted pin to bridge.
+func (self *FamilyPlatformTransportGroup) stackReplacementConnectedWithLock() bool {
+	switch self.stack {
+	case FamilyStackLegacy:
+		return self.standbyTransport.IsConnected()
+	case FamilyStackIpv4:
+		return self.ipv4Transport != nil && self.ipv4Transport.IsConnected()
+	case FamilyStackIpv6:
+		return self.ipv6Transport != nil && self.ipv6Transport.IsConnected()
+	}
+	return false
+}
+
+// applyPendingPinDisablesWithLock applies the pin disables SetStack deferred: a
+// deferred disable lands once there is nothing left to break - a transport the
+// current stack wants is connected, or the pin itself is not connected. One
+// log line records an application. The group loop calls this on every pass, so
+// a pin the stack stopped wanting is parked as soon as its replacement reports
+// connected.
+func (self *FamilyPlatformTransportGroup) applyPendingPinDisablesWithLock() {
+	if !self.pendingDisableV4 && !self.pendingDisableV6 {
+		return
+	}
+	if self.stack == FamilyStackDual {
+		// dual wants both pins: a pending from an earlier set is stale
+		self.pendingDisableV4 = false
+		self.pendingDisableV6 = false
+		return
+	}
+	bridged := self.stackReplacementConnectedWithLock()
+	disabled := []string{}
+	if self.pendingDisableV4 {
+		if self.ipv4Transport == nil || bridged || !self.ipv4Transport.IsConnected() {
+			self.pendingDisableV4 = false
+			if self.ipv4Transport != nil {
+				self.ipv4Transport.SetEnabled(false)
+				disabled = append(disabled, "ipv4")
+			}
+		}
+	}
+	if self.pendingDisableV6 {
+		if self.ipv6Transport == nil || bridged || !self.ipv6Transport.IsConnected() {
+			self.pendingDisableV6 = false
+			if self.ipv6Transport != nil {
+				self.ipv6Transport.SetEnabled(false)
+				disabled = append(disabled, "ipv6")
+			}
+		}
+	}
+	if 0 < len(disabled) {
+		self.log.Infof("[ipv6] ip-version %s: the deferred pin disable applies to %s (a transport the stack wants is connected)\n",
+			self.stack, strings.Join(disabled, ", "))
+	}
 }
 
 // applyStackStandbyWithLock keeps the standby in line with a fixed stack: it

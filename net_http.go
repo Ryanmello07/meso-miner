@@ -190,6 +190,13 @@ type ClientStrategy struct {
 
 	settings *ClientStrategySettings
 
+	// ipFamily is the family pin this strategy's dialers dial for: 4 or 6 for
+	// the direct-only strategy a family-pinned platform transport owns, 0 for
+	// a family-agnostic one. It is set at construction and never changes; the
+	// framed-upgrade rejection cache reads it to keep the pins from aliasing
+	// each other (see upgradeRouteScope).
+	ipFamily int
+
 	// internalDohResolver exists only when InternalDohDomains are configured
 	// (see net_http_internal_doh.go; ported from upstream at 20b29f79).
 	internalDohResolver *internalDohResolver
@@ -1718,6 +1725,22 @@ func (self *clientDialer) String() string {
 	} else {
 		return fmt.Sprintf("[direct] %s success=%d error=%d%s", self.description, self.successCount, self.errorCount, latencyStr)
 	}
+}
+
+// routeIdentity is the stable identity of the route this dialer takes, in the
+// shape of String() without the live counters: the proxy index and address, or
+// just the description for a direct dial. The strategy's dialers are cached
+// and reused, and a rebuild (a proxy reload, a recreated strategy) issues new
+// pointers for the same route, so the framed-upgrade rejection cache keys on
+// this identity instead of the pointer (see upgradeRouteScope).
+func (self *clientDialer) routeIdentity() string {
+	if self.extenderConfig != nil {
+		return fmt.Sprintf("extender|%v", self.extenderConfig)
+	}
+	if self.settings != nil && self.settings.ProxySettings != nil {
+		return fmt.Sprintf("proxy|%d|%s|%s", self.settings.ProxySettings.Index, self.settings.ProxySettings.Address, self.description)
+	}
+	return fmt.Sprintf("direct|%s", self.description)
 }
 
 func (self *clientDialer) Close() {
