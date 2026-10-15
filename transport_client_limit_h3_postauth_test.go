@@ -30,10 +30,9 @@ func TestPlatformTransportH3PostAuthCloseHoldsDials(t *testing.T) {
 	transport := newH3DatagramTestTransport(transportCtx, transportCancel, server.port)
 	transport.clientLimitBackoff = backoff
 	transport.settings.ClientLimitBackoff = backoff
-	transport.auth.Store(&ClientAuth{ByJwt: "testing", InstanceId: NewId(), AppVersion: "testing", ProvideIntent: true})
-
+	transport.auth = &ClientAuth{ByJwt: "testing", InstanceId: NewId(), AppVersion: "testing", ProvideIntent: true}
 	done := make(chan struct{})
-	go func() { defer close(done); transport.runH3(TransportModeH3, 0, 1) }()
+	go func() { defer close(done); transport.runH3(transport.ctx, TransportModeH3, 0, 1) }()
 	defer func() { transportCancel(); <-done }()
 
 	waitForSession(t, server)

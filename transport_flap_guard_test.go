@@ -2,6 +2,7 @@ package connect
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -213,7 +214,9 @@ func TestRunH1_StableSessionReconnectsPromptly(t *testing.T) {
 	server := flapServer(300*time.Millisecond, &accepts, &stamps)
 	defer server.Close()
 
+	logger := &lockedCaptureLogger{}
 	settings := DefaultPlatformTransportSettings()
+	settings.Log = logger
 	settings.ReconnectTimeout = 20 * time.Millisecond
 	// every session below lives 300ms, which is stable by this threshold
 	settings.FlapStableAfter = 100 * time.Millisecond
@@ -231,13 +234,42 @@ func TestRunH1_StableSessionReconnectsPromptly(t *testing.T) {
 	}
 	at := stamps.snapshot()
 	for i := 1; i < 4; i++ {
-		// 300ms hold plus a prompt reconnect; a guard delay would add 20ms, 40ms,
-		// 80ms on top, so the third gap is the discriminating one
+		// 300ms hold plus the reconnect fast path, which draws an independent
+		// jitter in [0, 250ms) (NextReconnectTime), plus scheduling slack
 		gap := at[i].Sub(at[i-1])
-		if gap > 300*time.Millisecond+60*time.Millisecond {
+		if gap > 300*time.Millisecond+reconnectFastPathMaxDelay+100*time.Millisecond {
 			t.Fatalf("gap %d between connects was %s, stable sessions must reconnect promptly", i, gap)
 		}
 	}
+	// the jitter masks a guard delay of tens of milliseconds, so the guard itself
+	// is checked directly: a stable session must never log a held reconnect
+	for _, line := range logger.snapshot() {
+		if strings.Contains(line, "holding reconnect") {
+			t.Fatalf("the flap guard held a stable session: %s", line)
+		}
+	}
+}
+
+// lockedCaptureLogger records Infof lines for a test whose transport logs from
+// several goroutines.
+type lockedCaptureLogger struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *lockedCaptureLogger) Info(_ ...any) {}
+func (l *lockedCaptureLogger) Infof(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+}
+func (l *lockedCaptureLogger) Warningf(format string, args ...any) {}
+func (l *lockedCaptureLogger) Errorf(format string, args ...any)   {}
+func (l *lockedCaptureLogger) V(_ int32) Verbose                   { return nopVerbose{} }
+func (l *lockedCaptureLogger) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
 }
 
 // The loop feeds the process-wide governor: every attempt is classified, and a

@@ -184,3 +184,10 @@ func (self *PlatformTransport) h3UseDatagramForPath(messageByteCount int, maxDat
 	}
 	return self.h3DatagramSettings.UseDatagramForPath(messageByteCount, maxDatagramByteCount)
 }
+
+// isModeAvailable reports whether the transport has a live connection in mode.
+func (self *PlatformTransport) isModeAvailable(mode TransportMode) bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.availableModes[mode]
+}

@@ -431,10 +431,25 @@ const backendDegradedWindow = 2 * time.Minute
 // therefore a bounded probe burst every ~backendDegradedWindow, not a latched
 // stop -- which is also what makes recovery need no timer of its own.
 func isBackendDegraded() bool {
-	if consecutiveBackendFails.Load() < backendDegradedFailThreshold {
-		return false
+	// fork: the count and the timestamp are two atomics written one after the
+	// other, so a lock-free reader can load a count from one transition and a
+	// timestamp from the next. The interleaving that mattered: a stale-streak
+	// reset drops the count to 1 and then stamps a fresh time, so a reader that
+	// loaded the old count (past the threshold) and then the new timestamp would
+	// report an outage on the strength of a single recent failure. Every writer
+	// changes the timestamp last, so a timestamp that is unchanged across the
+	// count load proves the pair is consistent; otherwise read again.
+	for {
+		last := lastBackendFailNano.Load()
+		fails := consecutiveBackendFails.Load()
+		if last != lastBackendFailNano.Load() {
+			continue
+		}
+		if fails < backendDegradedFailThreshold {
+			return false
+		}
+		return time.Now().UnixNano()-last < int64(backendDegradedWindow)
 	}
-	return time.Now().UnixNano()-lastBackendFailNano.Load() < int64(backendDegradedWindow)
 }
 
 // backendFailMu serializes the failure-state transition. Recording a failure is
@@ -752,8 +767,10 @@ func DefaultPlatformTransportSettings() *PlatformTransportSettings {
 		DnsTlds: [][]byte{[]byte("ur.xyz.")},
 		// servers are migrated on 2025-06-12. We can remove this and always use true.
 		V2H1Auth: true,
-		// H1+ is opt-out (H1PLUS.md)
-		EnableH1Plus: true,
+		// fork: H1+ (the framed custom upgrade) is OFF. Upstream defaults it on; it
+		// is a new wire carrier that costs one extra upgrade probe per connect when
+		// the platform does not take it, and it is not validated on this line.
+		EnableH1Plus: false,
 		// the platform transport must carry the per-peer encryption handshake,
 		// so its framer max is the connect runtime minimum message length
 		FramerSettings:                            DefaultFramerSettings(int(DefaultClientSettings().MinimumMessageLenLimit())),
@@ -768,7 +785,7 @@ func DefaultPlatformTransportSettings() *PlatformTransportSettings {
 		H3InitialConnectionReceiveWindowByteCount: kib(512),
 		H3MaxConnectionReceiveWindowByteCount:     defaultH3MaxConnectionReceiveWindowByteCount(),
 		PtDnsSlowMultiple:                         4,
-		EnableH3Datagrams:                         true,
+		EnableH3Datagrams:                         false, // fork: operator-gated (h3DatagramOffer); upstream defaults it on
 		QuicVersionPolicy:                         QuicVersionPolicyPreferV2,
 		H3DatagramSettings:                        DefaultH3DatagramSettings(),
 		H3QuicPacketStats:                         &H3QuicPacketStats{},
@@ -1448,7 +1465,9 @@ func NewPlatformTransportWithTargetMode(
 	}
 	h3DatagramStats := settings.H3DatagramStats
 	if h3DatagramStats == nil {
-		h3DatagramStats = &H3DatagramStats{}
+		// fork: one process-wide collector, so the [health] suffix and /metrics
+		// read what every transport's DATAGRAM layer carried
+		h3DatagramStats = processH3DatagramStats()
 	}
 	transport := &PlatformTransport{
 		ctx:    cancelCtx,
@@ -3389,6 +3408,10 @@ func (self *PlatformTransport) runH3(
 			// fork: an auxiliary H3 authenticating must not clear failures H1
 			// recorded, and H1 is the health signal
 			auxBackoff = 0
+			if self.pinned() {
+				// a name that resolved and connected is no longer unresolvable
+				self.setUnresolvable(false)
+			}
 			if !H3Enabled() {
 				// switched off while the dial was in flight
 				connStream.attempt.close()
@@ -3485,6 +3508,36 @@ func (self *PlatformTransport) runH3(
 			}
 
 			framer := NewFramer(self.framerSettings)
+			// fork: datagram send safety on the operator-gated auxiliary H3. The
+			// guard switches the lane off for the rest of the connection when many
+			// datagrams went out and none came back while the stream is alive, and
+			// datagram send is off while H1 (the health signal) is down. Either way
+			// everything goes on the stream, which is the behavior before datagram
+			// send existed.
+			var datagramGuard *h3DatagramSendGuard
+			if connStream.useH3Datagrams && self.h3Gated() {
+				datagramGuard = newH3DatagramSendGuard()
+			}
+			var lastStreamReceiveNano atomic.Int64
+			lastStreamReceiveNano.Store(time.Now().UnixNano())
+			useDatagramForPath := func(messageByteCount int, maxDatagramByteCount int) bool {
+				if !self.h3UseDatagramForPath(messageByteCount, maxDatagramByteCount) {
+					return false
+				}
+				if datagramGuard == nil {
+					return true
+				}
+				if !self.isModeAvailable(TransportModeH1) {
+					return false
+				}
+				streamAlive := time.Since(time.Unix(0, lastStreamReceiveNano.Load())) < h3DatagramGuardWindow
+				ok, trippedNow := datagramGuard.allow(time.Now(), streamAlive)
+				if trippedNow {
+					h3DatagramBlackholes.Add(1)
+					self.log.Infof("[t]h3 datagram blackhole: sent many, received none while the stream is alive; datagram send is off for this connection %s\n", clientId)
+				}
+				return ok
+			}
 			var datagramFragmenter *H3DatagramFragmenter
 			var datagramReassembler *H3DatagramReassembler
 			if connStream.useH3Datagrams {
@@ -3571,7 +3624,7 @@ func (self *PlatformTransport) runH3(
 				sendCarrierProperties.UnreliableFlowIsolation = true
 				sendCarrierProperties.UnreliableFlowReserve = true
 				sendCarrierProperties.unreliableForMessageByteCount = func(messageByteCount int) bool {
-					return self.h3UseDatagramForPath(
+					return useDatagramForPath(
 						messageByteCount,
 						int(maxDatagramByteCount.Load()),
 					)
@@ -3604,8 +3657,16 @@ func (self *PlatformTransport) runH3(
 				)
 			}
 			self.setRegistered(true)
+			// fork: the explicit H3 target mode is the identity's sole transport and
+			// carries its health; an auxiliary H3 beside H1 never does
+			if !self.h3Gated() {
+				self.noteIdentityTransportUp()
+			}
 
 			defer func() {
+				if !self.h3Gated() {
+					self.noteIdentityTransportDown()
+				}
 				self.setRegistered(false)
 				self.routeManager.RemoveTransport(sendTransport)
 				if self.settings.SendRouteObserver != nil {
@@ -3768,7 +3829,12 @@ func (self *PlatformTransport) runH3(
 			}, handleCancel)
 
 			startConnectionWorker(func() {
-				defer handleCancel()
+				// fork: deferred calls run last-in-first-out. The drain below waits
+				// for the dispatcher to close streamSend, and the dispatcher only
+				// closes it after it sees handleCtx cancel, so the cancel has to run
+				// BEFORE the drain. With the cancel registered first (as upstream
+				// has it) a stream write error stalled the generation forever and
+				// the transport never re-dialed.
 				if streamSend != nil {
 					defer func() {
 						for message := range streamSend {
@@ -3776,6 +3842,7 @@ func (self *PlatformTransport) runH3(
 						}
 					}()
 				}
+				defer handleCancel()
 
 				pingTimer := time.NewTimer(0)
 				defer pingTimer.Stop()
@@ -3873,7 +3940,7 @@ func (self *PlatformTransport) runH3(
 							if !ok {
 								return
 							}
-							useDatagram := self.h3UseDatagramForPath(
+							useDatagram := useDatagramForPath(
 								len(message),
 								int(maxDatagramByteCount.Load()),
 							)
@@ -3885,6 +3952,9 @@ func (self *PlatformTransport) runH3(
 									return
 								}
 								if !useStream {
+									if datagramGuard != nil {
+										datagramGuard.noteSent(time.Now())
+									}
 									counters.addTx(len(message)) // fork: per-mode carried bytes
 									if self.settings.H3SendLaneObserver != nil {
 										self.settings.H3SendLaneObserver(message, true)
@@ -3917,6 +3987,10 @@ func (self *PlatformTransport) runH3(
 					receive,
 					message,
 				)
+				if !delivered && open && reliability == CarrierReliabilityUnreliable {
+					// fork: the datagram lane is unreliable; Transfer resends
+					h3DatagramDrops.Add(1)
+				}
 				if delivered {
 					readCounter.Add(1)
 					counters.addRx(len(message)) // fork: per-mode carried bytes
@@ -3952,6 +4026,7 @@ func (self *PlatformTransport) runH3(
 						if err != nil {
 							return
 						}
+						lastStreamReceiveNano.Store(time.Now().UnixNano())
 						if len(message) != 0 {
 							self.h3DatagramStats.RecordStreamReceived(len(message))
 							if !offerRoutedMessage(
@@ -3995,6 +4070,9 @@ func (self *PlatformTransport) runH3(
 						if err != nil {
 							return
 						}
+						if datagramGuard != nil {
+							datagramGuard.noteReceived()
+						}
 						message = datagramReassembler.Accept(datagram, time.Now())
 						if message == nil {
 							continue
@@ -4008,6 +4086,7 @@ func (self *PlatformTransport) runH3(
 							self.log.Infof("[tr]%s<- error = %s\n", clientId, err)
 							return
 						}
+						lastStreamReceiveNano.Store(time.Now().UnixNano())
 						if 0 == len(message) {
 							// ping
 							transportPingFrames.rx.Add(1) // fork: keepalive accounting

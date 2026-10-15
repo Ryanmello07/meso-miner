@@ -31,7 +31,7 @@ func captureWithOneFragmenter(
 	captured := make([][][]byte, 0, len(messages))
 	for _, message := range messages {
 		var fragments [][]byte
-		_, err := fragmenter.Send(context.Background(), message, maxDatagramByteCount, func(_ context.Context, datagram []byte) error {
+		_, err := fragmenter.Send(message, maxDatagramByteCount, func(datagram []byte) error {
 			fragments = append(fragments, bytes.Clone(datagram))
 			return nil
 		})
@@ -59,7 +59,7 @@ func TestH3DatagramSoleTargetModeNeverOffers(t *testing.T) {
 	transport := newH3DatagramTestTransport(transportCtx, transportCancel, server.port)
 	transport.targetMode = TransportModeH3
 	done := make(chan struct{})
-	go func() { defer close(done); transport.runH3(TransportModeH3, 0, 1) }()
+	go func() { defer close(done); transport.runH3(transport.ctx, TransportModeH3, 0, 1) }()
 	defer func() { transportCancel(); <-done }()
 
 	session := waitForSession(t, server)
@@ -81,7 +81,7 @@ func TestRunH3NeverOffersDatagramsForTheDnsMode(t *testing.T) {
 	statsBefore := TransportModeStats()
 	transport, cancel := newClosedPortTransport(t, TransportModeH3Dns, true)
 	done := make(chan struct{})
-	go func() { defer close(done); transport.runH3(TransportModeH3Dns, 0, 1) }()
+	go func() { defer close(done); transport.runH3(transport.ctx, TransportModeH3Dns, 0, 1) }()
 	time.Sleep(600 * time.Millisecond)
 	cancel()
 	<-done
@@ -116,7 +116,7 @@ func TestH3DatagramRouteFullDropsMessagesWithoutCountingPayload(t *testing.T) {
 			return
 		}
 		for i := 0; i < 120 && ctx.Err() == nil; i++ {
-			if _, err := fragmenter.Send(context.Background(), message, settings.TargetDatagramByteCount, func(_ context.Context, datagram []byte) error {
+			if _, err := fragmenter.Send(message, settings.TargetDatagramByteCount, func(datagram []byte) error {
 				return conn.SendDatagram(datagram)
 			}); err != nil {
 				return
@@ -129,7 +129,7 @@ func TestH3DatagramRouteFullDropsMessagesWithoutCountingPayload(t *testing.T) {
 	transportCtx, transportCancel := context.WithCancel(ctx)
 	transport := newH3DatagramTestTransport(transportCtx, transportCancel, server.port)
 	done := make(chan struct{})
-	go func() { defer close(done); transport.runH3(TransportModeH3, 0, 1) }()
+	go func() { defer close(done); transport.runH3(transport.ctx, TransportModeH3, 0, 1) }()
 	defer func() { transportCancel(); <-done }()
 
 	waitForSession(t, server)

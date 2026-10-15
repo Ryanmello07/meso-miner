@@ -12,25 +12,24 @@ import (
 // is across every transport and sequence at once. These tests therefore reset
 // it rather than constructing an instance, and must not run in parallel.
 func resetBackendDegraded() {
-	backendFail.Store(&backendFailState{})
+	backendFailMu.Lock()
+	defer backendFailMu.Unlock()
+	consecutiveBackendFails.Store(0)
+	lastBackendFailNano.Store(0)
 }
 
 // ageLastBackendFailure rewinds the recorded failure time, keeping the count.
 // This is how an idle provider that stopped retrying looks: a streak on the
 // books, but nothing recent.
 func ageLastBackendFailure(d time.Duration) {
-	state := backendFail.Load()
-	backendFail.Store(&backendFailState{
-		fails:    state.fails,
-		lastNano: time.Now().Add(-d).UnixNano(),
-	})
+	lastBackendFailNano.Store(time.Now().Add(-d).UnixNano())
 }
 
 // backendFails reads the current consecutive-failure count out of the snapshot.
 // Assertions want the raw count, which isBackendDegraded deliberately does not
 // expose: it folds the count and the recency guard into one verdict.
 func backendFails() int64 {
-	return backendFail.Load().fails
+	return consecutiveBackendFails.Load()
 }
 
 func TestBackendDegraded_CleanStateIsNotDegraded(t *testing.T) {
@@ -206,14 +205,15 @@ func TestBackendDegraded_ConcurrentSuccessAndFailureNeverLeaveInvalidState(t *te
 	}
 	wg.Wait()
 
-	state := backendFail.Load()
+	fails := consecutiveBackendFails.Load()
+	lastNano := lastBackendFailNano.Load()
 	// A positive count always implies a real failure timestamp, and a zeroed
 	// timestamp always implies no outstanding failures.
-	if 0 < state.fails && state.lastNano == 0 {
-		t.Fatalf("invalid state: %d consecutive failures recorded with a zero timestamp", state.fails)
+	if 0 < fails && lastNano == 0 {
+		t.Fatalf("invalid state: %d consecutive failures recorded with a zero timestamp", fails)
 	}
-	if state.lastNano == 0 && state.fails != 0 {
-		t.Fatalf("invalid state: zero timestamp with %d consecutive failures", state.fails)
+	if lastNano == 0 && fails != 0 {
+		t.Fatalf("invalid state: zero timestamp with %d consecutive failures", fails)
 	}
 }
 
@@ -249,10 +249,10 @@ func TestBackendDegraded_ConcurrentReadersNeverSeeATornPair(t *testing.T) {
 				return
 			default:
 			}
-			backendFail.Store(&backendFailState{
-				fails:    backendDegradedFailThreshold + 5,
-				lastNano: time.Now().Add(-stale).UnixNano(),
-			})
+			// timestamp first, count second: the setup is two stores, and a
+			// reader that lands between them must see a non-degraded pair
+			lastBackendFailNano.Store(time.Now().Add(-stale).UnixNano())
+			consecutiveBackendFails.Store(backendDegradedFailThreshold + 5)
 			// stale streak discarded: {threshold+5, old} becomes {1, now}
 			noteBackendFailure()
 		}
@@ -323,11 +323,13 @@ func TestAuthCancellationIsNotBackendFailure(t *testing.T) {
 		if !ok {
 			t.Fatalf("could not find %s", fn)
 		}
-		note := strings.Index(body, "noteBackendFailure()")
+		// the loops record the failure through noteDialFailure, which feeds
+		// noteBackendFailure for a family-agnostic transport (transport_family.go)
+		note := strings.Index(body, "self.noteDialFailure()")
 		if note < 0 {
 			t.Fatalf("%s no longer records auth failures; the degraded signal lost its transport half", fn)
 		}
-		guarded := strings.Index(body, "if self.ctx.Err() == nil {")
+		guarded := strings.Index(body, "Err() == nil && refusal == 0 {")
 		if guarded < 0 || note < guarded {
 			t.Fatalf("%s records auth failures without the local-teardown carve-out: a canceled dial would count as a backend failure", fn)
 		}
@@ -357,7 +359,7 @@ func TestProxyAuthFailureIsNotRecordedOnCancellation(t *testing.T) {
 		if record < 0 {
 			t.Fatalf("%s no longer records proxy auth failures; proxy health lost its auth signal", fn)
 		}
-		guarded := strings.Index(body, "if self.ctx.Err() == nil {")
+		guarded := strings.Index(body, "Err() == nil && refusal == 0 {")
 		if guarded < 0 || record < guarded {
 			t.Fatalf("%s records a proxy auth failure without the local-teardown carve-out: a canceled dial would count against a healthy proxy", fn)
 		}
@@ -465,7 +467,7 @@ func TestNoteBackendFailure_FirstFailureFromCleanState(t *testing.T) {
 	if got := backendFails(); got != 1 {
 		t.Fatalf("consecutive failures = %d after the first failure, want 1", got)
 	}
-	ts := backendFail.Load().lastNano
+	ts := lastBackendFailNano.Load()
 	if ts < before || after < ts {
 		t.Fatalf("backend failure timestamp = %d, want a value between %d and %d", ts, before, after)
 	}
@@ -482,7 +484,7 @@ func TestNoteBackendSuccess_OnCleanStateIsNoOp(t *testing.T) {
 	if got := backendFails(); got != 0 {
 		t.Fatalf("consecutive failures = %d after noteBackendSuccess on a clean state, want 0", got)
 	}
-	if backendFail.Load().lastNano != 0 {
+	if lastBackendFailNano.Load() != 0 {
 		t.Fatal("backend failure timestamp set after noteBackendSuccess on a clean state")
 	}
 }
