@@ -200,6 +200,17 @@ func httpClientWithSettings(settings *DohSettings) *http.Client {
 	return httpClientWithDialer(settings, settings.DialContext)
 }
 
+// defaultMaxConcurrentHttpRequests bounds a resolver transport's connections per
+// origin when DohSettings.MaxConcurrentHttpRequests is 0 (upstream's floor).
+const defaultMaxConcurrentHttpRequests = 16
+
+func maxConcurrentHttpRequests(settings *DohSettings) int {
+	if 0 < settings.MaxConcurrentHttpRequests {
+		return settings.MaxConcurrentHttpRequests
+	}
+	return defaultMaxConcurrentHttpRequests
+}
+
 // httpClientWithDialer builds a DoH HTTP client over the given dialer. Remote DoH
 // uses the tun dialer (settings.DialContext); local DoH uses the host dialer.
 func httpClientWithDialer(settings *DohSettings, dialContext DialContextFunction) *http.Client {
@@ -209,6 +220,11 @@ func httpClientWithDialer(settings *DohSettings, dialContext DialContextFunction
 		// keep the (typically single) DoH connection pooled across bursts so lookups don't
 		// re-pay a TCP+TLS handshake over the tunnel
 		IdleConnTimeout: 5 * time.Minute,
+		// Request cancellation releases the in-flight semaphore, but net/http may keep
+		// the reusable dial alive. Bound dialing, handshaking and pooled sockets per
+		// resolver origin in this transport, including those detached dials (upstream
+		// 358cefae).
+		MaxConnsPerHost: maxConcurrentHttpRequests(settings),
 	}
 	if settings.DnsResolverSettings != nil {
 		tr.TLSClientConfig = settings.DnsResolverSettings.TlsConfig
