@@ -3,6 +3,33 @@
 ```
 urnetwork-3.23-fix/
 ├── *.go                          # Core network stack (root package)
+│   ├── transport_family.go                               # Family-pinned platform transports and the group that runs them
+│   ├── transport_family_stats.go                         # Per-family counters and logs for the dual-stack transports
+│   ├── transport_h1plus.go                               # H1+ authenticated custom carrier upgrade
+│   ├── transport_h1_stats.go / transport_h1_progress.go  # Live H1 connection stats and opt-in progress metadata
+│   ├── transport_authorization.go                        # Authorization close reasons shared by the transports
+│   ├── transport_credential_refusal.go                   # Hold on dials after the platform refuses a credential
+│   ├── framed_message_conn.go                            # Binary-message surface shared by H1 and H1+
+│   ├── http_upgrade*.go                                  # H1+ upgrade policy, error causes and handshake close
+│   ├── stage3_adapter.go / net_http_stage3.go            # Adapter surface the swapped-in upstream transport expects
+│   ├── net_http_leaf.go / net_http_internal_doh.go / net_http_doh_control.go# Upstream HTTP and DoH leaves, ported
+│   ├── net_http_exhaustion.go                            # HTTP operation owners that retain failure causes
+│   ├── net_doh_family_leaf.go                            # DoH family pairing
+│   ├── net_dial_race.go                                  # Shared dual-stack dial race
+│   ├── net_dial_udp_candidates.go                        # Progressive UDP dial candidates
+│   ├── net_extender_memory.go / net_extender_quic_send.go# Extender carrier memory and QUIC send lease
+│   ├── net_strategy_delivery.go                          # Delivery observation hook on dialed connections
+│   ├── control_family.go                                 # Address-family policy for control-plane dials
+│   ├── egress_dial.go / egress_resolver_*.go             # Control-dial escape and egress-bound resolver
+│   ├── platform_h3_gate.go                               # One H3-family socket generation per platform gate
+│   ├── tun_dial_observation.go                           # Request-local dial progress observation
+│   ├── transfer_key_type.go / transfer_progress_trace.go # Transfer lane identity and opt-in progress trace
+│   ├── message_pool_counts.go                            # Cumulative message pool counts
+│   ├── ip_ipv6_ext.go                                    # Shared IPv6 extension-header walker
+│   ├── ip_nat_fragment.go / ip_fragment.go / ip_ipv6_fragment.go# NAT fragment reassembly and fragmentation (IPv6 identification from crypto/rand)
+│   ├── ip_dial_failure.go / ip_dial_errno*.go            # Answer a source whose upstream dial failed (RST, ICMP unreachable)
+│   ├── ip_protocol_number.go                             # IANA IP protocol number type (upstream's)
+│   ├── api_wallet_consent.go                             # API client for the wallet sign-in challenge
 ├── go.mod / go.sum               # Module: github.com/urnetwork/connect (Go 1.27)
 ├── Dockerfile                    # Alpine multi-arch provider image
 ├── CHANGELOG.md                  # Version history with per-release notes
@@ -53,6 +80,16 @@ urnetwork-3.23-fix/
 │   ├── smart_dialer_probe.go     # Background connect probes for the smart dialer
 │   ├── proxy_spread_sampler.go   # Content-keyed spread sampler for the stage-1 table probe
 │   ├── proxy_direct_grade.go     # Read-only direct-path health grade (~/.urnetwork/direct_grade.json)
+│   ├── family_transport.go       # Dual-stack platform transport group for the direct identity (ip_version)
+│   ├── h3_mode.go                # The `h3` control key: off, direct, on, a proxy count, or all
+│   ├── h3_mode_apply.go          # Applies a changed `h3` setting and relaunches the proxies it adds
+│   ├── h3_proxy_set.go           # Which proxied identities get the fallback transports
+│   ├── h3_packet_conn.go         # UDP packet conn factory for H3 (SOCKS5 relay for proxied identities)
+│   ├── socks5_udp.go             # SOCKS5 UDP relay (RFC 1928 section 7) so QUIC can use a proxy
+│   ├── proxy_udp_check.go        # Per-proxy UDP path check (relay answers, exit matches the TCP path)
+│   ├── h1plus_metrics.go         # H1+ counters and the `urnet_h1plus_*` metrics
+│   ├── wallet_consent.go         # Signed subnet wallet consent (`provider wallet challenge`, `wallet set`)
+│   ├── wallet_consent_owner_*.go # Seed-file ownership check per OS
 │   └── Makefile                  # Cross-compile targets (amd64, arm64, darwin)
 │
 ├── protocol/                     # Protobuf definitions and generated Go code
