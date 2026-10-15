@@ -24,8 +24,8 @@ func TestFamilyServiceUrl(t *testing.T) {
 		ver  int
 		want string
 	}{
-		{"wss://connect.example.net", 4, "wss://connect-v4.example.net"},
-		{"wss://connect.example.net", 6, "wss://connect-v6.example.net"},
+		{"wss://connect.bringyour.com", 4, "wss://connect-v4.bringyour.com"},
+		{"wss://connect.bringyour.com", 6, "wss://connect-v6.bringyour.com"},
 		{"https://api.example.com:8443/path?x=1", 6, "https://api-v6.example.com:8443/path?x=1"},
 		{"connect.example.com", 4, "connect-v4.example.com"},
 		{"wss://127.0.0.1", 4, ""},
@@ -97,7 +97,7 @@ func TestProbeIpv6With(t *testing.T) {
 }
 
 func TestUseFamilyTransportsDecisionOrder(t *testing.T) {
-	const allowed = "wss://connect.example.net"
+	const allowed = "wss://connect.bringyour.com"
 	proxy := &connect.ProxySettings{Address: "127.0.0.1:1"}
 	probeOk := func() (bool, string) { return true, "ok" }
 
@@ -137,7 +137,7 @@ func TestNewProviderPlatformTransportExactlyOneConcrete(t *testing.T) {
 		defaultBudget := settings.PlatformTransportBudget
 		transport, legacy, group := newProviderPlatformTransport(
 			ctx, clientStrategySettings, clientStrategy, connect.NewRouteManager(ctx, "test"),
-			"wss://connect.example.net",
+			"wss://connect.bringyour.com",
 			&connect.ClientAuth{ByJwt: "testing", InstanceId: connect.NewId(), AppVersion: "testing"},
 			settings, useFamily,
 		)
