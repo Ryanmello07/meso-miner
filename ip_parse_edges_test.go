@@ -83,14 +83,9 @@ func TestParseIpPathRejectsMalformedV6(t *testing.T) {
 	}
 }
 
-// the walker is not yet consulted by ParseIpPath (S3's wiring, IPV6.md C3),
-// so a v6 packet carrying a hop-by-hop or routing header is still rejected
-// whole with "No support for protocol 0". The held upstream test
-// TestParseIpPathIpv6ExtensionHeaders lands with that wiring; this skip keeps
-// the gap visible and named.
-func TestParseIpPathIpv6ExtensionHeadersPlaceholder(t *testing.T) {
-	t.Skip("ParseIpPath does not consult the extension walker yet; see the T27 handback finding")
-}
+// the walker is now consulted by ParseIpPath via parseIpv6 (T30), so the
+// held upstream test TestParseIpPathIpv6ExtensionHeaders replaces the T27
+// placeholder that named this gap.
 
 // the seeds run under plain `go test`; `go test -fuzz=FuzzIpParseSurfaces`
 // explores further. Invariants: nothing panics, a walked chain stays inside
@@ -123,6 +118,24 @@ func FuzzIpParseSurfaces(f *testing.F) {
 	}
 
 	f.Fuzz(func(t *testing.T, packet []byte) {
+		// T30: outside the v6 extension-chain family the wiring must be
+		// invisible for v6, and for non-v6 bytes the new code must never
+		// accept what the pre-wiring reference rejected. legacyParseIpv6
+		// (see the differential test file) is that reference.
+		{
+			version6 := len(packet) >= Ipv6HeaderSize && packet[0]>>4 == 6
+			if !(version6 && isIpv6ExtensionHeader(packet[6])) {
+				legacyProtocol, _, _, _, legacyOk := legacyParseIpv6(packet)
+				newProtocol, _, _, _, newOk := parseIpv6(packet)
+				if version6 {
+					if legacyOk != newOk || (legacyOk && legacyProtocol != newProtocol) {
+						t.Fatalf("parseIpv6 diverged from the pre-wiring reference")
+					}
+				} else if newOk && !legacyOk {
+					t.Fatalf("parseIpv6 accepted bytes the pre-wiring reference rejected")
+				}
+			}
+		}
 		if walk, ok := walkIpv6ExtensionHeaders(packet); ok {
 			if walk.payloadEnd > len(packet) ||
 				walk.transportOffset > walk.payloadEnd ||

@@ -136,14 +136,32 @@ func parseIpv6(ipPacket []byte) (ipProtocol IPProtocol, sourceIp net.IP, destina
 	if len(ipPacket) < Ipv6HeaderSize {
 		return
 	}
-	payloadByteCount := int(binary.BigEndian.Uint16(ipPacket[4:6]))
-	if len(ipPacket) < Ipv6HeaderSize+payloadByteCount {
-		return
+	// the extension walker (upstream connect b31ec82df ip.go parseIpv6): a
+	// hop-by-hop, routing, destination-options, authentication or atomic
+	// fragment chain must reach the transport header; a non-atomic fragment
+	// ends the walk and cannot be parsed until it is reassembled
+	var transportOffset int
+	var payloadEnd int
+	if !isIpv6ExtensionHeader(ipPacket[6]) {
+		// the common case, answered without the walk
+		payloadEnd = Ipv6HeaderSize + int(binary.BigEndian.Uint16(ipPacket[4:6]))
+		if len(ipPacket) < payloadEnd {
+			return
+		}
+		ipProtocol = IPProtocol(ipPacket[6])
+		transportOffset = Ipv6HeaderSize
+	} else {
+		walk, walkOk := walkIpv6ExtensionHeaders(ipPacket)
+		if !walkOk || walk.fragmented {
+			return
+		}
+		ipProtocol = walk.nextHeader
+		transportOffset = walk.transportOffset
+		payloadEnd = walk.payloadEnd
 	}
-	ipProtocol = IPProtocol(ipPacket[6])
 	sourceIp = net.IP(ipPacket[8:24])
 	destinationIp = net.IP(ipPacket[24:40])
-	transport = ipPacket[Ipv6HeaderSize : Ipv6HeaderSize+payloadByteCount]
+	transport = ipPacket[transportOffset:payloadEnd]
 	ok = true
 	return
 }

@@ -1,6 +1,7 @@
 package connect
 
 import (
+	"bytes"
 	"encoding/binary"
 	"net"
 	"testing"
@@ -245,18 +246,85 @@ func TestWalkIpv6ExtensionHeaders(t *testing.T) {
 	}
 }
 
+// TestParseIpPathIpv6ExtensionHeaders and TestParseIpPathIpv6FragmentDrop
+// below are restored verbatim from upstream connect b31ec82df ip_ipv6_ext_test.go
+// now that parseIpv6 consults the extension walker (T30), except that the icmp
+// sub-case asserts the current contract: icmp stays unsupported at ParseIpPath
+// on this line until the icmp echo parse wire-up lands.
+
+func TestParseIpPathIpv6ExtensionHeaders(t *testing.T) {
+	payload := []byte("hello")
+	udp := testIpv6Udp(testIpv6Src, testIpv6Dst, testIpv6ChainAll, 40001, 53, payload)
+	ipPath, got, err := ParseIpPathWithPayload(udp)
+	if err != nil {
+		t.Fatalf("udp with extension chain: %v", err)
+	}
+	if ipPath.Version != 6 || ipPath.Protocol != IpProtocolUdp || ipPath.SourcePort != 40001 ||
+		ipPath.DestinationPort != 53 || !bytes.Equal(got, payload) ||
+		ipPath.SourceIp.String() != testIpv6Src || ipPath.DestinationIp.String() != testIpv6Dst {
+		t.Fatalf("udp path = %+v payload=%q", ipPath, got)
+	}
+
+	tcp := testIpv6Tcp(testIpv6Src, testIpv6Dst, []testIpv6Ext{{kind: ipv6NextHeaderDestinationOptions, extra8: 3}}, 40002, 443, tcpFlagSyn, 0x1234, nil)
+	ipPath, err = ParseIpPath(tcp)
+	if err != nil {
+		t.Fatalf("tcp with destination options: %v", err)
+	}
+	if ipPath.Protocol != IpProtocolTcp || !ipPath.Syn || ipPath.SequenceNumber != 0x1234 || ipPath.DestinationPort != 443 {
+		t.Fatalf("tcp path = %+v", ipPath)
+	}
+
+	// an atomic fragment carries a whole packet
+	udpTransport := udp[Ipv6HeaderSize+testIpv6ChainByteCount(testIpv6ChainAll):]
+	atomic := testIpv6FragmentPacket(testIpv6Src, testIpv6Dst, false, byte(ipProtocolNumberUdp), 0, false, 9, udpTransport)
+	if ipPath, err = ParseIpPath(atomic); err != nil || ipPath.DestinationPort != 53 {
+		t.Fatalf("atomic fragment = %+v, %v", ipPath, err)
+	}
+
+	// icmp stays unsupported at ParseIpPath on this line: the chain is walked
+	// (no support for protocol 58), never parsed, until the icmp wire-up lands
+	echo := testingIcmp6EchoPacket(testIpv6Src, testIpv6Dst, 0x77, 1, []byte("ping"))
+	icmp := echo[Ipv6HeaderSize:]
+	wrapped := testIpv6Packet(testIpv6Src, testIpv6Dst, []testIpv6Ext{{kind: ipv6NextHeaderHopByHop}}, byte(ipProtocolNumberIcmp6), icmp)
+	if _, err = ParseIpPath(wrapped); err == nil {
+		t.Fatalf("icmp over hop-by-hop parsed; icmp must stay unsupported until its wire-up")
+	}
+}
+
+// the v6 analog of TestParseIpPathIpv4FragmentDrop: only a non-atomic
+// fragment is rejected, since it has no transport header to read
+func TestParseIpPathIpv6FragmentDrop(t *testing.T) {
+	udp := testIpv6Udp(testIpv6Src, testIpv6Dst, nil, 40001, 53, []byte("payload"))
+	transport := udp[Ipv6HeaderSize:]
+	cases := []struct {
+		name       string
+		offset     int
+		more       bool
+		expectDrop bool
+	}{
+		{name: "atomic", offset: 0, more: false, expectDrop: false},
+		{name: "first", offset: 0, more: true, expectDrop: true},
+		{name: "middle", offset: 8, more: true, expectDrop: true},
+		{name: "last", offset: 8, more: false, expectDrop: true},
+	}
+	for _, c := range cases {
+		packet := testIpv6FragmentPacket(testIpv6Src, testIpv6Dst, false, byte(ipProtocolNumberUdp), c.offset, c.more, 5, transport)
+		_, err := ParseIpPath(packet)
+		if c.expectDrop != (err != nil) {
+			t.Errorf("%s: expectDrop=%v err=%v", c.name, c.expectDrop, err)
+		}
+	}
+}
+
 // PORTED SUBSET (T16, S1). Upstream's ip_ipv6_ext_test.go is a cross-cutting
 // suite: it exercises the walker through every parser and peek that shares it.
-// S1 adds the walker as an INERT file - nothing calls it yet - so only the
-// walker's own unit test can pass here. MEASURED, not assumed: with the parse
-// tests included they FAIL, because ParseIpPath does not consult the walker
-// until S3 wires it in ("No support for protocol 0" / "protocol 44"). Copying
-// them now would mean shipping tests that cannot pass.
+// S1 added the walker as an INERT file; T30 (fix/v6-ext-parse) wired it into
+// parseIpv6 and restored the two S3-owned parse tests above, with the icmp
+// sub-case adapted to this line's contract (icmp parse lands with its own
+// wire-up, not before).
 //
-// The eight remaining upstream tests and the slice that owns each:
+// The six remaining upstream tests and the slice that owns each:
 //
-//   TestParseIpPathIpv6ExtensionHeaders      -> S3 (wires the walker into ParseIpPath)
-//   TestParseIpPathIpv6FragmentDrop          -> S3 (same)
 //   TestSendShardIpv6ExtensionHeaders        -> S3 (ip.go: sendShard)
 //   TestPeekClaimIpv6ExtensionHeaders        -> the mux port (ip_mux_upgrade.go)
 //   TestPeekTlsSegmentIpv6ExtensionHeaders   -> the mux port (needs tlsSegment)
