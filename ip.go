@@ -4214,7 +4214,7 @@ func parseIcmpIpPath(ipVersion int, ipProtocol IPProtocol, sourceIp net.IP, dest
 		// the icmp variant must match the ip version
 		return nil, nil, fmt.Errorf("No support for protocol %d", ipProtocol)
 	}
-	if !icmpEchoParsingEnabled() {
+	if !icmpEchoParsingEnabled(ipVersion) {
 		return nil, nil, fmt.Errorf("No support for protocol %d", ipProtocol)
 	}
 	var icmp parsedIcmp

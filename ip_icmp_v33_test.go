@@ -109,9 +109,9 @@ func TestIcmpEchoKillSwitchAndSelfDisable(t *testing.T) {
 	}
 	icmpEnvState.Store(icmpEnvUnread)
 
-	// and the platform refusal latches the same drop
-	icmpEchoSelfDisabled.Store(true)
-	defer icmpEchoSelfDisabled.Store(false)
+	// and the platform refusal latches the same drop, for that family only
+	icmpEchoFamilyRefused.Store(icmpFamilyBit(4))
+	defer icmpEchoFamilyRefused.Store(0)
 	if _, _, err := ParseIpPathWithPayload(requestCopy); err == nil {
 		t.Fatal("the platform self-disable must reject icmp")
 	}

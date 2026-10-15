@@ -549,13 +549,12 @@ func (self *IcmpSequence) Run() {
 	self.log.V(2).Infof("[init]icmp connect\n")
 	egress, err := newIcmpEgress(self.ctx, self.ipVersion, self.destinationIp, self.icmpBufferSettings)
 	if err != nil {
-		// fork: a platform that cannot open unprivileged icmp sockets
-		// self-disables the feature with ONE logged line; the parse gate
-		// then rejects icmp exactly as before the feature existed, so no
-		// further flows reach this path
-		icmpEgressRefused(self.log, err)
-		// fail soft: the platform cannot open an unprivileged echo socket,
-		// so the flow drops exactly as before icmp support
+		// fork: a platform that refuses unprivileged icmp sockets (EACCES,
+		// EPERM, EPROTONOSUPPORT) self-disables the feature for THAT family
+		// with one logged line naming the error; any other open error
+		// (EAFNOSUPPORT on udp6, EMFILE, ...) drops just this flow and the
+		// feature stays on
+		icmpEgressRefused(self.log, self.ipVersion, err)
 		if self.log.V(1).Enabled() {
 			self.log.Infof("[init]icmp connect error = %s\n", err)
 		}
@@ -711,7 +710,9 @@ func (self *IcmpSequence) Close() {
 }
 
 // icmpEgressUnsupportedError is the shared fail-soft error for platforms with
-// no echo backend (see the build-tagged newIcmpEgress implementations)
+// no echo backend (see the build-tagged newIcmpEgress implementations). It
+// wraps the refusal sentinel so the gate latches that family off instead of
+// retrying a flow per packet.
 func icmpEgressUnsupportedError(ipVersion int) error {
-	return fmt.Errorf("No icmp egress support for ip version %d on this platform.", ipVersion)
+	return fmt.Errorf("No icmp egress support for ip version %d on this platform: %w", ipVersion, icmpEgressUnsupported)
 }
