@@ -49,8 +49,11 @@ const debugVerifyHeaders = false
 type IPProtocol uint8
 
 const (
-	IP_PROTOCOL_UDP IPProtocol = 17
-	IP_PROTOCOL_TCP IPProtocol = 6
+	IP_PROTOCOL_ICMP IPProtocol = 1
+	IP_PROTOCOL_TCP  IPProtocol = 6
+	IP_PROTOCOL_UDP  IPProtocol = 17
+	// icmpv6's next-header value, for the v6 dispatch
+	IP_PROTOCOL_ICMPV6 IPProtocol = 58
 )
 
 type UDPPort uint16
@@ -386,12 +389,21 @@ func DefaultTcpBufferSettings() *TcpBufferSettings {
 }
 
 func DefaultLocalUserNatSettings() *LocalUserNatSettings {
-	return &LocalUserNatSettings{
+	settings := &LocalUserNatSettings{
 		SequenceBufferSize: DefaultIpBufferSize,
 		// BufferTimeout:      15 * time.Second,
-		UdpBufferSettings: DefaultUdpBufferSettings(),
-		TcpBufferSettings: DefaultTcpBufferSettings(),
+		UdpBufferSettings:  DefaultUdpBufferSettings(),
+		TcpBufferSettings:  DefaultTcpBufferSettings(),
+		IcmpBufferSettings: DefaultIcmpBufferSettings(),
 	}
+	// fork: fixed icmp flow caps, not the memory-budget-derived ones upstream
+	// computes. An echo flow is one per ping process and this table is additive
+	// above the udp/tcp split, so a small fixed ceiling bounds sockets and
+	// goroutines without touching the udp/tcp tables. The 60s idle reap and the
+	// read/write timeouts come from DefaultIcmpBufferSettings.
+	settings.IcmpBufferSettings.UserLimit = 64
+	settings.IcmpBufferSettings.GlobalLimit = 128
+	return settings
 }
 
 type LocalUserNatSettings struct {
@@ -399,6 +411,9 @@ type LocalUserNatSettings struct {
 	// BufferTimeout      time.Duration
 	UdpBufferSettings *UdpBufferSettings
 	TcpBufferSettings *TcpBufferSettings
+	// nil resolves to DefaultIcmpBufferSettings, so caller-built settings that
+	// predate icmp support keep working
+	IcmpBufferSettings *IcmpBufferSettings
 
 	// Log, when set, is used by the local user nat and its udp/tcp buffers
 	// and sequences (propagated to the buffer settings `Log` fields that are
@@ -417,6 +432,10 @@ type LocalUserNat struct {
 
 	sendShards []chan *SendPacket
 	numShards  int
+
+	// one tracker shared by every per-shard, per-family icmp buffer, so the
+	// configured icmp flow caps are nat-wide (see icmpFlowTracker)
+	icmpFlowTracker *icmpFlowTracker
 
 	settings *LocalUserNatSettings
 
@@ -459,6 +478,12 @@ func NewLocalUserNat(ctx context.Context, clientTag string, bw *ProxyBandwidth, 
 	if settings.TcpBufferSettings != nil && settings.TcpBufferSettings.Log == nil {
 		settings.TcpBufferSettings.Log = log
 	}
+	if settings.IcmpBufferSettings == nil {
+		settings.IcmpBufferSettings = DefaultIcmpBufferSettings()
+	}
+	if settings.IcmpBufferSettings.Log == nil {
+		settings.IcmpBufferSettings.Log = log
+	}
 
 	numShards := runtime.NumCPU()
 	if numShards < 1 {
@@ -483,6 +508,7 @@ func NewLocalUserNat(ctx context.Context, clientTag string, bw *ProxyBandwidth, 
 		log:              log,
 		sendShards:       sendShards,
 		numShards:        numShards,
+		icmpFlowTracker:  newIcmpFlowTracker(),
 		settings:         settings,
 		bw:               bw,
 		receiveCallbacks: NewCallbackList[ReceivePacketFunction](),
@@ -542,8 +568,14 @@ func flowHash(packet []byte) uint32 {
 				h ^= hash(packet[4:6])
 				return h
 			}
-			if protocol == 6 || protocol == 17 {
-				headerLen := int(packet[0]&0x0F) * 4
+			headerLen := int(packet[0]&0x0F) * 4
+			if protocol == 1 {
+				// icmp: type/code/checksum vary per packet, so the echo
+				// identifier is the flow identity
+				if len(packet) >= headerLen+6 {
+					h ^= hash(packet[headerLen+4 : headerLen+6])
+				}
+			} else if protocol == 6 || protocol == 17 {
 				if len(packet) >= headerLen+4 {
 					h ^= hash(packet[headerLen : headerLen+4])
 				}
@@ -575,7 +607,12 @@ func flowHash(packet []byte) uint32 {
 					return h
 				}
 			}
-			if protocol == 6 || protocol == 17 {
+			if protocol == 58 {
+				// icmpv6: same identity rule as icmpv4
+				if len(packet) >= 46 {
+					h ^= hash(packet[44:46])
+				}
+			} else if protocol == 6 || protocol == 17 {
 				if len(packet) >= 44 {
 					h ^= hash(packet[40:44])
 				}
@@ -671,6 +708,12 @@ func (self *LocalUserNat) runShard(shard int) {
 	udp6Buffer := NewUdp6Buffer(self.ctx, self.receive, self.settings.UdpBufferSettings, self.bw)
 	tcp4Buffer := NewTcp4Buffer(self.ctx, self.receive, self.settings.TcpBufferSettings, self.bw)
 	tcp6Buffer := NewTcp6Buffer(self.ctx, self.receive, self.settings.TcpBufferSettings, self.bw)
+	// the icmp echo path is provider-side only: these buffers are all a ping
+	// can reach, and the client send path stays off. the pair shares the
+	// nat's flow tracker with every other shard's pair, so the flow caps
+	// hold across the nat instead of once per shard and family
+	icmp4Buffer := newIcmp4BufferShared(self.ctx, self.receive, self.settings.IcmpBufferSettings, self.icmpFlowTracker)
+	icmp6Buffer := newIcmp6BufferShared(self.ctx, self.receive, self.settings.IcmpBufferSettings, self.icmpFlowTracker)
 	shardCh := self.sendShards[shard]
 	// Fragments are reassembled before they are parsed: a non-first fragment
 	// has no transport header and a first fragment has a truncated payload.
@@ -688,7 +731,8 @@ func (self *LocalUserNat) runShard(shard int) {
 		defer self.sourceCancelMutex.Unlock()
 		self.sourceCancels = append(self.sourceCancels, func(sourceId Id) int {
 			return udp4Buffer.CancelSource(sourceId) + udp6Buffer.CancelSource(sourceId) +
-				tcp4Buffer.CancelSource(sourceId) + tcp6Buffer.CancelSource(sourceId)
+				tcp4Buffer.CancelSource(sourceId) + tcp6Buffer.CancelSource(sourceId) +
+				icmp4Buffer.CancelSource(sourceId) + icmp6Buffer.CancelSource(sourceId)
 		})
 	}()
 
@@ -704,6 +748,7 @@ func (self *LocalUserNat) runShard(shard int) {
 			}
 			var udpPacket parsedUdp
 			var tcpPacket parsedTcp
+			var icmpPacket parsedIcmp
 			ipVersion := uint8(ipPacket[0]) >> 4
 			switch ipVersion {
 			case 4:
@@ -767,6 +812,45 @@ func (self *LocalUserNat) runShard(shard int) {
 					} else {
 						c()
 					}
+				case IP_PROTOCOL_ICMP:
+					if !icmpEchoParsingEnabled(4) {
+						// the gate latched off (operator switch or a platform
+						// refusal) after this packet was queued: drop it here
+						// too, or a refused platform would still open sockets
+						MessagePoolReturn(ipPacket)
+						continue
+					}
+					if !parseIcmpPacket(4, sourceIp, destinationIp, transport, &icmpPacket) {
+						MessagePoolReturn(ipPacket)
+						continue
+					}
+					if !icmpPacket.echoRequest {
+						// an outbound echo reply is always an orphan: an
+						// unsolicited inbound ping cannot reach a source, and the
+						// egress backends cannot send one anyway
+						MessagePoolReturn(ipPacket)
+						continue
+					}
+					icmpPacket.ttl = ipPacket[8]
+
+					c := func() bool {
+						success, err := icmp4Buffer.send(
+							sendPacket.source,
+							sendPacket.provideMode,
+							&icmpPacket,
+							self.settings.IcmpBufferSettings.WriteTimeout,
+							ipPacket,
+						)
+						return success && err == nil
+					}
+					if self.log.V(2).Enabled() {
+						TraceWithReturn(
+							fmt.Sprintf("[lnr]send icmp4 %s<-%s s(%s)", self.clientTag, sendPacket.source.SourceId, sendPacket.source.StreamId),
+							c,
+						)
+					} else {
+						c()
+					}
 				default:
 					// no support for this protocol, drop
 					MessagePoolReturn(ipPacket)
@@ -825,6 +909,42 @@ func (self *LocalUserNat) runShard(shard int) {
 					if self.log.V(2).Enabled() {
 						TraceWithReturn(
 							fmt.Sprintf("[lnr]send tcp6 %s<-%s s(%s)", self.clientTag, sendPacket.source.SourceId, sendPacket.source.StreamId),
+							c,
+						)
+					} else {
+						c()
+					}
+				case IP_PROTOCOL_ICMPV6:
+					if !icmpEchoParsingEnabled(6) {
+						// see the icmpv4 case: the gate can latch off while
+						// packets are queued
+						MessagePoolReturn(ipPacket)
+						continue
+					}
+					if !parseIcmpPacket(6, sourceIp, destinationIp, transport, &icmpPacket) {
+						MessagePoolReturn(ipPacket)
+						continue
+					}
+					if !icmpPacket.echoRequest {
+						// see the icmpv4 case: an outbound echo reply is an orphan
+						MessagePoolReturn(ipPacket)
+						continue
+					}
+					icmpPacket.ttl = ipPacket[7]
+
+					c := func() bool {
+						success, err := icmp6Buffer.send(
+							sendPacket.source,
+							sendPacket.provideMode,
+							&icmpPacket,
+							self.settings.IcmpBufferSettings.WriteTimeout,
+							ipPacket,
+						)
+						return success && err == nil
+					}
+					if self.log.V(2).Enabled() {
+						TraceWithReturn(
+							fmt.Sprintf("[lnr]send icmp6 %s<-%s s(%s)", self.clientTag, sendPacket.source.SourceId, sendPacket.source.StreamId),
 							c,
 						)
 					} else {
@@ -3952,6 +4072,8 @@ func (self IpProtocol) String() string {
 		return "tcp"
 	case IpProtocolUdp:
 		return "udp"
+	case IpProtocolIcmp:
+		return "icmp"
 	default:
 		return "unknown"
 	}
@@ -4031,8 +4153,9 @@ func ParseIpPathWithPayload(ipPacket []byte) (*IpPath, []byte, error) {
 				Ack:             tcpPacket.ack,
 			}, tcpPacket.payload, nil
 		default:
-			// no support for this protocol
-			return nil, nil, fmt.Errorf("No support for protocol %d", ipProtocol4)
+			// icmp and the unsupported protocols are parsed out of line so
+			// the hot tcp/udp dispatch is unchanged by icmp support
+			return parseIcmpIpPath(4, ipProtocol4, sourceIpCopy, destinationIpCopy, transport)
 		}
 	case 6:
 		ipProtocol6, sourceIp6, destinationIp6, transport, ok := parseIpv6(ipPacket)
@@ -4083,13 +4206,57 @@ func ParseIpPathWithPayload(ipPacket []byte) (*IpPath, []byte, error) {
 				Ack:             tcpPacket.ack,
 			}, tcpPacket.payload, nil
 		default:
-			// no support for this protocol
-			return nil, nil, fmt.Errorf("No support for protocol %d", ipProtocol6)
+			// icmp and the unsupported protocols are parsed out of line (see
+			// the v4 branch)
+			return parseIcmpIpPath(6, ipProtocol6, sourceIpCopy, destinationIpCopy, transport)
 		}
 	default:
 		// no support for this version
 		return nil, nil, fmt.Errorf("No support for ip version %d", ipVersion)
 	}
+}
+
+// parseIcmpIpPath is the cold tail of ParseIpPathWithPayload: the icmp echo
+// view, or the unsupported-protocol error. Split out so the hot tcp/udp
+// dispatch is unchanged by icmp support (the upstream connect b31ec82df
+// shape). Only echo request/reply parse (parseIcmpPacket); every other icmp
+// type fails here, which is what lets an unreachable reach the dial-failure
+// intercept instead. The acceptance is gated: the operator kill switch and
+// the platform self-disable both restore the historical drop exactly.
+//
+//go:noinline
+func parseIcmpIpPath(ipVersion int, ipProtocol IPProtocol, sourceIp net.IP, destinationIp net.IP, transport []byte) (*IpPath, []byte, error) {
+	switch ipProtocol {
+	case ipProtocolNumberIcmp4, ipProtocolNumberIcmp6:
+	default:
+		return nil, nil, fmt.Errorf("No support for protocol %d", ipProtocol)
+	}
+	if (ipProtocol == ipProtocolNumberIcmp4) != (ipVersion == 4) {
+		// the icmp variant must match the ip version
+		return nil, nil, fmt.Errorf("No support for protocol %d", ipProtocol)
+	}
+	if !icmpEchoParsingEnabled(ipVersion) {
+		return nil, nil, fmt.Errorf("No support for protocol %d", ipProtocol)
+	}
+	var icmp parsedIcmp
+	if !parseIcmpPacket(ipVersion, sourceIp, destinationIp, transport, &icmp) {
+		return nil, nil, fmt.Errorf("Unsupported or malformed icmp packet.")
+	}
+	// the echo identifier stands in for the client-side port: the source for
+	// a request, the destination for a reply, so Reverse aligns the two
+	// directions (see ICMP.md)
+	ipPath := &IpPath{
+		Version:       ipVersion,
+		Protocol:      IpProtocolIcmp,
+		SourceIp:      sourceIp,
+		DestinationIp: destinationIp,
+	}
+	if icmp.echoRequest {
+		ipPath.SourcePort = int(icmp.identifier)
+	} else {
+		ipPath.DestinationPort = int(icmp.identifier)
+	}
+	return ipPath, icmp.payload, nil
 }
 
 // func (self *IpPath) Copy() *IpPath {
