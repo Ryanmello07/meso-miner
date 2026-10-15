@@ -3893,7 +3893,7 @@ The stage-1 table probe drew a contiguous block of the destination table, which 
 
 **Change**: The sections above numbered 193 to 196 describe the reassembly, dial-failure answers and fragmentation. The IPv6 parse walks the extension chain through one shared walker, so a datagram carrying hop-by-hop, routing or destination options is parsed instead of dropped. The NAT fragment budget is 64 KiB of pool capacity per family per shard. The dial-failure classification recognises the Windows winsock refused and timed-out codes.
 
-**Status**: in rc1, fragmented datagrams arriving at a provider were NOT reassembled (only the local NATs reassemble). After rc1 the provider reassembles tunnel client fragments at ingress (`RemoteUserNatProvider.receiveFragment`, UDP only, 16 KiB per family per provider), applies policy once to the whole datagram and hands the NAT the reassembled datagram. ICMP echo is NOT supported yet.
+**Status**: in rc1, fragmented datagrams arriving at a provider were NOT reassembled (only the local NATs reassemble). After rc1 the provider reassembles tunnel client fragments at ingress (`RemoteUserNatProvider.receiveFragment`, UDP only, 16 KiB per family per provider), applies policy once to the whole datagram and hands the NAT the reassembled datagram. ICMP echo is supported from the next release (see the changelog).
 
 ## 205. v33: Credential Renewal and Refusal Hold
 
