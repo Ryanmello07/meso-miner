@@ -15,3 +15,8 @@ func icmpEgressRefusalErrno(err error) bool {
 		errors.Is(err, syscall.EPERM) ||
 		errors.Is(err, syscall.EPROTONOSUPPORT)
 }
+
+// write or read errors that leave the socket unusable
+func icmpEgressUnusableErrno(err error) bool {
+	return errors.Is(err, syscall.EBADF) || errors.Is(err, syscall.ENOTSOCK)
+}

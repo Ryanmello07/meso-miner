@@ -27,3 +27,17 @@ func icmpEgressRefusalErrno(err error) bool {
 	}
 	return false
 }
+
+// windows: WSAEBADF and WSAENOTSOCK leave the socket unusable
+const (
+	errnoWsaBadFile syscall.Errno = 10009
+	errnoWsaNotSock syscall.Errno = 10038
+)
+
+func icmpEgressUnusableErrno(err error) bool {
+	var errno syscall.Errno
+	if !errors.As(err, &errno) {
+		return false
+	}
+	return errno == errnoWsaBadFile || errno == errnoWsaNotSock
+}

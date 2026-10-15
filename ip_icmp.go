@@ -577,7 +577,7 @@ func (self *IcmpSequence) Run() {
 	}()
 
 	self.log.V(2).Infof("[init]icmp connect\n")
-	egress, err := newIcmpEgress(self.ctx, self.ipVersion, self.destinationIp, self.icmpBufferSettings)
+	egress, err := newIcmpEgressFactory(self.ctx, self.ipVersion, self.destinationIp, self.icmpBufferSettings)
 	if err != nil {
 		// fork: a platform that refuses unprivileged icmp sockets (EACCES,
 		// EPERM, EPROTONOSUPPORT) self-disables the feature for THAT family
@@ -641,6 +641,16 @@ func (self *IcmpSequence) Run() {
 			if !ok {
 				return
 			}
+			if self.icmpBufferSettings.Mtu < IcmpHeaderSize+len(sendItem.icmp.payload) {
+				// an oversized echo drops like the platform's emsgsize, and
+				// must keep the flow: a chatty ping keeps its socket
+				if self.log.V(1).Enabled() {
+					self.log.Infof("[f%d]icmp forward oversized %d\n", sendIter, len(sendItem.icmp.payload))
+				}
+				MessagePoolReturn(sendItem.ipPacket)
+				sendIter += 1
+				continue
+			}
 			err := egress.WriteEcho(
 				time.Now().Add(self.icmpBufferSettings.WriteTimeout),
 				int(sendItem.icmp.ttl),
@@ -655,9 +665,16 @@ func (self *IcmpSequence) Run() {
 			} else if self.log.V(1).Enabled() {
 				self.log.Infof("[f%d]icmp forward error = %s\n", sendIter, err)
 			}
+			if err != nil {
+				// a failed send drops only this packet (a refusal also
+				// latches the family off, as at open); the flow closes only
+				// on errors that leave the socket unusable, or every error
+				// would reopen a socket per packet
+				icmpEgressRefused(self.log, self.ipVersion, err)
+			}
 			MessagePoolReturn(sendItem.ipPacket)
 			sendIter += 1
-			if err != nil {
+			if err != nil && (icmpEgressRefusalError(err) || icmpEgressUnusableError(err)) {
 				return
 			}
 		case <-idleTimer.C:

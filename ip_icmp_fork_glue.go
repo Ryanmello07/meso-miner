@@ -62,6 +62,11 @@ func (self *IcmpBuffer[BufferId]) CancelSource(sourceId Id) int {
 
 const lruEvictionSampleSize = 32
 
+// fork: the egress backend factory, overridable by tests to exercise open
+// and write failures without a real socket (the egress contract itself, see
+// icmpEgress)
+var newIcmpEgressFactory = newIcmpEgress
+
 // applyLruMapLimit bounds eviction work independently of table cardinality.
 // Go map iteration starts at a pseudo-random bucket, so choosing the oldest of
 // the first fixed-size sample is an approximate LRU without collecting and
