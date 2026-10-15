@@ -93,6 +93,10 @@ func NewClientKeyManager(ctx context.Context, client *Client) (*ClientKeyManager
 		if client.settings.EncryptionSettings != nil && client.settings.EncryptionSettings.Mode != EncryptionModeOff {
 			reader = "per-peer sessions need peers to verify the published key"
 		}
+		// NOTE: upstream also refuses the skip when ClientKeyRegistrationRequired
+		// is set or a nonzero CloseReportDomainHash exists, since either
+		// needs the published key. Those settings are not in this fork yet;
+		// when they are synced in, add them as readers here.
 		if reader != "" {
 			client.log.Errorf("[key]%s client key publication skip ignored: %s\n", client.ClientTag(), reader)
 			skipPublication = false
