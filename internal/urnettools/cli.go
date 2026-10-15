@@ -87,8 +87,8 @@ func cmdSimpleDelegation(sub string, args []string) error {
 	if narrowed {
 		printNarrowedNote(len(providers), p, sub)
 	}
-	// The provider nests summary under the proxy branch: `provider proxy
-	// summary`, not `provider summary` (gauntlet finding BUG-5). Build the
+	// The provider nests summary under the proxy branch: run `provider proxy
+	// summary`, never a flat top-level name (gauntlet finding BUG-5). Build the
 	// nested argv; everything else stays flat.
 	cmdArgs := append([]string{"proxy", sub}, rest...)
 	return providerSubcommand(p, cmdArgs...)

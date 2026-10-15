@@ -891,155 +891,7 @@ func main() {
 		initSHMLoggerWithHandover()
 	}
 
-	usage := fmt.Sprintf(
-		`Connect provider.
-
-The default URLs are:
-    api_url: %s
-    connect_url: %s
-
-Usage:
-    provider auth ([<auth_code>] | --user_auth=<user_auth> [--password=<password>]) [-f]
-    	[--api_url=<api_url>]
-    	[--max-memory=<mem>]
-    	[-v...]
-    provider provide [--port=<port>]
-        [--api_url=<api_url>]
-        [--connect_url=<connect_url>]
-        [--wallet=<coldkey_ss58> [--legacy-network-wallet]]
-        [--max-memory=<mem>]
-        [--proxy_file=<proxy_file>]
-        [--file=<file>]
-        [--proxy_url=<proxy_url>...]
-        [--url=<url>...]
-        [--URL=<URL>...]
-        [--proxy_url_refresh=<proxy_url_refresh>]
-        [--proxy_url_max=<proxy_url_max>]
-        [--proxy_dead_cleanup_scope=<proxy_dead_cleanup_scope>]
-        [--proxy_dead_cleanup_interval=<proxy_dead_cleanup_interval>]
-        [-v...]
-    provider auth-provide ([<auth_code>] | --user_auth=<user_auth> [--password=<password>]) [-f]
-    	[--port=<port>]
-        [--api_url=<api_url>]
-        [--connect_url=<connect_url>]
-        [--wallet=<coldkey_ss58> [--legacy-network-wallet]]
-        [--max-memory=<mem>]
-        [--proxy_file=<proxy_file>]
-        [--file=<file>]
-        [--proxy_url=<proxy_url>...]
-        [--url=<url>...]
-        [--URL=<URL>...]
-        [-v...]
-    provider wallet set <coldkey_ss58> [--legacy-network-wallet]
-        [--api_url=<api_url>]
-        [-v...]
-    provider sn-status [--json]
-        [--api_url=<api_url>]
-        [-v...]
-    provider claim [--store-client=<key> | --provider-jwt=<path> | --legacy-coldkey=<coldkey_ss58>] [--epoch=<epoch>] [--rpc=<rpc_url>]... [--key_file=<key_file>] [--dry-run]
-        [--api_url=<api_url>]
-        [-v...]
-    provider bind-head --manifest=<file> --hotkey_seed_file=<file> --valid_from_epoch=<n> --valid_to_epoch=<n> [--client_id=<hex16>] [--client_seed_file=<file>] [--rpc=<rpc_url>]... [--key_file=<key_file>] [--dry-run]
-        [-v...]
-    provider unbind-head --manifest=<file> --effective_epoch=<n> [--client_id=<hex16>] [--client_seed_file=<file>] [--rpc=<rpc_url>]... [--key_file=<key_file>] [--dry-run]
-        [-v...]
-    provider proxy auth add [<key>] <proxy_user> <proxy_password> [-f]
-    provider proxy auth remove [<key>] [--all]
-    provider proxy add [<key_address>...] [--proxy_file=<proxy_file>] [--file=<file>] [--url=<url>] [--URL=<URL>] [-f]
-    provider proxy remove [<key_address>...] [--all]
-    provider proxy remove --match=<pattern> [--yes] [--preview]
-    provider proxy remove-dead [--degraded[=<duration>]] [--auth-failures=<N>] [--source=<source>] [--yes] [--preview]
-    provider proxy activity
-    provider proxy refresh [--force]
-    provider proxy add-source <url>
-    provider proxy remove-source <url>
-    provider proxy exclude [<pattern>] [--remove]
-    provider proxy summary
-    provider proxy trim <count> [--preview]
-    provider direct [<state>]
-    provider proxy paste [--file=<file>]
-    provider logs [-n <lines>]
-    provider print-network-id <file>
-    provider choose_network <api_url> [<connect_url>]
-    provider choose_network --reset
-
-Options:
-    -h --help                        Show this help and exit.
-    --version                        Show version.
-    -v...                            Enable verbose mode. -v implies verbose level 1,
-    				                 -vv implies level 2... etc.
-    --json                           Output in JSON format for automated tooling.
-    -f                               Force overwrite the JWT token store file or proxy value, if exists.
-                                     By default, existing values will not be overwritten.
-    --api_url=<api_url>              Specify a custom API URL to use.
-    --connect_url=<connect_url>      Specify a custom connect URL to use.
-    <api_url>                        API URL to save as the chosen network (http:// or https://),
-                                     or a preset: main | beta.
-    <connect_url>                    Connect URL to save as the chosen network (ws:// or wss://).
-    --reset                          With choose_network, clear the saved network and revert to the main network.
-    --user_auth=<user_auth>	         Login with a username.
-    --password=<password>            Login with a password. If --user_auth is used, you will be prompted for your
-    				                 password anyways, if you don't specify it using this option.
-    -p --port=<port>                 Status server port [default: 0].
-    --max-memory=<mem>               Set the maximum amount of memory in bytes, or the suffixes b, kib, mib, gib may be used [This is a soft limit].
-    --wallet=<coldkey_ss58>          Also set the subnet claim wallet at startup, same as provider wallet set.
-                                     A failure is logged and does not block providing.
-    --legacy-network-wallet          Allow the unsigned network wallet request (provider wallet set, provide --wallet).
-                                     Without it both refuse: set the wallet in the URnetwork app or web account.
-    <coldkey_ss58>                   Subnet claim wallet: an ss58 coldkey address (prefix 42).
-    --store-client=<key>             claim: use the client token of this identity from the store
-                                     (~/.urnetwork/.client_jwts.json; the key is a proxy address or "direct").
-                                     A bare address also finds the one credentialed identity there.
-                                     Pick a client that served traffic.
-    --provider-jwt=<path>            claim: use the client token in this file.
-    --legacy-coldkey=<coldkey_ss58>  claim: network token plus this coldkey, only for an epoch without a provider artifact.
-    --epoch=<epoch>                  Epoch to fetch the subnet pool claim for. Defaults to the last
-                                     finalized epoch, which is the epoch before the current one.
-    --rpc=<rpc_url>                  EVM json-rpc endpoint used to check the payout root on-chain.
-                                     May be repeated; endpoints are tried in order until one answers.
-    --key_file=<key_file>            EVM private key file. When given, claim/bind-head/unbind-head sign
-                                     and submit the transaction (via --rpc); without it, the ready-to-submit
-                                     calldata is printed for the offline/air-gapped snclaim path.
-    --dry-run                        Build and sign the extrinsic but do not submit.
-    --manifest=<file>                Fleet manifest JSON (schema/chain_id/netuid/coordinator/fleet_id/
-                                     hotkey/generation/members). Required by bind-head and unbind-head;
-                                     the manifest is the single source for the fleet identity.
-    --hotkey_seed_file=<file>        sr25519 hotkey seed file (raw or hex 32 bytes). Required by
-                                     bind-head: the fleet binding is dual-signed, and this key must
-                                     match the manifest hotkey.
-    --client_id=<hex16>              The provider's 16-byte client_id (hex). Defaults to the client_id in
-                                     the provider's client JWT store (the "direct" entry).
-    --client_seed_file=<file>        Ed25519 client seed file (raw or hex 32 bytes) overriding the
-                                     provider's own client key for the binding/revoke signature.
-    --valid_from_epoch=<n>           First epoch the fleet binding is valid (bind-head).
-    --valid_to_epoch=<n>             Last epoch the fleet binding is valid (bind-head).
-    --effective_epoch=<n>            Epoch at which the fleet revoke takes effect (unbind-head).
-    <key>                            Authentication key
-    <proxy_user>                     SOCKS5 user
-    <proxy_password>                 SOCKS5 password
-    <key_address>                    SOCKS5 server as host:port, host:port:user:pass, host:port::, or key@host:port
-    --proxy_file=<proxy_file>        A path to a file where each line contains on entry as host:port, host:port:user:pass, host:port::, or key@host:port
-    --proxy_url=<proxy_url>          A live proxy list URL. Repeatable. Additive with --proxy_file / internal config. Also settable via PROXY_URL (comma-separated for multiple).
-    --url=<url>                      Alias for --proxy_url.
-    --URL=<URL>                      Alias for --proxy_url.
-    --proxy_url_refresh=<dur>        How often to re-fetch --proxy_url sources and add new entries. Also settable via PROXY_URL_REFRESH.
-    --proxy_url_max=<n>              Cap on total proxies sourced from --proxy_url. 0 = unlimited, defaults to 500. Also settable via PROXY_URL_MAX.
-    --proxy_dead_cleanup_scope=<s>   Automatic dead-proxy cleanup scope: none, url, or all. Defaults to url (URL-sourced only). Also settable via PROXY_DEAD_CLEANUP_SCOPE.
-    --proxy_dead_cleanup_interval=<dur>  How often automatic cleanup runs, when scope isn't none. Also settable via PROXY_DEAD_CLEANUP_INTERVAL.
-    <url>                            A proxy list URL.
-    --match=<pattern>                Case-insensitive substring matched against proxy hosts (never port or
-                                     credentials). Removes matches from the proxy list, proxy file, and URL
-                                     cache, and excludes the pattern from future URL fetches. See 'proxy exclude'.
-    <pattern>                        Host substring for 'proxy exclude' (add). With --remove, deletes the pattern.
-                                     With no pattern, 'proxy exclude' lists active patterns.
-    --file=<file>                    A path to a proxy file (alias for --proxy_file, or input for 'proxy paste').
-    <state>                          Direct IP providing state: on | off | status. If omitted, reports current state.
-    <count>                          Max number of running proxies to keep. The A-F worst-graded above it are shed. 0/off clears the cap.
-    --force                          Bypass the 8-hour warmup protection gate.
-    -n <lines>                       Number of lines to show from the end of the log [default: 0].`,
-		DefaultApiUrl,
-		DefaultConnectUrl,
-	)
+	usage := fmt.Sprintf(mainUsage(), DefaultApiUrl, DefaultConnectUrl)
 
 	// Allow `provider help` as a friendlier alias for --help
 	if len(os.Args) == 2 && os.Args[1] == "help" {
@@ -7344,4 +7196,155 @@ func usesSlowRetrySemaphore(hasProxy, isURLSourced bool, authFailures, maxAuthFa
 		return false
 	}
 	return authFailures >= maxAuthFailures || 0 < slowRetryCycles || 0 < genuineRetryCycles
+}
+
+// mainUsage is the provider docopt usage. It is a function so that tests can
+// check every command the docs name still exists in the CLI (see
+// cli_command_refs_test.go). The %s verbs are the default API and connect URLs.
+func mainUsage() string {
+	return `Connect provider.
+
+The default URLs are:
+    api_url: %s
+    connect_url: %s
+
+Usage:
+    provider auth ([<auth_code>] | --user_auth=<user_auth> [--password=<password>]) [-f]
+    	[--api_url=<api_url>]
+    	[--max-memory=<mem>]
+    	[-v...]
+    provider provide [--port=<port>]
+        [--api_url=<api_url>]
+        [--connect_url=<connect_url>]
+        [--wallet=<coldkey_ss58> [--legacy-network-wallet]]
+        [--max-memory=<mem>]
+        [--proxy_file=<proxy_file>]
+        [--file=<file>]
+        [--proxy_url=<proxy_url>...]
+        [--url=<url>...]
+        [--URL=<URL>...]
+        [--proxy_url_refresh=<proxy_url_refresh>]
+        [--proxy_url_max=<proxy_url_max>]
+        [--proxy_dead_cleanup_scope=<proxy_dead_cleanup_scope>]
+        [--proxy_dead_cleanup_interval=<proxy_dead_cleanup_interval>]
+        [-v...]
+    provider auth-provide ([<auth_code>] | --user_auth=<user_auth> [--password=<password>]) [-f]
+    	[--port=<port>]
+        [--api_url=<api_url>]
+        [--connect_url=<connect_url>]
+        [--wallet=<coldkey_ss58> [--legacy-network-wallet]]
+        [--max-memory=<mem>]
+        [--proxy_file=<proxy_file>]
+        [--file=<file>]
+        [--proxy_url=<proxy_url>...]
+        [--url=<url>...]
+        [--URL=<URL>...]
+        [-v...]
+    provider wallet set <coldkey_ss58> [--legacy-network-wallet]
+        [--api_url=<api_url>]
+        [-v...]
+    provider sn-status [--json]
+        [--api_url=<api_url>]
+        [-v...]
+    provider claim [--store-client=<key> | --provider-jwt=<path> | --legacy-coldkey=<coldkey_ss58>] [--epoch=<epoch>] [--rpc=<rpc_url>]... [--key_file=<key_file>] [--dry-run]
+        [--api_url=<api_url>]
+        [-v...]
+    provider bind-head --manifest=<file> --hotkey_seed_file=<file> --valid_from_epoch=<n> --valid_to_epoch=<n> [--client_id=<hex16>] [--client_seed_file=<file>] [--rpc=<rpc_url>]... [--key_file=<key_file>] [--dry-run]
+        [-v...]
+    provider unbind-head --manifest=<file> --effective_epoch=<n> [--client_id=<hex16>] [--client_seed_file=<file>] [--rpc=<rpc_url>]... [--key_file=<key_file>] [--dry-run]
+        [-v...]
+    provider proxy auth add [<key>] <proxy_user> <proxy_password> [-f]
+    provider proxy auth remove [<key>] [--all]
+    provider proxy add [<key_address>...] [--proxy_file=<proxy_file>] [--file=<file>] [--url=<url>] [--URL=<URL>] [-f]
+    provider proxy remove [<key_address>...] [--all]
+    provider proxy remove --match=<pattern> [--yes] [--preview]
+    provider proxy remove-dead [--degraded[=<duration>]] [--auth-failures=<N>] [--source=<source>] [--yes] [--preview]
+    provider proxy activity
+    provider proxy refresh [--force]
+    provider proxy add-source <url>
+    provider proxy remove-source <url>
+    provider proxy exclude [<pattern>] [--remove]
+    provider proxy summary
+    provider proxy trim <count> [--preview]
+    provider direct [<state>]
+    provider proxy paste [--file=<file>]
+    provider logs [-n <lines>]
+    provider print-network-id <file>
+    provider choose_network <api_url> [<connect_url>]
+    provider choose_network --reset
+
+Options:
+    -h --help                        Show this help and exit.
+    --version                        Show version.
+    -v...                            Enable verbose mode. -v implies verbose level 1,
+    				                 -vv implies level 2... etc.
+    --json                           Output in JSON format for automated tooling.
+    -f                               Force overwrite the JWT token store file or proxy value, if exists.
+                                     By default, existing values will not be overwritten.
+    --api_url=<api_url>              Specify a custom API URL to use.
+    --connect_url=<connect_url>      Specify a custom connect URL to use.
+    <api_url>                        API URL to save as the chosen network (http:// or https://),
+                                     or a preset: main | beta.
+    <connect_url>                    Connect URL to save as the chosen network (ws:// or wss://).
+    --reset                          With choose_network, clear the saved network and revert to the main network.
+    --user_auth=<user_auth>	         Login with a username.
+    --password=<password>            Login with a password. If --user_auth is used, you will be prompted for your
+    				                 password anyways, if you don't specify it using this option.
+    -p --port=<port>                 Status server port [default: 0].
+    --max-memory=<mem>               Set the maximum amount of memory in bytes, or the suffixes b, kib, mib, gib may be used [This is a soft limit].
+    --wallet=<coldkey_ss58>          Also set the subnet claim wallet at startup, same as provider wallet set.
+                                     A failure is logged and does not block providing.
+    --legacy-network-wallet          Allow the unsigned network wallet request (provider wallet set, provide --wallet).
+                                     Without it both refuse: set the wallet in the URnetwork app or web account.
+    <coldkey_ss58>                   Subnet claim wallet: an ss58 coldkey address (prefix 42).
+    --store-client=<key>             claim: use the client token of this identity from the store
+                                     (~/.urnetwork/.client_jwts.json; the key is a proxy address or "direct").
+                                     A bare address also finds the one credentialed identity there.
+                                     Pick a client that served traffic.
+    --provider-jwt=<path>            claim: use the client token in this file.
+    --legacy-coldkey=<coldkey_ss58>  claim: network token plus this coldkey, only for an epoch without a provider artifact.
+    --epoch=<epoch>                  Epoch to fetch the subnet pool claim for. Defaults to the last
+                                     finalized epoch, which is the epoch before the current one.
+    --rpc=<rpc_url>                  EVM json-rpc endpoint used to check the payout root on-chain.
+                                     May be repeated; endpoints are tried in order until one answers.
+    --key_file=<key_file>            EVM private key file. When given, claim/bind-head/unbind-head sign
+                                     and submit the transaction (via --rpc); without it, the ready-to-submit
+                                     calldata is printed for the offline/air-gapped snclaim path.
+    --dry-run                        Build and sign the extrinsic but do not submit.
+    --manifest=<file>                Fleet manifest JSON (schema/chain_id/netuid/coordinator/fleet_id/
+                                     hotkey/generation/members). Required by bind-head and unbind-head;
+                                     the manifest is the single source for the fleet identity.
+    --hotkey_seed_file=<file>        sr25519 hotkey seed file (raw or hex 32 bytes). Required by
+                                     bind-head: the fleet binding is dual-signed, and this key must
+                                     match the manifest hotkey.
+    --client_id=<hex16>              The provider's 16-byte client_id (hex). Defaults to the client_id in
+                                     the provider's client JWT store (the "direct" entry).
+    --client_seed_file=<file>        Ed25519 client seed file (raw or hex 32 bytes) overriding the
+                                     provider's own client key for the binding/revoke signature.
+    --valid_from_epoch=<n>           First epoch the fleet binding is valid (bind-head).
+    --valid_to_epoch=<n>             Last epoch the fleet binding is valid (bind-head).
+    --effective_epoch=<n>            Epoch at which the fleet revoke takes effect (unbind-head).
+    <key>                            Authentication key
+    <proxy_user>                     SOCKS5 user
+    <proxy_password>                 SOCKS5 password
+    <key_address>                    SOCKS5 server as host:port, host:port:user:pass, host:port::, or key@host:port
+    --proxy_file=<proxy_file>        A path to a file where each line contains on entry as host:port, host:port:user:pass, host:port::, or key@host:port
+    --proxy_url=<proxy_url>          A live proxy list URL. Repeatable. Additive with --proxy_file / internal config. Also settable via PROXY_URL (comma-separated for multiple).
+    --url=<url>                      Alias for --proxy_url.
+    --URL=<URL>                      Alias for --proxy_url.
+    --proxy_url_refresh=<dur>        How often to re-fetch --proxy_url sources and add new entries. Also settable via PROXY_URL_REFRESH.
+    --proxy_url_max=<n>              Cap on total proxies sourced from --proxy_url. 0 = unlimited, defaults to 500. Also settable via PROXY_URL_MAX.
+    --proxy_dead_cleanup_scope=<s>   Automatic dead-proxy cleanup scope: none, url, or all. Defaults to url (URL-sourced only). Also settable via PROXY_DEAD_CLEANUP_SCOPE.
+    --proxy_dead_cleanup_interval=<dur>  How often automatic cleanup runs, when scope isn't none. Also settable via PROXY_DEAD_CLEANUP_INTERVAL.
+    <url>                            A proxy list URL.
+    --match=<pattern>                Case-insensitive substring matched against proxy hosts (never port or
+                                     credentials). Removes matches from the proxy list, proxy file, and URL
+                                     cache, and excludes the pattern from future URL fetches. See 'proxy exclude'.
+    <pattern>                        Host substring for 'proxy exclude' (add). With --remove, deletes the pattern.
+                                     With no pattern, 'proxy exclude' lists active patterns.
+    --file=<file>                    A path to a proxy file (alias for --proxy_file, or input for 'proxy paste').
+    <state>                          Direct IP providing state: on | off | status. If omitted, reports current state.
+    <count>                          Max number of running proxies to keep. The A-F worst-graded above it are shed. 0/off clears the cap.
+    --force                          Bypass the 8-hour warmup protection gate.
+    -n <lines>                       Number of lines to show from the end of the log [default: 0].`
 }
