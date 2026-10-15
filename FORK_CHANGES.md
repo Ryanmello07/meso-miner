@@ -3797,7 +3797,7 @@ The stage-1 table probe drew a contiguous block of the destination table, which 
 
 **Files Modified**: `ip.go`, `ip_nat_fragment.go`, `ip_fragment.go`, `ip_ipv6_fragment.go` (ported from upstream)
 
-**Change**: Each NAT send shard reassembles only the datagrams pinned to it (the IPv4 identification or the IPv6 fragment identification pins every fragment of a datagram to one shard), retaining at most 16 KiB of fragment bytes per family per shard; a datagram still incomplete after the 15 s reassembly timeout is dropped.
+**Change**: Each NAT send shard reassembles only the datagrams pinned to it (the IPv4 identification or the IPv6 fragment identification pins every fragment of a datagram to one shard), retaining at most 64 KiB of fragment pool capacity per family per shard (upstream's unbudgeted default; the charge runs about 1.9x the payload, and 16 datagrams and 64 fragments remain the tighter concurrency caps); a datagram still incomplete after the 15 s reassembly timeout is dropped.
 
 **Impact**: Fragmented traffic survives the link. Port of upstream `24dc85332`.
 
@@ -3846,3 +3846,69 @@ The stage-1 table probe drew a contiguous block of the destination table, which 
 **Files Modified**: `go.mod`
 
 **Change**: `github.com/urfoundation/sn` to `v0.0.0-20261014223308-23d0bf9d92a4`.
+
+---
+
+## 199. v33: Upstream's Platform Transport Swapped In
+
+**Purpose**: Track upstream's transport instead of carrying a diverging copy. The v33 line takes upstream's transport files and keeps the fork's defaults on top.
+
+**Files Modified**: `transport.go`, `transport_h3_*.go`, `transport_pt*.go`, `net_extender*.go`, `net_http.go`, `net_http_doh.go`
+
+**Files Added**: `stage3_adapter.go`, `net_http_stage3.go`, `net_http_leaf.go`, `control_family.go`, `egress_dial.go`, `egress_resolver_{linux,other,windows}.go`, `net_dial_race.go`, `net_dial_udp_candidates.go`, `transport_authorization.go`, `transport_credential_refusal.go`, `transport_h1plus.go`, `framed_message_conn.go`, `http_upgrade*.go` (the shared leaves upstream's transport needs, ported inert first and then wired in)
+
+**Change**: DNS and DNS-pump carriers (upstream's packet translation) are automatic fallbacks on the direct identity. The fork keeps its own defaults and datagram safety on the swapped transport. The minimum message length limit is 16 KiB, as upstream (the old 4 KiB value ended sessions with `read limit exceeded` when the per-peer TLS flights arrived).
+
+**Impact**: Transport fixes arrive by sync instead of by hand. Rebuilt on every sync of those files.
+
+## 200. v33: The `h3` Setting Takes `off|direct|on`, a Proxy Count, or `all`
+
+**Files Added**: `provider/h3_mode.go`, `provider/h3_mode_apply.go`, `provider/h3_proxy_set.go`, `provider/h3_packet_conn.go`, `provider/socks5_udp.go`, `provider/proxy_udp_check.go`
+
+**Change**: `direct` (default) runs the fallback carriers on the direct identity only. `on` also runs H3 beside H1. A count or `all` widens the fallbacks to the best N or every proxy; a proxy's QUIC leaves through its SOCKS5 UDP relay (never from the host) and only after a per-proxy check that the relay answers and exits from the same address as the TCP path. Widening relaunches the proxies it adds, one every 300 ms, and each redial costs the platform's speed tests.
+
+**Status**: Proxied QUIC needs a proxy whose SOCKS5 relay carries UDP; one that does not stays on H1.
+
+## 201. v33: Dual-Stack Platform Transport Group
+
+**Files Added**: `transport_family.go`, `transport_family_stats.go`, `provider/family_transport.go`
+
+**Change**: On a host with a usable global IPv6 address the direct identity runs one transport pinned to IPv4, one pinned to IPv6 and a parked family-agnostic fallback that dials only if neither pin connects. A proxied identity stays on the single legacy transport. `urnet-tools set ip-version dual|ipv4|ipv6|legacy` (control key `ip_version`, default `dual`) switches it live. Per-family counters, `[ipv6]` log lines and a family-mismatch counter are exported (see Monitoring).
+
+**Impact**: The platform can see the provider on both families. Whether it classifies the provider as dual-stack is a server-side decision these counters cannot show.
+
+## 202. v33: H1+ On by Default, with a Live Switch
+
+**Files Added**: `transport_h1plus.go`, `transport_h1_stats.go`, `transport_h1_progress.go`, `provider/h1plus_metrics.go`
+
+**Change**: Each H1 dial tries the authenticated custom carrier upgrade first. `urnet-tools set h1-plus on|off` (control key `h1_plus`) turns it off for new connections. Losing H1 dials are closed, the outage guard is kept, a 429 or 5xx does not fall back to a plain websocket, and the framed-upgrade rejection cache is scoped to its route.
+
+## 203. v33: QUIC Datagrams On by Default
+
+**Change**: `h3_datagram` and `h3_datagram_send` default to `on`, as upstream. `off` turns each off live.
+
+## 204. v33: Dial-Failure Answers, NAT Fragment Budget, v6 Extension Walker
+
+**Files Added**: `ip_ipv6_ext.go`, `ip_nat_fragment.go`, `ip_fragment.go`, `ip_ipv6_fragment.go`, `ip_dial_failure.go`, `ip_dial_errno*.go`, `ip_protocol_number.go`
+
+**Change**: The sections above numbered 193 to 196 describe the reassembly, dial-failure answers and fragmentation. The IPv6 parse walks the extension chain through one shared walker, so a datagram carrying hop-by-hop, routing or destination options is parsed instead of dropped. The NAT fragment budget is 64 KiB of pool capacity per family per shard. The dial-failure classification recognises the Windows winsock refused and timed-out codes.
+
+**Status (not yet)**: fragmented datagrams arriving at a provider are NOT reassembled yet (only the local NATs reassemble). ICMP echo is NOT supported in rc1.
+
+## 205. v33: Credential Renewal and Refusal Hold
+
+**Files Added**: `transport_credential_refusal.go`
+
+**Change**: The provider renews its credential when the platform refuses it. A transport holds its dials on a credential the platform definitively refused (a 401 or 403, or a revoked, expired or rejected close) until the owner installs a different one or the hold times out.
+
+## 206. v33: Client Key Publication Opt-Out (library setting, default off)
+
+**Files Modified**: `transfer.go`, `transfer_key.go`
+
+**Change**: `ClientSettings.SkipClientKeyPublication` keeps the client's identity key local. A reader outranks it: with the per-peer session layer on, construction logs an error and publishes anyway. Nothing in the provider sets it.
+
+## 207. v33: Cross-OS CI
+
+**Files Added**: `.github/workflows/portable-core.yml`
+
+**Change**: A build and vet matrix over the supported operating systems, native Windows and macOS runs of the ip and wallet tests, and the same tests on the FreeBSD kernel.
