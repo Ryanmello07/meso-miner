@@ -263,6 +263,9 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 		if settings.ExposeServerHostNames && settings.ExposeServerIps {
 			netDialer := settings.NetDialer()
 
+			// this dial path's own session ticket cache (see newClientTlsConfig)
+			normalTlsConfig := newClientTlsConfig(settings.TlsConfig, nil)
+
 			var tlsDialContext DialTlsContextFunction
 			if settings.ProxySettings != nil {
 				tlsDialContext = func(ctx context.Context, network string, addr string) (net.Conn, error) {
@@ -295,11 +298,7 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 						panic(err)
 					}
 
-					tlsConfig := settings.TlsConfig
-					if tlsConfig == nil {
-						// `tls.defaultConfig`
-						tlsConfig = &tls.Config{}
-					}
+					tlsConfig := normalTlsConfig
 					if tlsConfig.ServerName == "" {
 						c := tlsConfig.Clone()
 						c.ServerName = host
@@ -312,6 +311,7 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 						defer tlsCancel()
 						err = tlsConn.HandshakeContext(tlsCtx)
 					}()
+					noteTlsHandshake(tlsConn.ConnectionState(), err)
 					if err != nil {
 						tlsConn.Close()
 						return nil, err
@@ -321,9 +321,17 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 			} else {
 				tlsDialer := &tls.Dialer{
 					NetDialer: netDialer,
-					Config:    settings.TlsConfig,
+					Config:    normalTlsConfig,
 				}
-				tlsDialContext = tlsDialer.DialContext
+				tlsDialContext = func(ctx context.Context, network string, addr string) (net.Conn, error) {
+					conn, err := tlsDialer.DialContext(ctx, network, addr)
+					if tlsConn, ok := conn.(*tls.Conn); ok {
+						noteTlsHandshake(tlsConn.ConnectionState(), err)
+					} else if err != nil {
+						noteTlsHandshake(tls.ConnectionState{}, err)
+					}
+					return conn, err
+				}
 			}
 
 			dialer := &clientDialer{

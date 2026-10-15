@@ -1,6 +1,7 @@
 package connect
 
 import (
+	"crypto/tls"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -76,6 +77,29 @@ type streamMetricsState struct {
 	p2pStarted      atomic.Int64
 	p2pStopped      atomic.Int64
 	p2pConnFailures atomic.Int64
+
+	// platform and API TLS handshakes by outcome, from the dial paths that carry
+	// a session cache (resumed handshakes skip certificate verification)
+	// identities whose dial backoff entered the long tier (see
+	// PlatformTransportSettings.ReconnectLongAfter), and how many sit in it now
+	dialBackoffLongEntered atomic.Int64
+	dialBackoffLongActive  atomic.Int64
+
+	tlsFull    atomic.Int64
+	tlsResumed atomic.Int64
+	tlsFailed  atomic.Int64
+}
+
+// noteTlsHandshake counts one finished client handshake. Called once per dial.
+func noteTlsHandshake(state tls.ConnectionState, err error) {
+	switch {
+	case err != nil:
+		streamMetrics.tlsFailed.Add(1)
+	case state.DidResume:
+		streamMetrics.tlsResumed.Add(1)
+	default:
+		streamMetrics.tlsFull.Add(1)
+	}
 }
 
 var streamMetrics streamMetricsState
@@ -159,4 +183,17 @@ func (self *streamMetricsState) writePrometheus(b *strings.Builder) {
 	fmt.Fprintf(b, "# HELP urnet_p2p_connect_failures_total P2P connection attempts that returned an error (a connection that came up and then failed its readiness exchange is not counted).\n")
 	fmt.Fprintf(b, "# TYPE urnet_p2p_connect_failures_total counter\n")
 	fmt.Fprintf(b, "urnet_p2p_connect_failures_total %d\n", self.p2pConnFailures.Load())
+
+	fmt.Fprintf(b, "# HELP urnet_tls_handshakes_total Client TLS handshakes on the platform and API dial paths, by result (resumed ones skip certificate verification).\n")
+	fmt.Fprintf(b, "# TYPE urnet_tls_handshakes_total counter\n")
+	fmt.Fprintf(b, "urnet_tls_handshakes_total{result=\"full\"} %d\n", self.tlsFull.Load())
+	fmt.Fprintf(b, "urnet_tls_handshakes_total{result=\"resumed\"} %d\n", self.tlsResumed.Load())
+	fmt.Fprintf(b, "urnet_tls_handshakes_total{result=\"failed\"} %d\n", self.tlsFailed.Load())
+
+	fmt.Fprintf(b, "# HELP urnet_dial_backoff_long_tier_active Identities currently waiting in the long dial backoff tier because their own path keeps failing.\n")
+	fmt.Fprintf(b, "# TYPE urnet_dial_backoff_long_tier_active gauge\n")
+	fmt.Fprintf(b, "urnet_dial_backoff_long_tier_active %d\n", self.dialBackoffLongActive.Load())
+	fmt.Fprintf(b, "# HELP urnet_dial_backoff_long_tier_entered_total Times an identity's dial backoff entered the long tier.\n")
+	fmt.Fprintf(b, "# TYPE urnet_dial_backoff_long_tier_entered_total counter\n")
+	fmt.Fprintf(b, "urnet_dial_backoff_long_tier_entered_total %d\n", self.dialBackoffLongEntered.Load())
 }

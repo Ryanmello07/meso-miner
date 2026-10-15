@@ -331,6 +331,13 @@ type pinnedDialBackoff struct {
 	failures  int
 	// grace is how many consecutive failures add no delay of their own.
 	grace int
+
+	// The long tier (setLongTier): an identity whose dials keep failing while the
+	// platform is evidently reachable (isolated failures) may back off past max,
+	// up to longMax. Zero longAfter keeps the single max cap.
+	longAfter int
+	longMax   time.Duration
+	isolated  int
 }
 
 func newPinnedDialBackoff(base time.Duration, max time.Duration) *pinnedDialBackoff {
@@ -363,11 +370,15 @@ func (self *pinnedDialBackoff) delay() time.Duration {
 	if failures <= 0 {
 		return 0
 	}
+	limit := self.max
+	if self.inLongTierLocked() {
+		limit = self.longMax
+	}
 	d := self.base
-	for i := 1; i < failures && d < self.max; i += 1 {
+	for i := 1; i < failures && d < limit; i += 1 {
 		d *= 2
 	}
-	d = min(d, self.max)
+	d = min(d, limit)
 	half := d / 2
 	if half <= 0 {
 		return d
@@ -376,17 +387,54 @@ func (self *pinnedDialBackoff) delay() time.Duration {
 }
 
 func (self *pinnedDialBackoff) fail() {
+	self.failIsolated(false)
+}
+
+// setLongTier lets a backoff keep growing past max, up to longMax, once
+// longAfter consecutive failures happened while the platform was reachable.
+// A non-positive longAfter or a longMax not above max leaves the single cap.
+func (self *pinnedDialBackoff) setLongTier(longAfter int, longMax time.Duration) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	if longAfter <= 0 || longMax <= self.max {
+		self.longAfter, self.longMax = 0, 0
+		return
+	}
+	self.longAfter, self.longMax = longAfter, longMax
+}
+
+func (self *pinnedDialBackoff) inLongTierLocked() bool {
+	return 0 < self.longAfter && self.longAfter <= self.isolated
+}
+
+// failIsolated records one failed dial. isolated says the platform answered
+// some other dial recently, so this failure is about this identity's own path
+// (a dead proxy) and not a platform outage; only isolated failures count toward
+// the long tier, so an outage can never push identities into it.
+func (self *pinnedDialBackoff) failIsolated(isolated bool) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	if self.failures < 62 {
 		self.failures += 1
+	}
+	if isolated && self.isolated < 62 {
+		wasLong := self.inLongTierLocked()
+		self.isolated += 1
+		if !wasLong && self.inLongTierLocked() {
+			streamMetrics.dialBackoffLongEntered.Add(1)
+			streamMetrics.dialBackoffLongActive.Add(1)
+		}
 	}
 }
 
 func (self *pinnedDialBackoff) reset() {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
+	if self.inLongTierLocked() {
+		streamMetrics.dialBackoffLongActive.Add(-1)
+	}
 	self.failures = 0
+	self.isolated = 0
 }
 
 // ClientLimitBackoff is the client limit hold of this transport, shared with
@@ -584,7 +632,7 @@ func (self *PlatformTransport) noteDialFailure() {
 		self.pinnedBackoff.fail()
 		return
 	}
-	self.failBackoff.fail()
+	self.failBackoff.failIsolated(platformReachedRecently())
 	noteBackendFailure()
 }
 
