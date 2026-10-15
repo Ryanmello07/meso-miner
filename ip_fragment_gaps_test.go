@@ -527,8 +527,8 @@ func TestFragmentRetainedBytesCapEvictsOldest(t *testing.T) {
 		r := newFragmentReassembler(version)
 		defer r.close()
 		// an explicit small budget so the BYTE-cap eviction path is what
-		// runs: at ~2061 charged bytes per fragment even a few datagrams
-		// exceed it and the oldest gives way
+		// runs: the fragments' own bytes are charged, so even a few
+		// datagrams exceed it and the oldest gives way
 		setFragmentMaxRetainedBytes(r, 10*1024)
 		base := time.Unix(0, 0)
 		idents := make([]uint32, 0, 20)

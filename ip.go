@@ -3293,6 +3293,13 @@ type RemoteUserNatProviderSettings struct {
 // the provider holds per family for all tunnel clients of one provider.
 const providerIngressFragmentMaxRetainedBytes = 16 * 1024
 
+// providerIngressFragmentMaxRetainedBytesPerSource is one client source's
+// share of that shared ingress cache. A source over its share sheds its own
+// oldest half-built datagrams first, so one client streaming opening
+// fragments cannot evict every other client's datagrams. Half the budget
+// leaves every other source at least as much room as the loudest one.
+const providerIngressFragmentMaxRetainedBytesPerSource = providerIngressFragmentMaxRetainedBytes / 2
+
 type RemoteUserNatProvider struct {
 	client         *Client
 	localUserNat   *LocalUserNat
@@ -3328,13 +3335,18 @@ func NewRemoteUserNatProvider(
 ) *RemoteUserNatProvider {
 	userNatProvider := &RemoteUserNatProvider{
 		// one provider per proxy: keep the shared ingress cache small. A
-		// legitimate fragmented datagram is a few KiB
-		ingressFragments: ipFragmentGate{maxRetainedBytes: providerIngressFragmentMaxRetainedBytes},
-		client:           client,
-		localUserNat:     localUserNat,
-		securityPolicy:   settings.EgressSecurityPolicyGenerator(DefaultSecurityPolicyStatsCollector()),
-		settings:         settings,
-		bw:               bw,
+		// legitimate fragmented datagram is a few KiB. the per-source quota
+		// bounds one client's share so it cannot evict every other client's
+		// half-built datagrams
+		ingressFragments: ipFragmentGate{
+			maxRetainedBytes:          providerIngressFragmentMaxRetainedBytes,
+			maxRetainedBytesPerSource: providerIngressFragmentMaxRetainedBytesPerSource,
+		},
+		client:         client,
+		localUserNat:   localUserNat,
+		securityPolicy: settings.EgressSecurityPolicyGenerator(DefaultSecurityPolicyStatsCollector()),
+		settings:       settings,
+		bw:             bw,
 	}
 
 	localUserNatUnsub := localUserNat.AddReceivePacketCallback(userNatProvider.Receive)

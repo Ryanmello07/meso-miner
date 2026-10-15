@@ -67,9 +67,15 @@ type ipv4FragmentDatagram struct {
 }
 
 type ipv4FragmentReassembler struct {
-	maxRetainedBytes  int
-	datagrams         map[ipv4FragmentKey]*ipv4FragmentDatagram
-	retainedByteCount int
+	maxRetainedBytes int
+	// maxRetainedBytesPerSource bounds one source's share of the retained
+	// bytes (0 = no per-source quota). A source over its share sheds its own
+	// oldest datagrams first, so one client streaming opening fragments
+	// cannot evict every other client's half-built datagrams.
+	maxRetainedBytesPerSource int
+	datagrams                 map[ipv4FragmentKey]*ipv4FragmentDatagram
+	retainedByteCount         int
+	retainedBytesBySource     map[TransferPath]int
 }
 
 // ipFragmentProcessResult is the result of processing one packet through a
@@ -92,10 +98,11 @@ type ipv4FragmentProcessResult = ipFragmentProcessResult
 // callers whose packet entry points may run concurrently. LocalUserNat uses
 // one cache per already-serialized send shard and does not pay this lock.
 type ipFragmentGate struct {
-	maxRetainedBytes int
-	mutex            sync.Mutex
-	reassembler4     *ipv4FragmentReassembler
-	reassembler6     *ipv6FragmentReassembler
+	maxRetainedBytes          int
+	maxRetainedBytesPerSource int
+	mutex                     sync.Mutex
+	reassembler4              *ipv4FragmentReassembler
+	reassembler6              *ipv6FragmentReassembler
 }
 
 // the pre-dual-stack name
@@ -118,6 +125,9 @@ func (self *ipFragmentGate) processOwned(
 			if self.maxRetainedBytes > 0 {
 				self.reassembler6.maxRetainedBytes = self.maxRetainedBytes
 			}
+			if self.maxRetainedBytesPerSource > 0 {
+				self.reassembler6.maxRetainedBytesPerSource = self.maxRetainedBytesPerSource
+			}
 		}
 		return self.reassembler6.processResultAt(
 			source,
@@ -132,6 +142,9 @@ func (self *ipFragmentGate) processOwned(
 		self.reassembler4 = newIpv4FragmentReassembler()
 		if self.maxRetainedBytes > 0 {
 			self.reassembler4.maxRetainedBytes = self.maxRetainedBytes
+		}
+		if self.maxRetainedBytesPerSource > 0 {
+			self.reassembler4.maxRetainedBytesPerSource = self.maxRetainedBytesPerSource
 		}
 	}
 	return self.reassembler4.processResultAt(
@@ -288,7 +301,11 @@ func (self *ipv4FragmentReassembler) processResultAt(
 	datagram := self.datagrams[key]
 	if datagram == nil {
 		self.makeDatagramRoom(now)
-		packetCost := cap(packet)
+		// The fragment's own bytes are charged, not the pool allocation's
+		// capacity: a 600-1500 byte packet sits in a 2 KiB pool buffer, and
+		// charging the capacity held only ~7 fragments of the shared budget
+		// (about three two-fragment QUIC Initials) regardless of their size.
+		packetCost := len(packet)
 		if self.maxRetainedBytes < packetCost {
 			MessagePoolReturn(packet)
 			return ipFragmentProcessResult{fragment: true}
@@ -299,13 +316,24 @@ func (self *ipv4FragmentReassembler) processResultAt(
 				return ipFragmentProcessResult{fragment: true}
 			}
 		}
+		// the per-source quota: a source over its own share sheds its own
+		// oldest datagrams rather than growing into the shared budget
+		if 0 < self.maxRetainedBytesPerSource {
+			for self.retainedBytesForSource(key.source)+packetCost > self.maxRetainedBytesPerSource {
+				if !self.releaseOldestDatagramForSource(key.source) {
+					MessagePoolReturn(packet)
+					return ipFragmentProcessResult{fragment: true}
+				}
+			}
+		}
 		datagram = &ipv4FragmentDatagram{
 			createdAt:             now,
 			updatedAt:             now,
 			finalPayloadByteCount: -1,
 		}
 		self.datagrams[key] = datagram
-	} else if self.retainedByteCount+cap(packet) > self.maxRetainedBytes {
+	} else if self.retainedByteCount+len(packet) > self.maxRetainedBytes ||
+		(0 < self.maxRetainedBytesPerSource && self.retainedBytesForSource(key.source)+len(packet) > self.maxRetainedBytesPerSource) {
 		return drop()
 	}
 
@@ -358,7 +386,7 @@ func (self *ipv4FragmentReassembler) processResultAt(
 	}
 
 	// Retain the original pool allocation rather than copying each fragment.
-	// cap is charged because it is the actual backing memory kept alive.
+	// the budget charges the fragment's own bytes (see the admission above).
 	packet = packet[:totalByteCount]
 	datagram.fragments = append(datagram.fragments, ipv4RetainedFragment{
 		packet:           packet,
@@ -367,7 +395,11 @@ func (self *ipv4FragmentReassembler) processResultAt(
 		payloadByteCount: payloadByteCount,
 	})
 	datagram.updatedAt = now
-	self.retainedByteCount += cap(packet)
+	self.retainedByteCount += len(packet)
+	if self.retainedBytesBySource == nil {
+		self.retainedBytesBySource = map[TransferPath]int{}
+	}
+	self.retainedBytesBySource[key.source] += len(packet)
 
 	if datagram.firstHeaderByteCount == 0 || datagram.finalPayloadByteCount < 0 {
 		return ipFragmentProcessResult{fragment: true, accepted: true}
@@ -501,9 +533,44 @@ func (self *ipv4FragmentReassembler) detachDatagram(key ipv4FragmentKey) []ipv4R
 	}
 	delete(self.datagrams, key)
 	for _, fragment := range datagram.fragments {
-		self.retainedByteCount -= cap(fragment.packet)
+		self.retainedByteCount -= len(fragment.packet)
+		if self.retainedBytesBySource != nil {
+			if retained := self.retainedBytesBySource[key.source] - len(fragment.packet); 0 < retained {
+				self.retainedBytesBySource[key.source] = retained
+			} else {
+				delete(self.retainedBytesBySource, key.source)
+			}
+		}
 	}
 	return datagram.fragments
+}
+
+// retainedBytesForSource is one source's share of the retained bytes.
+func (self *ipv4FragmentReassembler) retainedBytesForSource(source TransferPath) int {
+	return self.retainedBytesBySource[source]
+}
+
+// releaseOldestDatagramForSource evicts the source's least recently updated
+// datagram: the per-source quota's self-pruning, so a source over its own
+// share sheds its own oldest work rather than another source's.
+func (self *ipv4FragmentReassembler) releaseOldestDatagramForSource(source TransferPath) bool {
+	var oldestKey ipv4FragmentKey
+	var oldestTime time.Time
+	found := false
+	for key, datagram := range self.datagrams {
+		if key.source != source {
+			continue
+		}
+		if !found || datagram.updatedAt.Before(oldestTime) {
+			oldestKey = key
+			oldestTime = datagram.updatedAt
+			found = true
+		}
+	}
+	if found {
+		self.releaseDatagram(oldestKey)
+	}
+	return found
 }
 
 func (self *ipv4FragmentReassembler) close() {

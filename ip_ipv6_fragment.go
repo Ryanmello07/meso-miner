@@ -83,9 +83,11 @@ type ipv6FragmentDatagram struct {
 }
 
 type ipv6FragmentReassembler struct {
-	maxRetainedBytes  int
-	datagrams         map[ipv6FragmentKey]*ipv6FragmentDatagram
-	retainedByteCount int
+	maxRetainedBytes          int
+	maxRetainedBytesPerSource int
+	datagrams                 map[ipv6FragmentKey]*ipv6FragmentDatagram
+	retainedByteCount         int
+	retainedBytesBySource     map[TransferPath]int
 }
 
 func newIpv6FragmentReassembler() *ipv6FragmentReassembler {
@@ -180,7 +182,10 @@ func (self *ipv6FragmentReassembler) processResultAt(
 	datagram := self.datagrams[key]
 	if datagram == nil {
 		self.makeDatagramRoom(now)
-		packetCost := cap(packet)
+		// the fragment's own bytes are charged, not the pool allocation's
+		// capacity (see the ipv4 admission): capacity held only ~7 fragments
+		// of a 16 KiB budget regardless of their size
+		packetCost := len(packet)
 		if self.maxRetainedBytes < packetCost {
 			MessagePoolReturn(packet)
 			return ipFragmentProcessResult{fragment: true}
@@ -191,13 +196,22 @@ func (self *ipv6FragmentReassembler) processResultAt(
 				return ipFragmentProcessResult{fragment: true}
 			}
 		}
+		if 0 < self.maxRetainedBytesPerSource {
+			for self.retainedBytesForSource(key.source)+packetCost > self.maxRetainedBytesPerSource {
+				if !self.releaseOldestDatagramForSource(key.source) {
+					MessagePoolReturn(packet)
+					return ipFragmentProcessResult{fragment: true}
+				}
+			}
+		}
 		datagram = &ipv6FragmentDatagram{
 			createdAt:             now,
 			updatedAt:             now,
 			finalPayloadByteCount: -1,
 		}
 		self.datagrams[key] = datagram
-	} else if self.retainedByteCount+cap(packet) > self.maxRetainedBytes {
+	} else if self.retainedByteCount+len(packet) > self.maxRetainedBytes ||
+		(0 < self.maxRetainedBytesPerSource && self.retainedBytesForSource(key.source)+len(packet) > self.maxRetainedBytesPerSource) {
 		return drop()
 	}
 
@@ -253,7 +267,7 @@ func (self *ipv6FragmentReassembler) processResultAt(
 	}
 
 	// retain the original pool allocation rather than copying each fragment.
-	// cap is charged because it is the backing memory actually kept alive.
+	// the budget charges the fragment's own bytes (see the admission above).
 	packet = packet[:walk.payloadEnd]
 	datagram.fragments = append(datagram.fragments, ipv6RetainedFragment{
 		packet:                  packet,
@@ -262,7 +276,11 @@ func (self *ipv6FragmentReassembler) processResultAt(
 		payloadByteCount:        payloadByteCount,
 	})
 	datagram.updatedAt = now
-	self.retainedByteCount += cap(packet)
+	self.retainedByteCount += len(packet)
+	if self.retainedBytesBySource == nil {
+		self.retainedBytesBySource = map[TransferPath]int{}
+	}
+	self.retainedBytesBySource[key.source] += len(packet)
 
 	if datagram.firstUnfragmentableByteCount == 0 || datagram.finalPayloadByteCount < 0 {
 		return ipFragmentProcessResult{fragment: true, accepted: true}
@@ -387,9 +405,43 @@ func (self *ipv6FragmentReassembler) detachDatagram(key ipv6FragmentKey) []ipv6R
 	}
 	delete(self.datagrams, key)
 	for _, fragment := range datagram.fragments {
-		self.retainedByteCount -= cap(fragment.packet)
+		self.retainedByteCount -= len(fragment.packet)
+		if self.retainedBytesBySource != nil {
+			if retained := self.retainedBytesBySource[key.source] - len(fragment.packet); 0 < retained {
+				self.retainedBytesBySource[key.source] = retained
+			} else {
+				delete(self.retainedBytesBySource, key.source)
+			}
+		}
 	}
 	return datagram.fragments
+}
+
+// retainedBytesForSource is one source's share of the retained bytes.
+func (self *ipv6FragmentReassembler) retainedBytesForSource(source TransferPath) int {
+	return self.retainedBytesBySource[source]
+}
+
+// releaseOldestDatagramForSource evicts the source's least recently updated
+// datagram: the per-source quota's self-pruning (see the ipv4 counterpart).
+func (self *ipv6FragmentReassembler) releaseOldestDatagramForSource(source TransferPath) bool {
+	var oldestKey ipv6FragmentKey
+	var oldestTime time.Time
+	found := false
+	for key, datagram := range self.datagrams {
+		if key.source != source {
+			continue
+		}
+		if !found || datagram.updatedAt.Before(oldestTime) {
+			oldestKey = key
+			oldestTime = datagram.updatedAt
+			found = true
+		}
+	}
+	if found {
+		self.releaseDatagram(oldestKey)
+	}
+	return found
 }
 
 func (self *ipv6FragmentReassembler) close() {
