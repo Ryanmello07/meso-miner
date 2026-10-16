@@ -189,3 +189,68 @@ func TestClaimDaemonGoldenSignedTransaction(t *testing.T) {
 		t.Fatalf("retained signed bytes did not authenticate to the golden intent: %v %v %v", tx.Hash().Hex(), from.Hex(), intent)
 	}
 }
+
+// The settlement vault resolution: the explicit field wins, contract_address
+// is the fallback, and a present-but-different pair is refused before any
+// transaction is built (the review-required restore of upstream's check).
+func TestClaimCalldataSettlementVaultResolution(t *testing.T) {
+	const vaultA = "0x0000000000000000000000000000000000001234"
+	const vaultB = "0x0000000000000000000000000000000000005678"
+
+	validClaim := func() *connect.SnPoolClaimResult {
+		var coldkey [32]byte
+		coldkey[31] = 7
+		share := new(big.Int).SetUint64(100)
+		root := merkle.PayoutLeaf(coldkey, share)
+		return &connect.SnPoolClaimResult{
+			Epoch:      1,
+			NoId:       []byte{1, 2, 3},
+			Coldkey:    coldkey[:],
+			PayoutRoot: root[:],
+			ShareBps:   100,
+		}
+	}
+
+	t.Run("only contract set", func(t *testing.T) {
+		claim := validClaim()
+		claim.ContractAddress = vaultA
+		vault, _, err := claimCalldata(claim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if vault != common.HexToAddress(vaultA) {
+			t.Fatalf("vault = %s, want %s", vault, vaultA)
+		}
+	})
+	t.Run("both equal", func(t *testing.T) {
+		claim := validClaim()
+		claim.ContractAddress = vaultA
+		claim.SettlementVaultAddress = vaultA
+		vault, _, err := claimCalldata(claim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if vault != common.HexToAddress(vaultA) {
+			t.Fatalf("vault = %s, want %s", vault, vaultA)
+		}
+	})
+	t.Run("both differ refused", func(t *testing.T) {
+		claim := validClaim()
+		claim.ContractAddress = vaultA
+		claim.SettlementVaultAddress = vaultB
+		if _, _, err := claimCalldata(claim); err == nil || !strings.Contains(err.Error(), "inconsistent settlement vault") {
+			t.Fatalf("err = %v, want the inconsistent settlement vault refusal", err)
+		}
+	})
+	t.Run("vault only", func(t *testing.T) {
+		claim := validClaim()
+		claim.SettlementVaultAddress = vaultB
+		vault, _, err := claimCalldata(claim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if vault != common.HexToAddress(vaultB) {
+			t.Fatalf("vault = %s, want %s", vault, vaultB)
+		}
+	})
+}
