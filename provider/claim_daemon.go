@@ -504,11 +504,15 @@ func claimCalldata(claim *connect.SnPoolClaimResult) (common.Address, []byte, er
 	if claim == nil || len(claim.NoId) == 0 || len(claim.NoId) > 32 || len(claim.Coldkey) != 32 || len(claim.PayoutRoot) != 32 || claim.ShareBps <= 0 || claim.ShareBps > 10_000 {
 		return common.Address{}, nil, errors.New("claim response has malformed identity, epoch, root, or share")
 	}
-	// The v33 claim result carries the settlement vault in contract_address:
-	// this module's SnPoolClaimResult has no separate settlement_vault_address.
-	vault := claim.ContractAddress
-	if !common.IsHexAddress(vault) {
-		return common.Address{}, nil, errors.New("claim response has no valid settlement vault address")
+	// The settlement vault is the claim result's explicit field when present;
+	// contract_address is the fallback the server fills from the hot-epoch
+	// mirror. A present-but-different pair is refused, matching upstream sn.
+	vault := claim.SettlementVaultAddress
+	if vault == "" {
+		vault = claim.ContractAddress
+	}
+	if !common.IsHexAddress(vault) || (claim.ContractAddress != "" && !strings.EqualFold(vault, claim.ContractAddress)) {
+		return common.Address{}, nil, errors.New("claim response has inconsistent settlement vault address")
 	}
 	noID := new(big.Int).SetBytes(claim.NoId)
 	var coldkey, root [32]byte
@@ -544,9 +548,15 @@ func queryClaimedFinalizedObserved(ctx context.Context, cfg *ClaimDaemonConfig, 
 	if claim.Error != nil {
 		return false, errors.New(claim.Error.Message)
 	}
-	vault := claim.ContractAddress
+	vault := claim.SettlementVaultAddress
+	if vault == "" {
+		vault = claim.ContractAddress
+	}
 	if !common.IsHexAddress(vault) {
 		return false, fmt.Errorf("invalid settlement vault address %q", vault)
+	}
+	if claim.ContractAddress != "" && !strings.EqualFold(vault, claim.ContractAddress) {
+		return false, fmt.Errorf("claim contract %s disagrees with settlement vault %s", claim.ContractAddress, vault)
 	}
 	key, err := claimKey(claim.NoId, claim.Coldkey)
 	if err != nil {
@@ -1059,6 +1069,9 @@ func runClaimDaemonWithStore(ctx context.Context, cfg *ClaimDaemonConfig, store 
 		if !retainedSigned {
 			return credentialErr
 		}
+		// The daemon can still drive retained signed work without the
+		// credentials, but the operator should see why new work is paused.
+		fmt.Fprintf(os.Stderr, "claim-daemon: %v; driving retained signed work only\n", credentialErr)
 	}
 	if initialDelay > 0 {
 		select {

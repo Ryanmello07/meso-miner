@@ -323,3 +323,27 @@ func TestClaimDaemonGetProductionCallSitesRecoverWithoutSubmission(t *testing.T)
 		}
 	}
 }
+
+// The status classifier reads only the producer's "NNN reason: body" line.
+// A body whose own first line starts with digits and a colon must not be
+// mistaken for a status, and only genuine retryable statuses pass.
+func TestClaimReadHttpStatusParsesOnlyTheProducersLine(t *testing.T) {
+	if status, ok := claimReadHttpStatus(errors.New("503 Service Unavailable: overloaded")); !ok || status != 503 {
+		t.Fatalf("producer line: status = %d, ok = %v", status, ok)
+	}
+	if _, ok := claimReadHttpStatus(errors.New("500: colon form is body text, not a status line")); ok {
+		t.Fatal("colon form was parsed as a status")
+	}
+	if _, ok := claimReadHttpStatus(errors.New("oops")); ok {
+		t.Fatal("short text was parsed as a status")
+	}
+	if !retryableClaimApiRead(errors.New("503 Service Unavailable: overloaded")) {
+		t.Fatal("503 producer line should be retryable")
+	}
+	if retryableClaimApiRead(errors.New("500: colon form is body text, not a status line")) {
+		t.Fatal("colon form must not be retryable through the status path")
+	}
+	if retryableClaimApiRead(errors.New("400 Bad Request: fixed")) {
+		t.Fatal("400 producer line must not be retryable")
+	}
+}

@@ -161,8 +161,13 @@ type SnPoolClaimResult struct {
 	Proof           [][]byte          `json:"proof"`
 	PayoutRoot      []byte            `json:"payout_root"`
 	ContractAddress string            `json:"contract_address"`
-	ChainId         uint64            `json:"chain_id"`
-	ClaimOpenBlock  uint64            `json:"claim_open_block"`
+	// SettlementVaultAddress is the vault the claim transaction must target.
+	// The server fills contract_address from the hot-epoch mirror as a
+	// fallback when this is empty; a present-but-different pair is refused
+	// before any transaction is built.
+	SettlementVaultAddress string `json:"settlement_vault_address,omitempty"`
+	ChainId                uint64 `json:"chain_id"`
+	ClaimOpenBlock         uint64 `json:"claim_open_block"`
 }
 
 // SnPoolClaim fetches the caller network's pool claim for an epoch via the
