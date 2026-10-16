@@ -110,7 +110,10 @@ func signedClaimObservation(tx *types.Transaction, intent *onchain.ClaimIntent, 
 // The finalized entitlement and leaf were read at one closed block witness.
 // A missing/invalid advertised Merkle proof remains explicitly unknown.
 func finalizedClaimObservation(claim *connect.SnPoolClaimResult, entitlement stabi.STSettlementVaultEntitlement, block onchain.EVMBlockIdentity, claimed bool) *protocol.ClaimObservation {
-	vault := claim.ContractAddress
+	vault := claim.SettlementVaultAddress
+	if vault == "" {
+		vault = claim.ContractAddress
+	}
 	observation := &protocol.ClaimObservation{Schema: protocol.ClaimObservationSchema, EvidenceKind: "finalized-leaf", Epoch: int64(claim.Epoch), ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), Pool: protocol.ClaimProgressPool{ChainId: claim.ChainId, Vault: strings.ToLower(vault), NoId: new(big.Int).SetBytes(claim.NoId).String(), Coldkey: common.BytesToHash(claim.Coldkey).Hex()}, ShareBps: uint64(claim.ShareBps), ProofStatus: "unknown", PayoutRoot: common.Hash(entitlement.PayoutRoot).Hex(), ArtifactHash: common.Hash(entitlement.ArtifactHash).Hex(), LeafClaimed: &claimed, BlockNumber: block.Number, BlockHash: strings.ToLower(block.Hash.Hex()), PaymentStatus: "unknown"}
 	if len(claim.Proof) <= 64 {
 		if _, _, err := claimCalldata(claim); err == nil {
