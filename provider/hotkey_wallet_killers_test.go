@@ -69,6 +69,7 @@ func captureOutput(t *testing.T, fn func()) string {
 // 1. SECRET HYGIENE: captures stdout/stderr/tlog output while loading seeds
 // and running hotkey commands against mock operator, asserting no hex/0x-hex/base64 seed leaks.
 func TestHotkeySecretHygiene_NoSeedLeakedInOutput(t *testing.T) {
+	requireSeedFileCustody(t)
 	stateDir := hotkeyWalletTestStateDir(t)
 
 	op := newFakeOperator(t)
@@ -183,6 +184,7 @@ func TestHotkeyWalletSet_InvalidOrWrongKeySignatureRefused(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			requireSeedFileCustody(t)
 			stateDir := hotkeyWalletTestStateDir(t)
 
 			op := newFakeOperator(t)
@@ -203,10 +205,22 @@ func TestHotkeyWalletSet_InvalidOrWrongKeySignatureRefused(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			coldkeyRaw, _ := crv4.LoadSeedFile(coldkeySeed)
-			coldkeyKp, _ := crv4.KeypairFromSeed(coldkeyRaw)
-			wrongRaw, _ := crv4.LoadSeedFile(wrongSeed)
-			wrongKp, _ := crv4.KeypairFromSeed(wrongRaw)
+			coldkeyRaw, err := crv4.LoadSeedFile(coldkeySeed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			coldkeyKp, err := crv4.KeypairFromSeed(coldkeyRaw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wrongRaw, err := crv4.LoadSeedFile(wrongSeed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wrongKp, err := crv4.KeypairFromSeed(wrongRaw)
+			if err != nil {
+				t.Fatal(err)
+			}
 
 			ctx := context.Background()
 			var challengeOut bytes.Buffer
@@ -287,6 +301,7 @@ func TestHotkeyWalletSet_InvalidOrWrongKeySignatureRefused(t *testing.T) {
 // 3. PENDING STATEMENT checks in hotkeyWalletSet (~558-565): message mismatch, coldkey mismatch,
 // hotkey mismatch, and epoch mismatch must each be refused.
 func TestHotkeyWalletSet_PendingStatementMismatchesRefused(t *testing.T) {
+	requireSeedFileCustody(t)
 	stateDir := hotkeyWalletTestStateDir(t)
 
 	op := newFakeOperator(t)
@@ -304,10 +319,22 @@ func TestHotkeyWalletSet_PendingStatementMismatchesRefused(t *testing.T) {
 	coldkey2Seed := filepath.Join(stateDir, "coldkey2.seed")
 	_ = os.WriteFile(coldkey2Seed, []byte(strings.Repeat("78", 32)), 0600)
 
-	coldkey1Raw, _ := crv4.LoadSeedFile(coldkey1Seed)
-	coldkey1Kp, _ := crv4.KeypairFromSeed(coldkey1Raw)
-	coldkey2Raw, _ := crv4.LoadSeedFile(coldkey2Seed)
-	coldkey2Kp, _ := crv4.KeypairFromSeed(coldkey2Raw)
+	coldkey1Raw, err := crv4.LoadSeedFile(coldkey1Seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldkey1Kp, err := crv4.KeypairFromSeed(coldkey1Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldkey2Raw, err := crv4.LoadSeedFile(coldkey2Seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldkey2Kp, err := crv4.KeypairFromSeed(coldkey2Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	ctx := context.Background()
 
@@ -411,6 +438,7 @@ func TestHotkeyWalletSet_PendingStatementMismatchesRefused(t *testing.T) {
 
 // 4. hotkeyWalletSubmit failure (~589): when operator rejects consent, set must return an error.
 func TestHotkeyWalletSet_OperatorSubmitFailure(t *testing.T) {
+	requireSeedFileCustody(t)
 	stateDir := hotkeyWalletTestStateDir(t)
 
 	op := newFakeOperator(t)
@@ -423,8 +451,14 @@ func TestHotkeyWalletSet_OperatorSubmitFailure(t *testing.T) {
 	coldkeySeed := filepath.Join(stateDir, "coldkey.seed")
 	_ = os.WriteFile(coldkeySeed, []byte(strings.Repeat("34", 32)), 0600)
 
-	coldkeyRaw, _ := crv4.LoadSeedFile(coldkeySeed)
-	coldkeyKp, _ := crv4.KeypairFromSeed(coldkeyRaw)
+	coldkeyRaw, err := crv4.LoadSeedFile(coldkeySeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldkeyKp, err := crv4.KeypairFromSeed(coldkeyRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	ctx := context.Background()
 	var out bytes.Buffer
@@ -945,6 +979,7 @@ func TestHotkeyWallet_OperatorAnswerHardening(t *testing.T) {
 // runHotkeyWalletUpkeepStep with an empty chain does nothing (~700);
 // hotkeyWalletSet without seed file or message refused (~488).
 func TestHotkeyWalletNextStatement_FromEpochClamping(t *testing.T) {
+	requireSeedFileCustody(t)
 	stateDir := t.TempDir()
 	store := hotkeyWalletStore(stateDir)
 
@@ -958,9 +993,18 @@ func TestHotkeyWalletNextStatement_FromEpochClamping(t *testing.T) {
 	coldkeySeed := filepath.Join(stateDir, "coldkey.seed")
 	_ = os.WriteFile(coldkeySeed, []byte(strings.Repeat("34", 32)), 0600)
 
-	hotkeyKp, _ := loadOperatorHotkey(hotkeySeed)
-	coldkeyRaw, _ := crv4.LoadSeedFile(coldkeySeed)
-	coldkeyKp, _ := crv4.KeypairFromSeed(coldkeyRaw)
+	hotkeyKp, err := loadOperatorHotkey(hotkeySeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldkeyRaw, err := crv4.LoadSeedFile(coldkeySeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldkeyKp, err := crv4.KeypairFromSeed(coldkeyRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Create and append a chain entry with FromEpoch = 200 (well ahead of current epoch 100)
 	stmt, err := hotkeywallet.NextStatement(nil, fakeTestDomain.HotkeySubnet(), hotkeyKp.PublicKey(), coldkeyKp.PublicKey(), 200, 250, time.Now())
@@ -996,6 +1040,7 @@ func TestHotkeyWalletNextStatement_FromEpochClamping(t *testing.T) {
 }
 
 func TestEnsureOperatorHotkeyWallet_AdvancePastExistingEntry(t *testing.T) {
+	requireSeedFileCustody(t)
 	stateDir := t.TempDir()
 	store := hotkeyWalletStore(stateDir)
 
@@ -1009,9 +1054,18 @@ func TestEnsureOperatorHotkeyWallet_AdvancePastExistingEntry(t *testing.T) {
 	coldkeySeed := filepath.Join(stateDir, "coldkey.seed")
 	_ = os.WriteFile(coldkeySeed, []byte(strings.Repeat("34", 32)), 0600)
 
-	hotkeyKp, _ := loadOperatorHotkey(hotkeySeed)
-	coldkeyRaw, _ := crv4.LoadSeedFile(coldkeySeed)
-	coldkeyKp, _ := crv4.KeypairFromSeed(coldkeyRaw)
+	hotkeyKp, err := loadOperatorHotkey(hotkeySeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldkeyRaw, err := crv4.LoadSeedFile(coldkeySeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldkeyKp, err := crv4.KeypairFromSeed(coldkeyRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Chain has 1 entry
 	stmt, err := hotkeywallet.NextStatement(nil, fakeTestDomain.HotkeySubnet(), hotkeyKp.PublicKey(), coldkeyKp.PublicKey(), 1, 100, time.Now())
@@ -1057,12 +1111,16 @@ func TestEnsureOperatorHotkeyWallet_AdvancePastExistingEntry(t *testing.T) {
 }
 
 func TestRunHotkeyWalletUpkeepStep_EmptyChain(t *testing.T) {
+	requireSeedFileCustody(t)
 	stateDir := hotkeyWalletTestStateDir(t)
 
 	op := newFakeOperator(t)
 	hotkeySeed := filepath.Join(stateDir, "hotkey.seed")
 	_ = os.WriteFile(hotkeySeed, []byte(strings.Repeat("12", 32)), 0600)
-	hotkeyKp, _ := loadOperatorHotkey(hotkeySeed)
+	hotkeyKp, err := loadOperatorHotkey(hotkeySeed)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Chain is empty, and stateDir does not even have a JWT
 	var lastGen uint64
@@ -1084,6 +1142,7 @@ func TestRunHotkeyWalletUpkeepStep_EmptyChain(t *testing.T) {
 }
 
 func TestHotkeyWalletSet_MissingSignatureSource(t *testing.T) {
+	requireSeedFileCustody(t)
 	stateDir := hotkeyWalletTestStateDir(t)
 
 	hotkeySeed := filepath.Join(stateDir, "hotkey.seed")
@@ -1106,6 +1165,7 @@ func TestHotkeyWalletSet_MissingSignatureSource(t *testing.T) {
 // A delegation that adopts the head but whose window has passed earns nothing.
 // The upkeep must renew it instead of treating "adopts the head" as done.
 func TestEnsureOperatorHotkeyWallet_RenewsAnExpiredAdoptedDelegation(t *testing.T) {
+	requireSeedFileCustody(t)
 	for _, tc := range []struct {
 		name         string
 		throughEpoch uint64
@@ -1126,9 +1186,18 @@ func TestEnsureOperatorHotkeyWallet_RenewsAnExpiredAdoptedDelegation(t *testing.
 			_ = os.WriteFile(hotkeySeed, []byte(strings.Repeat("12", 32)), 0600)
 			coldkeySeed := filepath.Join(stateDir, "coldkey.seed")
 			_ = os.WriteFile(coldkeySeed, []byte(strings.Repeat("34", 32)), 0600)
-			hotkeyKp, _ := loadOperatorHotkey(hotkeySeed)
-			coldkeyRaw, _ := crv4.LoadSeedFile(coldkeySeed)
-			coldkeyKp, _ := crv4.KeypairFromSeed(coldkeyRaw)
+			hotkeyKp, err := loadOperatorHotkey(hotkeySeed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			coldkeyRaw, err := crv4.LoadSeedFile(coldkeySeed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			coldkeyKp, err := crv4.KeypairFromSeed(coldkeyRaw)
+			if err != nil {
+				t.Fatal(err)
+			}
 
 			stmt, err := hotkeywallet.NextStatement(nil, fakeTestDomain.HotkeySubnet(), hotkeyKp.PublicKey(), coldkeyKp.PublicKey(), 1, 100, time.Now())
 			if err != nil {

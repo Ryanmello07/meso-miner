@@ -346,6 +346,7 @@ func TestHotkeyWallet_E1_FakeOperator(t *testing.T) {
 
 // E2: wallet hotkey challenge then set with a test coldkey seed: chain stored, delegation from epoch = epoch+2.
 func TestHotkeyWallet_E2_ChallengeAndSet(t *testing.T) {
+	requireSeedFileCustody(t)
 	stateDir := hotkeyWalletTestStateDir(t)
 
 	op := newFakeOperator(t)
@@ -426,6 +427,7 @@ func TestHotkeyWallet_E2_ChallengeAndSet(t *testing.T) {
 
 // E3: Upkeep when already adopted: zero delegation POSTs.
 func TestHotkeyWallet_E3_UpkeepAlreadyAdopted(t *testing.T) {
+	requireSeedFileCustody(t)
 	stateDir := hotkeyWalletTestStateDir(t)
 
 	op := newFakeOperator(t)
@@ -446,8 +448,14 @@ func TestHotkeyWallet_E3_UpkeepAlreadyAdopted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	coldkeyRaw, _ := crv4.LoadSeedFile(coldkeySeed)
-	coldkeyKp, _ := crv4.KeypairFromSeed(coldkeyRaw)
+	coldkeyRaw, err := crv4.LoadSeedFile(coldkeySeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldkeyKp, err := crv4.KeypairFromSeed(coldkeyRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Initial challenge and set
 	var out bytes.Buffer
@@ -495,6 +503,7 @@ func TestHotkeyWallet_E3_UpkeepAlreadyAdopted(t *testing.T) {
 
 // E4: Upkeep after operator epoch advance with a non-adopting entry: from epoch strictly greater than prior.
 func TestHotkeyWallet_E4_UpkeepEpochAdvance(t *testing.T) {
+	requireSeedFileCustody(t)
 	stateDir := hotkeyWalletTestStateDir(t)
 
 	op := newFakeOperator(t)
@@ -511,9 +520,18 @@ func TestHotkeyWallet_E4_UpkeepEpochAdvance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hotkeyKp, _ := loadOperatorHotkey(hotkeySeed)
-	coldkeyRaw, _ := crv4.LoadSeedFile(coldkeySeed)
-	coldkeyKp, _ := crv4.KeypairFromSeed(coldkeyRaw)
+	hotkeyKp, err := loadOperatorHotkey(hotkeySeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldkeyRaw, err := crv4.LoadSeedFile(coldkeySeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldkeyKp, err := crv4.KeypairFromSeed(coldkeyRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var out bytes.Buffer
 	_ = hotkeyWalletChallenge(context.Background(), docopt.Opts{
@@ -556,6 +574,7 @@ func TestHotkeyWallet_E4_UpkeepEpochAdvance(t *testing.T) {
 
 // E5: Upkeep on 500 and on missing jwt: logs one line, returns, next tick retries.
 func TestHotkeyWallet_E5_UpkeepErrorAndMissingJwt(t *testing.T) {
+	requireSeedFileCustody(t)
 	stateDir := hotkeyWalletTestStateDir(t)
 
 	op := newFakeOperator(t)
@@ -573,9 +592,18 @@ func TestHotkeyWallet_E5_UpkeepErrorAndMissingJwt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	hotkeyKp, _ := loadOperatorHotkey(hotkeySeed)
-	coldkeyRaw, _ := crv4.LoadSeedFile(coldkeySeed)
-	coldkeyKp, _ := crv4.KeypairFromSeed(coldkeyRaw)
+	hotkeyKp, err := loadOperatorHotkey(hotkeySeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldkeyRaw, err := crv4.LoadSeedFile(coldkeySeed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coldkeyKp, err := crv4.KeypairFromSeed(coldkeyRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var out bytes.Buffer
 	_ = hotkeyWalletChallenge(context.Background(), docopt.Opts{
@@ -595,7 +623,6 @@ func TestHotkeyWallet_E5_UpkeepErrorAndMissingJwt(t *testing.T) {
 	}, &out)
 
 	var lastGen uint64
-	var err error
 
 	// Case 1: operator returns 500
 	op.mu.Lock()
@@ -636,6 +663,7 @@ func TestHotkeyWallet_E5_UpkeepErrorAndMissingJwt(t *testing.T) {
 // cases).
 // E8: Secret hygiene tests from D: 0644 seed refused, error paths never print hex seed, JWTs, signatures.
 func TestHotkeySecretHygiene(t *testing.T) {
+	requireSeedFileCustody(t)
 	tempDir := hotkeyWalletTestStateDir(t)
 
 	// 1. Seed file with 0644 permissions must be refused
@@ -690,6 +718,7 @@ func TestHotkeySecretHygiene(t *testing.T) {
 // seed file is given, and a bad seed file must never stop provide or leak
 // the file's contents.
 func TestHotkeyWallet_StartUpkeepFromProvide(t *testing.T) {
+	requireSeedFileCustody(t)
 	var started atomic.Int32
 	run := func(context.Context, string, *crv4.Keypair) { started.Add(1) }
 
@@ -746,6 +775,7 @@ func TestHotkeyWalletUpkeepStepBudgetExceedsPerRequestTimeout(t *testing.T) {
 // again with the coldkey seed must resubmit that head, not sign a new
 // generation on every retry until the lineage cap.
 func TestHotkeyWalletSetRetryReusesTheStoredHead(t *testing.T) {
+	requireSeedFileCustody(t)
 	stateDir := hotkeyWalletTestStateDir(t)
 
 	op := newFakeOperator(t)
