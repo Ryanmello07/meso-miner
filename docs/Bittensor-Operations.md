@@ -296,7 +296,7 @@ Most Bittensor failures are a missing credential or a protection doing its job. 
 | `explicit durable-volume declaration and hash are required` | Pass both `--durable-volumes` and `--durable-volumes-sha256`; fleet mainnet writes and the claim daemons require a matching declaration. |
 | `fleet status does not match the canonical manifest` | The chain state differs from the manifest (a missing publish or binding, or a newer generation). Re-check, re-run the write, then status again. |
 | `N of M authenticated operators do not adopt the head yet; set it again with the same --message and --signature` | The submission failed at the operator it resolved. Resend the identical message and signature to retry; the resubmission also renews a stale delegation window. |
-| `not effective: the window ends at epoch A and the operator is at epoch B` | The delegation window ended. Set the same message and signature again to renew it. |
+| `not effective: the window ends at epoch A and the operator is at epoch B; the next provide upkeep renews it` | The delegation window ended. A running provider renews it on its hourly upkeep; setting the same message and signature again also renews it. |
 | `private seed file custody is unsupported on this platform` | Seed-bearing commands (`wallet hotkey`, the `fleet` writes) run on Linux or macOS only. |
 | A state directory is refused (not private, not owned, not a regular file, or already owned) | Fix permissions and ownership; run one daemon per state directory. |
 | `wallet consent: --wallet-from-epoch=...` refusals | The interval would leave epochs unpaid. Use the default window, or set `URNETWORK_WALLET_ALLOW_ODD_INTERVAL=1` to override. |

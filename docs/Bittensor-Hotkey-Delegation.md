@@ -81,7 +81,7 @@ Every consent window ends 65535 epochs after its start. If you pass the epoch fl
 Then it prints the delegation the operator holds:
 
 - `adopts the head, generation N, from epoch A through B` when the operator's delegation pins the chain head, with the earning window shown.
-- Caveats after that line: `not effective: the window ends at epoch A and the operator is at epoch B` when the window ends before the operator's current epoch plus 2; a signed network wallet consent on the operator (with its coldkey) outranks the delegation, so that coldkey is paid; and a per-provider signed consent outranks both for that provider (the command notes it is not listed).
+- Caveats after that line: `not effective: the window ends at epoch A and the operator is at epoch B; the next provide upkeep renews it` when the window ends before the operator's current epoch plus 2 (a running provider renews it on its hourly upkeep, and setting the same message and signature again renews it too); a signed network wallet consent on the operator (with its coldkey) outranks the delegation, so that coldkey is paid; and a per-provider signed consent outranks both for that provider (the command notes it is not listed).
 - `delegates to hotkey X at generation N, not the head` when the operator holds a delegation to another head or another hotkey.
 - `no hotkey delegation` when the operator holds none, and `unavailable: <error>` when it cannot be asked.
 
@@ -99,7 +99,7 @@ By design the seed-bearing commands do not run on Windows: the seed custody supp
 
 ## What to check after
 
-Run `provider wallet hotkey status` and read the operator line: the operator should `adopts the head` with an earning window that extends past its current epoch. A window flagged `not effective` ends before the operator's epoch plus 2; set the same message and signature again to renew it.
+Run `provider wallet hotkey status` and read the operator line: the operator should `adopts the head` with an earning window that extends past its current epoch. A window flagged `not effective` ends before the operator's epoch plus 2; the next provide upkeep renews it, and setting the same message and signature again renews it too.
 
 When a set exits 1 over operator failures, its output names them; run the same set again. The retry stores the chain and renews a delegation where the head is missing or its window no longer clears the two-epoch rule; an operator that already adopts the head reports `chain stored; the delegation already adopts generation N`.
 
