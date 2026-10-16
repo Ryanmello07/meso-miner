@@ -3,6 +3,7 @@ package connect
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -58,6 +59,11 @@ type dmcaRecentReclaim struct {
 }
 
 var (
+	// dmcaRecentReclaimMu guards the ring: the scan goroutine writes it while
+	// flow creation on any shard reads it, and the shard locks do not cover
+	// both. Writes are one per reclaimed flow and reads are one per new flow,
+	// so a plain RWMutex is cheap here and keeps the ring race free.
+	dmcaRecentReclaimMu  sync.RWMutex
 	dmcaRecentReclaims   [dmcaRecentReclaimSize]dmcaRecentReclaim
 	dmcaRecentReclaimSeq atomic.Uint64
 )
@@ -96,12 +102,15 @@ func dmcaPathHash(key Ip6Path) uint64 {
 
 // noteDmcaRecentReclaim records one idle reclaim in the bounded ring.
 func noteDmcaRecentReclaim(key Ip6Path, now time.Time) {
-	seq := dmcaRecentReclaimSeq.Add(1)
-	dmcaRecentReclaims[(seq-1)%dmcaRecentReclaimSize] = dmcaRecentReclaim{
+	entry := dmcaRecentReclaim{
 		hash:       dmcaPathHash(key),
 		atUnixNano: now.UnixNano(),
 		proto:      uint8(dmcaProtocolBucket(key.Protocol)),
 	}
+	seq := dmcaRecentReclaimSeq.Add(1)
+	dmcaRecentReclaimMu.Lock()
+	dmcaRecentReclaims[(seq-1)%dmcaRecentReclaimSize] = entry
+	dmcaRecentReclaimMu.Unlock()
 }
 
 // dmcaRecentlyReclaimed reports whether the path was idle-reclaimed inside
@@ -110,6 +119,8 @@ func noteDmcaRecentReclaim(key Ip6Path, now time.Time) {
 func dmcaRecentlyReclaimed(key Ip6Path, now time.Time) (bool, int) {
 	hash := dmcaPathHash(key)
 	cutoff := now.Add(-dmcaRecentReclaimWindow).UnixNano()
+	dmcaRecentReclaimMu.RLock()
+	defer dmcaRecentReclaimMu.RUnlock()
 	for i := range dmcaRecentReclaims {
 		entry := dmcaRecentReclaims[i]
 		if entry.hash == hash && cutoff <= entry.atUnixNano {

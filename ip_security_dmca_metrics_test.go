@@ -175,3 +175,20 @@ func TestDmcaMetricsConcurrent(t *testing.T) {
 			gauge, evicted, reclaimed, gauge+evicted+reclaimed, created)
 	}
 }
+
+// the scan goroutine writes the ring while flow creation reads it; under -race
+// this fails if the ring is touched without its lock.
+func TestDmcaRecentReclaimRingIsRaceFree(t *testing.T) {
+	now := time.Now()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 2000; i += 1 {
+			noteDmcaRecentReclaim(dmcaIdleTestPath(20000+i).ToIp6Path(), now)
+		}
+	}()
+	for i := 0; i < 2000; i += 1 {
+		dmcaRecentlyReclaimed(dmcaIdleTestPath(20000+i).ToIp6Path(), now)
+	}
+	<-done
+}
