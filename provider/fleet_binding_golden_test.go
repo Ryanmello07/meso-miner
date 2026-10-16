@@ -110,6 +110,7 @@ func fleetGoldenFixture(t *testing.T) (*protocol.FleetManifest, protocol.FleetBi
 // artifacts (the commitment info that lands on Subtensor and the exact
 // commitments.set_commitment / SubtensorModule.register_limit calls).
 func TestFleetBindingGoldenVectors(t *testing.T) {
+	requireSeedFileCustody(t)
 	manifest, binding, clientSignature, hotkeySignature, clientID, clientPrivate := fleetGoldenFixture(t)
 
 	canonical, err := manifest.Canonical()
@@ -262,6 +263,7 @@ func TestFleetBindingGoldenVectors(t *testing.T) {
 // TestFleetRevokeGoldenVector pins the revoke digest and the complete revoke
 // calldata (the Ed25519 client signature over the digest is deterministic).
 func TestFleetRevokeGoldenVector(t *testing.T) {
+	requireSeedFileCustody(t)
 	manifest, _, _, _, clientID, clientPrivate := fleetGoldenFixture(t)
 	revoke := protocol.FleetRevoke{ChainID: manifest.ChainID, Netuid: manifest.Netuid, Coordinator: manifest.Coordinator, ClientID: clientID, Generation: manifest.Generation, EffectiveEpoch: 1500}
 	digest, err := revoke.Digest()
