@@ -249,14 +249,15 @@ provider fleet revoke --manifest=<path> --client_id=<hex> --client_seed_file=<pa
 ```
 
 - `provider fleet manifest` prints the manifest's canonical form, its commitment sha256 and its member count.
-- `provider fleet register` registers the manifest hotkey on the manifest netuid (the head-tier fleet's own burned registration), signed by the fleet coldkey through `--substrate` (repeatable, tried in order). It is a dry run unless `--apply` is given: without it, the command reads the live burn economics and quotes the signed extrinsic. `--burn_limit_rao` caps the registration burn; `--fee_limit_rao` caps the native transaction fee. Every broadcast is journaled under the provider state.
-- `provider fleet publish` writes the fleet commitment (the manifest commitment hash) to the chain through `--substrate` and verifies the write is finalized.
-- `provider fleet bind` builds the manifest binding and submits it through the EVM relayer key (`--relayer_key_file`, which receives no binding ownership) via `--rpc`; `--dry-run` stops at the preflight and sends nothing.
+- `provider fleet register` registers the manifest hotkey on the manifest netuid (the head-tier fleet's own burned registration), signed by the fleet coldkey through `--substrate` (repeatable, tried in order). It is a plan unless `--apply` is given: without it, the command reads the live burn economics and the coldkey balance, refuses a burn above the cap, builds and signs the `register_limit` extrinsic, quotes its fee and stops, and broadcasts nothing (`--dry-run` selects the same no-broadcast plan). With `--apply` it submits the write and waits for canonical finality. `--burn_limit_rao` caps the registration burn (default: the burn observed at the finalized read); `--fee_limit_rao` caps the native transaction fee (default 10,000,000 rao, sized above the observed registration fee). Every broadcast is journaled under the provider state, and replaying a retained native write requires `--apply`.
+- `provider fleet publish` writes the fleet commitment (the manifest commitment hash) to the chain through `--substrate` and verifies the write is finalized. It has no plan flag: publish always writes.
+- `provider fleet bind` builds the manifest binding and submits it through the EVM relayer key (`--relayer_key_file`, which receives no binding ownership) via `--rpc`. Without `--dry-run` the transaction is sent and waited on; `--dry-run` stops at the preflight (chain id check, call simulation, gas estimate) and sends nothing.
 - `provider fleet sign` builds the same binding and signs it locally: it prints the payload the Top 200 submission page takes, plus the hotkey signature when `--hotkey_seed_file` is given. It reads only local files, uses no RPC and no relayer key, and never prints or writes a seed.
 - `provider fleet status` reads the on-chain state for `--client_id` (native commitment, coordinator record, epochs, UID) and checks it against the canonical manifest.
-- `provider fleet revoke` schedules the binding's revocation at `--effective_epoch` (a future epoch), signed by the client key and submitted through `--relayer_key_file`.
+- `provider fleet revoke` schedules the binding's revocation at `--effective_epoch` (a future epoch), signed by the client key and submitted through `--relayer_key_file`; without `--dry-run` it is sent, and `--dry-run` stops at the preflight and sends nothing.
 - `--mainnet-runtime-authority` with `--mainnet-runtime-authority-sha256` pins the independently reviewed mainnet fleet runtime authority document by its approved SHA-256 (64 lowercase hex digits), so mainnet writes only run against a runtime matching the reviewed pin; `--provisional-runtime-compatibility` with `--runtime-observation-dir` is the explicit testnet consumed-runtime profile; `--durable-volumes` with `--durable-volumes-sha256` declares the external storage and its reviewed digest (fleet writes require the owner-local schema).
 - Seed files (`--hotkey_seed_file`, `--coldkey_seed_file`, `--client_seed_file`) are private files the caller owns; the CLI never creates them and never prints a seed. Keep the fleet coldkey seed off mining hosts.
+- Broadcast defaults in this group: `register` plans (signs and quotes, no broadcast) unless `--apply`; `bind` and `revoke` send unless `--dry-run`; `publish` always writes and verifies finality; `manifest`, `sign` and `status` never write to any chain.
 
 ## 7. Hotkey Wallet (`provider wallet hotkey`)
 
@@ -275,7 +276,7 @@ provider wallet hotkey status [--hotkey_seed_file=<path>] [--operators-url=<url>
 
 - `provider wallet hotkey challenge` builds the next global consent statement and prints the exact message for an offline coldkey to sign; the statement is kept pending in `hotkey-wallet/pending.json` under the provider state directory.
 - `provider wallet hotkey set` takes the coldkey signature with `--coldkey_seed_file`, or verifies `--message` and `--signature` against the pending statement, then adds the hotkey signature, stores the chain, and submits the chain and the delegation to every authenticated operator. A failing operator never stops the others. Setting the same `--message`/`--signature` again resends the chain.
-- `provider wallet hotkey status` reports the wallet's current state for the hotkey.
+- `provider wallet hotkey status` prints the chain (each generation and the head) and the pending statement while one is waiting, then the delegation each authenticated operator holds: whether it adopts the head, the earning window, and any caveat (a window that ends before the operator's epoch; an operator-side signed network consent that outranks the delegation).
 - `--wallet-from-epoch` and `--wallet-through-epoch` select the earning-epoch window the consent applies to (at most 65536 epochs apart); `--operators-url` selects the operator list (see section 9).
 
 ## 8. Claim Daemons (`provider claim-daemon`, `provider claim-daemon-v2`)
@@ -290,6 +291,10 @@ provider claim-daemon --config=<path>
 ```
 `provider claim-daemon` runs the v1 claim loop: it polls on the config's cadence, discovers the claimable epochs for the configured credential, verifies the payout root on chain, and submits the claim (already signed queue entries can reconcile without a credential). Progress is journaled under the config's state directory; already signed entries survive a restart.
 
+The v1 config is one strict YAML document: required `schema_version: 1` and `release: "1.0"`, `api_url`, `rpc` (list), `key_file` (the relayer key, which must exist), `state_dir`, and `poll_seconds` (default 30; 5 to 3600); optional `legacy_coldkey`, `jwt_file` (a private regular file when set), `lookback_epochs` (default 2, at most 256) and `progress_pool`. Unknown keys are refused, and relative `key_file`, `state_dir` and `jwt_file` paths are anchored at the config file.
+
+The daemon never mints or refreshes a credential. It reads the retained claim credential: `jwt_file` when the config sets one, otherwise the retained provider token in the provider state directory (`.provider.jwt`, or `jwt` in the explicit `--legacy-coldkey` network mode). While that credential is missing, empty or no longer accepted, the daemon prints one line to stderr (`claim-daemon: <reason>; driving retained signed work only`) and stops taking new work, while still driving entries whose exact bytes were already signed; when there is no retained signed entry it exits 1 with the credential error. A valid credential that appears later resumes new work without a restart.
+
 ### v2 daemon
 ```text
 provider claim-daemon-v2 --config=<path> [--v1-config=<path>] [--threshold-rao=<rao>] [--claim-now]
@@ -302,6 +307,8 @@ provider claim-daemon-v2 --config=<path> [--v1-config=<path>] [--threshold-rao=<
 - `--threshold-rao=<rao>` claims an account once its claimable balance reaches this many rao. The default is 1,900,000,000 rao (1.9 alpha), and it is never below the 15,200,000 rao (0.0152 alpha) transfer floor.
 - `--claim-now` claims every account with anything claimable, once, at start.
 - `--durable-volumes` with `--durable-volumes-sha256` declares the external storage and its reviewed digest; the daemons require the daemon-volume schema.
+- The v2 config is one strict YAML document with `schema_version: 2`, `api_url`, `rpc` (list), `chain_id`, `vault`, `coldkeys` (list), `key_file`, `state_dir` and `poll_seconds` (default 30; 5 to 3600); `batcher` is optional. The vault is pinned in the config and never taken from the operator's endpoint, and relative `key_file` and `state_dir` paths are anchored at the config file. The annotated example ships at `provider/testdata/claim-daemon-v2.example.yml`.
+- The v2 loop needs no operator credential of its own: for each configured coldkey it reads the finalized accounts from `api_url` and checks each account's Merkle proof against the vault root at a finalized block before treating it as claimable. With `--v1-config` the v1 daemon beside it keeps the v1 credential model above.
 
 ## 9. Operator Fan-Out (`provider operators`, `provider provide --all-operators`)
 
@@ -315,7 +322,9 @@ provider provide --all-operators [--operators-url=<url>] [--operators-refresh=<d
 ```
 
 - `provider operators` prints each listed operator with its credential state (`jwt present` or `awaiting auth`), and the list's source (fetched or cached) and digest.
-- `provider provide --all-operators` runs one provider per operator, each in its own state directory (`operators/<domain>` under the provider state directory), and follows the list as it changes: the list is fetched from `--operators-url` (https, or http only for loopback; omitted, the built-in default list), the last good copy is kept as `operators.yml` in the provider state directory, and `--operators-refresh` sets how often the list is refetched (a Go duration of at least 1m; default 1h). Each child gets its own client identity under its operator directory.
+- `provider provide --all-operators` runs one provider per operator, each with its operator directory as home and its provider state under `.urnetwork` inside it, and follows the list as it changes: the list is fetched from `--operators-url` (https, or http only for loopback; omitted, the built-in default list), the last good copy is kept as `operators.yml` in the provider state directory, and `--operators-refresh` sets how often the list is refetched (a Go duration of at least 1m; default 1h). Each child gets its own client identity under its operator directory.
+- The layout under the provider state directory is the contract: `operators/<domain>` is the child's home (an inherited `HOME` is dropped), the child's state is the `.urnetwork` inside it, and the network token the supervisor watches is `operators/<domain>/.urnetwork/jwt`. An operator without that token is reported as `awaiting auth`, gets no child, and is rechecked every 5 minutes, so it starts as soon as its token is written.
+- `--api_url` is refused with `--all-operators`: every operator's urls come from the operator list.
 
 ---
 
@@ -324,3 +333,9 @@ provider provide --all-operators [--operators-url=<url>] [--operators-refresh=<d
 1. **Never pass tokens via CLI flags**: Avoid passing tokens in process flags (`-jwt=...` or `-pass=...`) where they are visible in `ps aux` or `/proc/<pid>/cmdline`.
 2. **File Permissions**: Ensure `~/.urnetwork/jwt` and private keys are set to `0600` permissions.
 3. **Container Isolation**: Ensure each container mount uses a dedicated Docker volume (e.g. `ur_config_1`, `ur_config_2`) to prevent state corruption.
+
+---
+
+## 11. Third-party licenses
+
+Provider builds from this repository statically link the vendored substrate RPC client, and the repository keeps one inventory for everything third-party: `THIRD_PARTY_LICENSES.md` lists each component, its license, its vendored path and its license files. The note worth repeating here is the LGPL one: inside `third_party/go-substrate-rpc-client`, the `gethrpc` package is LGPL-3.0 (its license files are kept in place there), while the rest of that tree is Apache-2.0, and the complete source of the linked version is in this repository at the vendored path.
