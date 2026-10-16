@@ -248,3 +248,20 @@ func TestFleetMainnetAuthorityRejectsClosingCanonicalChange(t *testing.T) {
 		}
 	}
 }
+
+// The register path with neither --apply nor --dry-run plans only: it quotes
+// the live economics through one synthetic dry run and must not broadcast.
+func TestFleetMainnetRegisterWithoutApplySubmitsNothing(t *testing.T) {
+	fixture := newFleetMainnetTestFixture(t)
+	fixture.durable.requireRealDurableMount(t)
+	delete(fixture.opts, "--dry-run")
+	if _, ok := fixture.opts["--apply"]; ok {
+		t.Fatal("fixture unexpectedly carries --apply")
+	}
+	if err := fleetRegister(fixture.durable.Context, fixture.opts, fixture.manifest); err != nil {
+		t.Fatalf("plan-only registration failed: %v", err)
+	}
+	if fixture.count("payment_queryInfo") != 1 || fixture.count("author_submitAndWatchExtrinsic") != 0 {
+		t.Fatal("plan-only registration did not quote one synthetic dry run without broadcasting")
+	}
+}
