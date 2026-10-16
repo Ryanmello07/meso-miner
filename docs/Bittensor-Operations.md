@@ -180,27 +180,146 @@ provider claim --store-client=direct --epoch=1053 --rpc=https://rpc.subtensor.ne
 
 Head nodes aggregate proofs from client nodes for on-chain batch verification.
 
+> [!NOTE]
+> `bind-head` and `unbind-head` are unchanged in this release (not removed, no rename); the `provider fleet` group in section 6 is added alongside them.
+
 ### Binding a Hotkey
 ```bash
 provider bind-head \
-  --hotkey=0x1234567890abcdef... \
-  --registrant=0xYourEvmAddress... \
-  --contract=0xContractAddress...
+  --manifest=/path/to/fleet-manifest.json \
+  --hotkey_seed_file=/path/to/hotkey.seed \
+  --valid_from_epoch=<n> \
+  --valid_to_epoch=<n> \
+  --rpc=<rpc_url> \
+  --key_file=/path/to/evm.key
 ```
+The manifest is the single source for the fleet identity. Without `--key_file` the command prints the ready-to-submit calldata for the offline path; with it, the signed binding is submitted through `--rpc`. `--client_id` and `--client_seed_file` override the provider's own client identity for the binding signature; `--dry-run` signs but sends nothing.
 
 > [!IMPORTANT]
-> The `--registrant` address MUST equal the EVM transaction sender. The head-bind digest binds cryptographically to this sender, and the transaction reverts if the sender's Subtensor mirror does not match the hotkey's on-chain coldkey.
+> The fleet binding is dual-signed: the sr25519 hotkey seed must match the manifest hotkey, and the Ed25519 client side signs with the provider's own client key. Both signatures are checked against the same digest.
 
 ### Unbinding a Hotkey
 ```bash
 provider unbind-head \
-  --hotkey=0x1234567890abcdef... \
-  --contract=0xContractAddress...
+  --manifest=/path/to/fleet-manifest.json \
+  --effective_epoch=<n> \
+  --rpc=<rpc_url> \
+  --key_file=/path/to/evm.key
 ```
+`--effective_epoch` is the future epoch at which the revocation takes effect.
 
 ---
 
-## 6. Operational Security Guidelines
+## 6. Fleet Group (`provider fleet`)
+
+> [!NOTE]
+> The `fleet`, `wallet hotkey`, claim daemon and operator families documented in sections 6 to 9 ship with the v33 Bittensor port in this release. The grammar shown is this release's final grammar; these commands are new in this release.
+
+The fleet group drives the head-tier lifecycle for one fleet node from a single canonical manifest: burned registration of the fleet hotkey, commitment publication, the dual-signed client and hotkey binding, local submission signing, status, and revocation. Every subcommand reads the same `urnetwork-fleet-manifest-v1` JSON (`--manifest=<path>`: schema, chain id, netuid, coordinator, fleet id, hotkey, generation and members). The manifest is the single source for the fleet identity.
+
+```text
+provider fleet manifest --manifest=<path>
+    [-v...]
+provider fleet register --manifest=<path> --hotkey_seed_file=<path> --coldkey_seed_file=<path> --substrate=<ws_url>...
+    [--burn_limit_rao=<n>] [--fee_limit_rao=<n>] [--apply | --dry-run]
+    [--provisional-runtime-compatibility=<profile> --runtime-observation-dir=<path>]
+    [--mainnet-runtime-authority=<path> --mainnet-runtime-authority-sha256=<hex>]
+    [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+    [-v...]
+provider fleet publish --manifest=<path> --substrate=<ws_url>... --hotkey_seed_file=<path>
+    [--provisional-runtime-compatibility=<profile> --runtime-observation-dir=<path>]
+    [--mainnet-runtime-authority=<path> --mainnet-runtime-authority-sha256=<hex>]
+    [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+    [-v...]
+provider fleet bind --manifest=<path> --client_id=<hex> --client_seed_file=<path> --hotkey_seed_file=<path> --valid_from_epoch=<e> --valid_to_epoch=<e> --rpc=<rpc_url>... --relayer_key_file=<path> [--dry-run]
+    [--mainnet-runtime-authority=<path> --mainnet-runtime-authority-sha256=<hex>]
+    [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+    [-v...]
+provider fleet sign --manifest=<path> [--client_id=<hex>] [--client_seed_file=<path>] [--hotkey_seed_file=<path>] --valid_from_epoch=<e> --valid_to_epoch=<e>
+    [-v...]
+provider fleet status --manifest=<path> --client_id=<hex> --substrate=<ws_url>... --rpc=<rpc_url>...
+    [--provisional-runtime-compatibility=<profile> --runtime-observation-dir=<path>]
+    [--mainnet-runtime-authority=<path> --mainnet-runtime-authority-sha256=<hex>]
+    [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+    [-v...]
+provider fleet revoke --manifest=<path> --client_id=<hex> --client_seed_file=<path> --effective_epoch=<e> --rpc=<rpc_url>... --relayer_key_file=<path> [--dry-run]
+    [--mainnet-runtime-authority=<path> --mainnet-runtime-authority-sha256=<hex>]
+    [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+    [-v...]
+```
+
+- `provider fleet manifest` prints the manifest's canonical form, its commitment sha256 and its member count.
+- `provider fleet register` registers the manifest hotkey on the manifest netuid (the head-tier fleet's own burned registration), signed by the fleet coldkey through `--substrate` (repeatable, tried in order). It is a dry run unless `--apply` is given: without it, the command reads the live burn economics and quotes the signed extrinsic. `--burn_limit_rao` caps the registration burn; `--fee_limit_rao` caps the native transaction fee. Every broadcast is journaled under the provider state.
+- `provider fleet publish` writes the fleet commitment (the manifest commitment hash) to the chain through `--substrate` and verifies the write is finalized.
+- `provider fleet bind` builds the manifest binding and submits it through the EVM relayer key (`--relayer_key_file`, which receives no binding ownership) via `--rpc`; `--dry-run` stops at the preflight and sends nothing.
+- `provider fleet sign` builds the same binding and signs it locally: it prints the payload the Top 200 submission page takes, plus the hotkey signature when `--hotkey_seed_file` is given. It reads only local files, uses no RPC and no relayer key, and never prints or writes a seed.
+- `provider fleet status` reads the on-chain state for `--client_id` (native commitment, coordinator record, epochs, UID) and checks it against the canonical manifest.
+- `provider fleet revoke` schedules the binding's revocation at `--effective_epoch` (a future epoch), signed by the client key and submitted through `--relayer_key_file`.
+- `--mainnet-runtime-authority` with `--mainnet-runtime-authority-sha256` pins the independently reviewed mainnet fleet runtime authority document by its approved SHA-256 (64 lowercase hex digits), so mainnet writes only run against a runtime matching the reviewed pin; `--provisional-runtime-compatibility` with `--runtime-observation-dir` is the explicit testnet consumed-runtime profile; `--durable-volumes` with `--durable-volumes-sha256` declares the external storage and its reviewed digest (fleet writes require the owner-local schema).
+- Seed files (`--hotkey_seed_file`, `--coldkey_seed_file`, `--client_seed_file`) are private files the caller owns; the CLI never creates them and never prints a seed. Keep the fleet coldkey seed off mining hosts.
+
+## 7. Hotkey Wallet (`provider wallet hotkey`)
+
+One coldkey signature pays the miner on every operator. The hotkey wallet maps the hotkey to the coldkey with a global consent that both keys sign; it is kept as a chain under `hotkey-wallet/` in the provider state directory, and each authenticated operator stores the chain and a delegation of the miner's network there to the chain's head. The coldkey never signs per operator.
+
+```text
+provider wallet hotkey challenge <coldkey_ss58> --hotkey_seed_file=<path>
+    [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>] [--operators-url=<url>]
+    [-v...]
+provider wallet hotkey set <coldkey_ss58> --hotkey_seed_file=<path>
+    [--coldkey_seed_file=<path> | --message=<text> --signature=<hex>]
+    [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>] [--operators-url=<url>]
+    [-v...]
+provider wallet hotkey status [--hotkey_seed_file=<path>] [--operators-url=<url>] [-v...]
+```
+
+- `provider wallet hotkey challenge` builds the next global consent statement and prints the exact message for an offline coldkey to sign; the statement is kept pending in `hotkey-wallet/pending.json` under the provider state directory.
+- `provider wallet hotkey set` takes the coldkey signature with `--coldkey_seed_file`, or verifies `--message` and `--signature` against the pending statement, then adds the hotkey signature, stores the chain, and submits the chain and the delegation to every authenticated operator. A failing operator never stops the others. Setting the same `--message`/`--signature` again resends the chain.
+- `provider wallet hotkey status` reports the wallet's current state for the hotkey.
+- `--wallet-from-epoch` and `--wallet-through-epoch` select the earning-epoch window the consent applies to (at most 65536 epochs apart); `--operators-url` selects the operator list (see section 9).
+
+## 8. Claim Daemons (`provider claim-daemon`, `provider claim-daemon-v2`)
+
+Both daemons keep claims submitted as epochs finalize, so no one has to run `provider claim` per epoch by hand. Each takes a strict YAML config file (`--config=<path>`); relative paths inside the config are anchored at the config file.
+
+### v1 daemon
+```text
+provider claim-daemon --config=<path>
+    [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+    [-v...]
+```
+`provider claim-daemon` runs the v1 claim loop: it polls on the config's cadence, discovers the claimable epochs for the configured credential, verifies the payout root on chain, and submits the claim (already signed queue entries can reconcile without a credential). Progress is journaled under the config's state directory; already signed entries survive a restart.
+
+### v2 daemon
+```text
+provider claim-daemon-v2 --config=<path> [--v1-config=<path>] [--threshold-rao=<rao>] [--claim-now]
+    [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+    [-v...]
+```
+`provider claim-daemon-v2` runs the settlement-v2 claim loop (the v2 vault claims a per-account claimable balance):
+
+- `--v1-config=<path>` also runs the unchanged v1 claim daemon of that configuration in the same process; both use one relayer key and share its nonce admission.
+- `--threshold-rao=<rao>` claims an account once its claimable balance reaches this many rao. The default is 1,900,000,000 rao (1.9 alpha), and it is never below the 15,200,000 rao (0.0152 alpha) transfer floor.
+- `--claim-now` claims every account with anything claimable, once, at start.
+- `--durable-volumes` with `--durable-volumes-sha256` declares the external storage and its reviewed digest; the daemons require the daemon-volume schema.
+
+## 9. Operator Fan-Out (`provider operators`, `provider provide --all-operators`)
+
+The operator surface runs one provider per operator in the operator list.
+
+```text
+provider operators [--operators-url=<url>] [-v...]
+provider provide --all-operators [--operators-url=<url>] [--operators-refresh=<duration>]
+    [--api_url=<api_url>]
+    [-v...]
+```
+
+- `provider operators` prints each listed operator with its credential state (`jwt present` or `awaiting auth`), and the list's source (fetched or cached) and digest.
+- `provider provide --all-operators` runs one provider per operator, each in its own state directory (`operators/<domain>` under the provider state directory), and follows the list as it changes: the list is fetched from `--operators-url` (https, or http only for loopback; omitted, the built-in default list), the last good copy is kept as `operators.yml` in the provider state directory, and `--operators-refresh` sets how often the list is refetched (a Go duration of at least 1m; default 1h). Each child gets its own client identity under its operator directory.
+
+---
+
+## 10. Operational Security Guidelines
 
 1. **Never pass tokens via CLI flags**: Avoid passing tokens in process flags (`-jwt=...` or `-pass=...`) where they are visible in `ps aux` or `/proc/<pid>/cmdline`.
 2. **File Permissions**: Ensure `~/.urnetwork/jwt` and private keys are set to `0600` permissions.
