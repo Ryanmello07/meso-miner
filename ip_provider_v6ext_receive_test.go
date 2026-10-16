@@ -27,7 +27,7 @@ func newV6ExtReceiveProvider(t *testing.T) *RemoteUserNatProvider {
 	localUserNat := NewLocalUserNatWithDefaults(ctx, "v6ext-provider-test", nil)
 	settings := DefaultRemoteUserNatProviderSettings()
 	settings.WriteTimeout = time.Second
-	settings.EgressSecurityPolicyGenerator = func(*SecurityPolicyStatsCollector) SecurityPolicy {
+	settings.EgressSecurityPolicyGenerator = func(context.Context, *SecurityPolicyStatsCollector) SecurityPolicy {
 		return DisableSecurityPolicy()
 	}
 	provider := NewRemoteUserNatProvider(client, localUserNat, nil, settings)

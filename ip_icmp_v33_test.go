@@ -159,7 +159,7 @@ func TestProviderReceiveIcmpEchoAnswersThroughTheNat(t *testing.T) {
 	localUserNat := NewLocalUserNatWithDefaults(ctx, "icmp-provider-test", nil)
 	settings := DefaultRemoteUserNatProviderSettings()
 	settings.WriteTimeout = time.Second
-	settings.EgressSecurityPolicyGenerator = func(*SecurityPolicyStatsCollector) SecurityPolicy {
+	settings.EgressSecurityPolicyGenerator = func(context.Context, *SecurityPolicyStatsCollector) SecurityPolicy {
 		return DisableSecurityPolicy()
 	}
 	provider := NewRemoteUserNatProvider(client, localUserNat, nil, settings)
