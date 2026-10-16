@@ -349,8 +349,7 @@ do_install() {
 
     # GitHub API failed or rate-limited: for an explicit version we can trust
     # the caller's tag directly; for "latest" resolve the fork's latest release
-    # tag from GitHub's redirect (the old dl.fullbars.xyz mirror carries the
-    # 3.23-fix fork's builds, not meso-miner's).
+    # tag from GitHub's redirect.
     if [ -z "$tag" ]; then
         if [ "$version" != "latest" ]; then
             tag="$version"
