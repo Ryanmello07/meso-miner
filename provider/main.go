@@ -4438,6 +4438,9 @@ func provide(opts docopt.Opts) {
 			serveMetrics(ln)
 		}
 	}
+	// /metrics is on by default (see metricsEnabledByState): auto mode binds
+	// loopback plus the box's Tailscale addresses and never a public interface.
+	startDefaultMetrics(globalControlState, isHotSwapCandidate)
 	if 0 < port {
 		tlog("[startup] status server listening on :%d\n", port)
 		statusServer := &http.Server{
