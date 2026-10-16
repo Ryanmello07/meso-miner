@@ -275,7 +275,8 @@ urnet-tools sn-status --json
 - **Tier 1 Elite (Rank 1-10)**: Top global emission allocation; highest validator query preference.
 - **Tier 2 High-Volume (Rank 11-50)**: High yield; fast validator probe acceptance.
 - **Tier 3 Active (Rank 51-200)**: Subnet 25 emission cutoff eligibility boundary.
-- **Unranked / Sub-200**: Displays exact distance to Top 200 emission threshold.
+- **Rank 201+**: Displays the exact distance to the Top 200 cutoff (`Rank #N (M below Top 200 cutoff)`).
+- **No rank yet**: Displays `Unranked / Processing` until the platform has initial telemetry for the node.
 
 ---
 
