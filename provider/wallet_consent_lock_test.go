@@ -49,6 +49,49 @@ func lockTestJournalEntries(path string) (int, error) {
 	return len(entries), nil
 }
 
+// requireConsentJournalSerialization skips the calling test when this
+// platform's journal lock cannot serialize two acquirers. The probe checks
+// LOCK BEHAVIOR (a second acquisition must block while the first is held)
+// instead of switching on GOOS, so a future non-no-op implementation is
+// covered the day it lands. windows is the no-op case: see the documented
+// rationale in wallet_consent_lock_windows.go (the wallet set flow is
+// interactive there, one run at a time by hand).
+func requireConsentJournalSerialization(t *testing.T) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "wallet_consent.json")
+	release, err := snConsentJournalLockFn(path)
+	if err != nil {
+		t.Fatalf("probe: first journal lock acquisition: %v", err)
+	}
+	type lockResult struct {
+		release func()
+		err     error
+	}
+	second := make(chan lockResult, 1)
+	go func() {
+		release2, err2 := snConsentJournalLockFn(path)
+		second <- lockResult{release2, err2}
+	}()
+	select {
+	case result := <-second:
+		// Never blocked: this platform's lock is a no-op.
+		if result.err != nil {
+			t.Fatalf("probe: second journal lock acquisition: %v", result.err)
+		}
+		result.release()
+		release()
+		t.Skip("the wallet consent journal lock does not serialize concurrent acquirers on this platform (windows: a documented no-op, see wallet_consent_lock_windows.go); the serialization guarantee this test asserts is not provided here")
+	case <-time.After(250 * time.Millisecond):
+		// Blocked as expected: let the second acquirer through and clean up.
+		release()
+		result := <-second
+		if result.err != nil {
+			t.Fatalf("probe: second journal lock acquisition: %v", result.err)
+		}
+		result.release()
+	}
+}
+
 // The fail-before control and the fix, one after the other. With the lock
 // stubbed out both stores pause after their own load, each sees the empty
 // journal, and the last write wins: an entry is LOST. With the real lock the
@@ -97,6 +140,7 @@ func TestSnConsentJournalConcurrentStoresKeepEveryEntry(t *testing.T) {
 	})
 
 	t.Run("with the lock both entries are kept", func(t *testing.T) {
+		requireConsentJournalSerialization(t)
 		path := filepath.Join(t.TempDir(), "wallet_consent.json")
 
 		var stores sync.WaitGroup
@@ -125,6 +169,7 @@ func TestSnConsentJournalConcurrentStoresKeepEveryEntry(t *testing.T) {
 // Once in, its own load already contains the first store's entry, so the two
 // read-modify-writes never interleave.
 func TestSnConsentJournalLockHoldsAcrossTheStore(t *testing.T) {
+	requireConsentJournalSerialization(t)
 	path := filepath.Join(t.TempDir(), "wallet_consent.json")
 	first, second := lockTestEntry("5First"), lockTestEntry("5Second")
 
@@ -219,6 +264,7 @@ func TestSnConsentJournalLockHoldsAcrossTheStore(t *testing.T) {
 // other waits for the lock, finds the identical consent already acknowledged
 // and refuses instead of signing a second one.
 func TestSnConsentWalletSetConcurrentRunsSignOnce(t *testing.T) {
+	requireConsentJournalSerialization(t)
 	consentTestHome(t)
 	t.Setenv("URNETWORK_WALLET_ALLOW_CUSTOM_API", "1")
 	seed := walletTestSeed(0x11)
