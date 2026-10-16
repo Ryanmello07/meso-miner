@@ -943,7 +943,9 @@ func main() {
 			proxyTrim(opts)
 		}
 	} else if wallet, _ := opts.Bool("wallet"); wallet {
-		if set, _ := opts.Bool("set"); set {
+		if hotkey, _ := opts.Bool("hotkey"); hotkey {
+			hotkeyWalletCmd(opts)
+		} else if set, _ := opts.Bool("set"); set {
 			walletSet(opts)
 		} else if challenge, _ := opts.Bool("challenge"); challenge {
 			if err := walletChallenge(opts, os.Stdout); err != nil {
@@ -957,8 +959,16 @@ func main() {
 		}
 	} else if snStatus, _ := opts.Bool("sn-status"); snStatus {
 		snStatusCmd(opts)
+	} else if operators, _ := opts.Bool("operators"); operators {
+		operatorsCmd(opts)
 	} else if claim_, _ := opts.Bool("claim"); claim_ {
 		claim(opts)
+	} else if claimDaemon, _ := opts.Bool("claim-daemon"); claimDaemon {
+		claimDaemonCmd(opts)
+	} else if claimDaemonV2, _ := opts.Bool("claim-daemon-v2"); claimDaemonV2 {
+		claimDaemonV2Cmd(opts)
+	} else if fleet_, _ := opts.Bool("fleet"); fleet_ {
+		fleetCmd(opts)
 	} else if bindHead_, _ := opts.Bool("bind-head"); bindHead_ {
 		bindHead(opts)
 	} else if unbindHead_, _ := opts.Bool("unbind-head"); unbindHead_ {
@@ -966,7 +976,22 @@ func main() {
 	} else if auth_, _ := opts.Bool("auth"); auth_ {
 		auth(opts)
 	} else if provide_, _ := opts.Bool("provide"); provide_ {
-		provide(opts)
+		// docopt-go matches the plain provide pattern even when
+		// --all-operators is present (the option lands outside the matched
+		// pattern and is dropped), so detect it from the raw argv. The usage
+		// grammar itself is final; this is the dispatch fix.
+		allOperators := false
+		for _, arg := range os.Args[1:] {
+			if arg == "--all-operators" {
+				allOperators = true
+				break
+			}
+		}
+		if allOperators {
+			provideAllOperatorsCmd(opts)
+		} else {
+			provide(opts)
+		}
 	} else if authProvide, _ := opts.Bool("auth-provide"); authProvide {
 		if os.Getenv(EnvHotSwap) != "1" {
 			auth(opts)
@@ -7291,6 +7316,9 @@ Usage:
     	[--api_url=<api_url>]
     	[--max-memory=<mem>]
     	[-v...]
+    provider provide --all-operators [--operators-url=<url>] [--operators-refresh=<duration>]
+        [--api_url=<api_url>]
+        [-v...]
     provider provide [--port=<port>]
         [--api_url=<api_url>]
         [--connect_url=<connect_url>]
@@ -7334,15 +7362,58 @@ Usage:
         [--port=<port>] [--no-open]
         [--api_url=<api_url>]
         [-v...]
+    provider wallet hotkey challenge <coldkey_ss58> --hotkey_seed_file=<path>
+        [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>] [--operators-url=<url>]
+        [-v...]
+    provider wallet hotkey set <coldkey_ss58> --hotkey_seed_file=<path>
+        [--coldkey_seed_file=<path> | --message=<text> --signature=<hex>]
+        [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>] [--operators-url=<url>]
+        [-v...]
+    provider wallet hotkey status [--hotkey_seed_file=<path>] [--operators-url=<url>] [-v...]
     provider sn-status [--json]
         [--api_url=<api_url>]
         [-v...]
     provider claim [--store-client=<key> | --provider-jwt=<path> | --legacy-coldkey=<coldkey_ss58>] [--epoch=<epoch>] [--rpc=<rpc_url>]... [--key_file=<key_file>] [--dry-run]
         [--api_url=<api_url>]
         [-v...]
+    provider claim-daemon --config=<path>
+        [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+        [-v...]
+    provider claim-daemon-v2 --config=<path> [--v1-config=<path>] [--threshold-rao=<rao>] [--claim-now]
+        [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+        [-v...]
+    provider operators [--operators-url=<url>] [-v...]
     provider bind-head --manifest=<file> --hotkey_seed_file=<file> --valid_from_epoch=<n> --valid_to_epoch=<n> [--client_id=<hex16>] [--client_seed_file=<file>] [--rpc=<rpc_url>]... [--key_file=<key_file>] [--dry-run]
         [-v...]
     provider unbind-head --manifest=<file> --effective_epoch=<n> [--client_id=<hex16>] [--client_seed_file=<file>] [--rpc=<rpc_url>]... [--key_file=<key_file>] [--dry-run]
+        [-v...]
+    provider fleet manifest --manifest=<path>
+        [-v...]
+    provider fleet register --manifest=<path> --hotkey_seed_file=<path> --coldkey_seed_file=<path> --substrate=<ws_url>...
+        [--burn_limit_rao=<n>] [--fee_limit_rao=<n>] [--apply | --dry-run]
+        [--provisional-runtime-compatibility=<profile> --runtime-observation-dir=<path>]
+        [--mainnet-runtime-authority=<path> --mainnet-runtime-authority-sha256=<hex>]
+        [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+        [-v...]
+    provider fleet publish --manifest=<path> --substrate=<ws_url>... --hotkey_seed_file=<path>
+        [--provisional-runtime-compatibility=<profile> --runtime-observation-dir=<path>]
+        [--mainnet-runtime-authority=<path> --mainnet-runtime-authority-sha256=<hex>]
+        [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+        [-v...]
+    provider fleet bind --manifest=<path> --client_id=<hex> --client_seed_file=<path> --hotkey_seed_file=<path> --valid_from_epoch=<e> --valid_to_epoch=<e> --rpc=<rpc_url>... --relayer_key_file=<path> [--dry-run]
+        [--mainnet-runtime-authority=<path> --mainnet-runtime-authority-sha256=<hex>]
+        [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+        [-v...]
+    provider fleet sign --manifest=<path> [--client_id=<hex>] [--client_seed_file=<path>] [--hotkey_seed_file=<path>] --valid_from_epoch=<e> --valid_to_epoch=<e>
+        [-v...]
+    provider fleet status --manifest=<path> --client_id=<hex> --substrate=<ws_url>... --rpc=<rpc_url>...
+        [--provisional-runtime-compatibility=<profile> --runtime-observation-dir=<path>]
+        [--mainnet-runtime-authority=<path> --mainnet-runtime-authority-sha256=<hex>]
+        [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+        [-v...]
+    provider fleet revoke --manifest=<path> --client_id=<hex> --client_seed_file=<path> --effective_epoch=<e> --rpc=<rpc_url>... --relayer_key_file=<path> [--dry-run]
+        [--mainnet-runtime-authority=<path> --mainnet-runtime-authority-sha256=<hex>]
+        [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
         [-v...]
     provider proxy auth add [<key>] <proxy_user> <proxy_password> [-f]
     provider proxy auth remove [<key>] [--all]

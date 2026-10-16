@@ -19,7 +19,7 @@ quick=0
 [ "${1:-}" = "--quick" ] && quick=1
 
 echo "== gofmt (build.yml lint job)"
-unformatted=$(gofmt -l .)
+unformatted=$(gofmt -l . | grep -v "^third_party/" || true)
 if [ -n "$unformatted" ]; then
   echo "Files not gofmt-clean:"
   echo "$unformatted"
