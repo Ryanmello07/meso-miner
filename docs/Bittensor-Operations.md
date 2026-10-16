@@ -51,7 +51,7 @@ Settlement pays only a wallet whose coldkey signed the network consent. The cons
 provider wallet set <coldkey_ss58> --message=<text> --signature=<hex>
 ```
 
-`provider wallet set` with `--coldkey_seed_file=<path>` reads a coldkey seed from disk instead. That form is for your own workstation, never a fleet node, and the `urnet-tools wallet set` form refuses there unless you pass `--i-am-on-my-own-workstation`. The seed file must be a private regular file the caller owns (mode `0600`), and the tool never creates one.
+`provider wallet set` with `--coldkey_seed_file=<path>` reads a coldkey seed from disk instead. That form is for your own workstation, never a fleet node, and the `urnet-tools wallet set` form refuses there unless you pass `--i-am-on-my-own-workstation`. The seed file must be a private regular file the caller owns (mode `0600` or read-only `0400`), and the tool never creates one.
 
 ### The epoch window
 
@@ -338,7 +338,7 @@ Nothing is lost: already signed entries are journaled with their exact bytes and
 1. **Never pass tokens via CLI flags**: Avoid passing tokens in process flags (`-jwt=...` or `-pass=...`) where they are visible in `ps aux` or `/proc/<pid>/cmdline`.
 2. **File Permissions**: Ensure `~/.urnetwork/jwt` and private keys are set to `0600` permissions.
 3. **Container Isolation**: Ensure each container mount uses a dedicated Docker volume (e.g. `ur_config_1`, `ur_config_2`) to prevent state corruption.
-4. **Seed files**: the commands that read private seed files (`wallet hotkey`, the `fleet` writes, `wallet set --coldkey_seed_file`) want a private file the caller owns (mode `0600`), and the tool never creates one. Keep fleet coldkey seeds off mining hosts where possible, and never paste seed material into a command line or a shared file.
+4. **Seed files**: the commands that read private seed files (`wallet hotkey`, the `fleet` writes, `wallet set --coldkey_seed_file`) want a private file the caller owns (mode `0600` or read-only `0400`), and the tool never creates one. Keep fleet coldkey seeds off mining hosts where possible, and never paste seed material into a command line or a shared file.
 
 ---
 
