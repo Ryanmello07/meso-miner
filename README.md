@@ -13,6 +13,7 @@ A high-performance, high-visibility fork of the **UrNetwork Connect** provider, 
 
 | If you want to... | Go here |
 | :--- | :--- |
+| **Run a Bittensor SN25 provider** | [Bittensor Operations](docs/Bittensor-Operations.md) |
 | **Start here — pick your skill level** | [🐣 Beginner](docs/guides/beginner.md) · [🧭 Intermediate](docs/guides/intermediate.md) · [🚀 Advanced](docs/guides/advanced.md) |
 | Install on a Linux host as a user-level service | [Installation Guide](docs/Installation.md) |
 | Run one Docker container | [Docker Deployment](docs/Docker-Deployment.md) |
@@ -24,6 +25,18 @@ A high-performance, high-visibility fork of the **UrNetwork Connect** provider, 
 | Load a proxy file into the provider (per-OS) | [Adding Proxies](docs/Adding-Proxies.md) |
 | Feed the provider a live proxy list URL | [Proxy URL Sources](docs/Proxy-URL-Sources.md) |
 | Import into a Pelican game-server panel | [Pelican Panel](docs/Docker-Deployment.md#-pelican-panel) · [Egg README](pelican/README.md) |
+
+---
+
+## ₿ Bittensor Subnet 25
+
+This build is the Bittensor mainnet release. Everything a provider needs to take part in SN25 is here: the signed network wallet consent that settlement pays, hotkey delegation, claiming by hand or with the claim daemons, fleet registration for head nodes, and multi-operator provide. Nothing here runs unless you start it.
+
+- [Bittensor operations](docs/Bittensor-Operations.md): the guide, from the two miner tiers and wallet consent through claims, the fleet group and the operators.
+- [Bittensor claim daemons](docs/Bittensor-Claim-Daemons.md): automatic epoch claims, config key by key.
+- [Bittensor fleet](docs/Bittensor-Fleet.md): the head-tier lifecycle from one manifest.
+- [Bittensor hotkey delegation](docs/Bittensor-Hotkey-Delegation.md): one coldkey signature pays the miner's network on every operator.
+- [Multi-operator providers](docs/Multi-Operator.md): one provider per operator from one supervisor.
 
 ---
 
@@ -292,12 +305,16 @@ dashboard. See [Monitoring](docs/Monitoring.md).
 - [Project Structure](docs/Project-Structure.md)
 - [Log Message Reference](LOG_REFERENCE.md)
 - [Go urnet-tools Reference](docs/urnet-tools-go.md)
+- [Bittensor Operations](docs/Bittensor-Operations.md)
+- [Bittensor Claim Daemons](docs/Bittensor-Claim-Daemons.md) · [Bittensor Fleet](docs/Bittensor-Fleet.md) · [Bittensor Hotkey Delegation](docs/Bittensor-Hotkey-Delegation.md) · [Multi-Operator](docs/Multi-Operator.md)
 - [Changelog](CHANGELOG.md)
 
 **Wiki:**
 
 - [Online GitHub Wiki](https://github.com/full-bars/urnetwork-3.23-fix/wiki)
 - [CI and Release Process](https://github.com/full-bars/urnetwork-3.23-fix/wiki/CI-and-Release-Process)
+- [Bittensor Operations](https://github.com/full-bars/urnetwork-3.23-fix/wiki/Bittensor-Operations)
+- [Bittensor Claim Daemons](https://github.com/full-bars/urnetwork-3.23-fix/wiki/Bittensor-Claim-Daemons) · [Bittensor Fleet](https://github.com/full-bars/urnetwork-3.23-fix/wiki/Bittensor-Fleet) · [Bittensor Hotkey Delegation](https://github.com/full-bars/urnetwork-3.23-fix/wiki/Bittensor-Hotkey-Delegation) · [Multi-Operator](https://github.com/full-bars/urnetwork-3.23-fix/wiki/Multi-Operator)
 
 ---
 
