@@ -2187,11 +2187,18 @@ fi
 # provider and exits 0 on purpose (cmdStatus, since v3.23.0-fix.32.2). The
 # ambiguity guard still refuses where a single provider is required, such as
 # `status --json`. Assert both halves of that contract.
+# Assert the contract -- exit 0, the multi-provider header, one row per
+# provider -- never a user name: the summary's PROVIDER column is the
+# systemd unit name (providerLabel returns the unit when set), which is
+# "urnetwork.service" for BOTH providers here, so a grep for either user
+# name can never match (fire 38905640868 failed on exactly that).
 Z_SUM=$(urnet-tools status 2>&1); Z_SUM_RC=$?
-if [ "$Z_SUM_RC" -eq 0 ] && echo "$Z_SUM" | grep -q "urnet" && echo "$Z_SUM" | grep -q "$Z_USER"; then
-  ok "Z: no-target 'urnet-tools status' summarizes both providers (exit 0)"
+Z_SUM_ROWS=$(echo "$Z_SUM" | grep -cF "urnetwork.service" || true)
+if [ "$Z_SUM_RC" -eq 0 ] && echo "$Z_SUM" | grep -qF "2 providers found" && [ "$Z_SUM_ROWS" -ge 2 ]; then
+  ok "Z: no-target 'urnet-tools status' summarizes both providers (exit 0, $Z_SUM_ROWS provider rows)"
 else
-  bad "Z: no-target 'urnet-tools status' did not summarize both providers (exit $Z_SUM_RC)"
+  bad "Z: no-target 'urnet-tools status' did not summarize both providers (exit $Z_SUM_RC, $Z_SUM_ROWS rows)"
+  echo "$Z_SUM" | head -8 | sed 's/^/    | /' | tee -a "$REPORT"
 fi
 if urnet-tools status --json >/dev/null 2>&1; then
   bad "Z: no-target 'urnet-tools status --json' succeeded with 2 providers present (ambiguity guard did not fire)"
