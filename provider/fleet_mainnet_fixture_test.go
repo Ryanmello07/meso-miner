@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 // Real local Rpc transport exercises command wiring. Public protocol metadata
 // is reused with synthetic runtime/network identities, storage and keys only.
 package main

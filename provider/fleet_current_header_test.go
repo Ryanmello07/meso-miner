@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 // Current fleet admission authenticates complete native headers before any
 // signing or durable preparation, including the block installing an upgrade.
 package main

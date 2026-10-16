@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 // Physical HTTP failures run through real fleet commands, signed custody and
 // restart recovery without manufacturing finality or nonce contradictions.
 package main

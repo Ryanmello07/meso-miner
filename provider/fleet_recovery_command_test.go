@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 // Command-level recovery tests force retry boundaries through real local Rpc
 // transports, with no external identity or transaction.
 package main

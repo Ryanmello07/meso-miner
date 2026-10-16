@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 // Real command/store restarts retain signed complete-body chunks after a later
 // RPC response is unavailable, without another signature or nonce allocation.
 package main

@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 // Production pins are synthetic and independent of the retained testnet
 // catalog. Tests drive fresh finalized reads and deliberate state changes.
 package main

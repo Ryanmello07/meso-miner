@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 // Native command tests use a local websocket subscription and real signed
 // extrinsic bytes. The synthetic chain emits one explicit finality event.
 package main

@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 // Fleet production commands must refuse missing independent authority before
 // key loading, local custody creation or any online operation.
 package main

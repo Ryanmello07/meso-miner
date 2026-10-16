@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 // Real WebSocket closure interrupts late production runtime reads. The local
 // HTTP fixture supplies the original encoded chain, metadata and header bytes.
 package main

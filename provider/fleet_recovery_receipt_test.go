@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 // Real commands and signed durable recovery records own every checkpoint.
 // Faults replace raw RPC evidence, never a receipt or persistence verdict.
 package main

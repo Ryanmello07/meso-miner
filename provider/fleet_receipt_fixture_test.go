@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 // Native recovery fixtures use independently encoded single-leaf bodies and
 // real SCALE header commitments, including the modern one-byte update digest.
 package main

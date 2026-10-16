@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package main
 
 // The sn module opens its own native custody (chain journals) through the

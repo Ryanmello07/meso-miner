@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package main
 
 // Reviewed catalogs select only artifacts consumed by an operation. The local

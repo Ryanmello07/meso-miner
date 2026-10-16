@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 // Journal tests force filesystem commit and ownership boundaries with signed
 // synthetic transactions. No scheduler timing is part of the proof.
 package main

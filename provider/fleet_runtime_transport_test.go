@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 // Real local Rpc calls force replacement around production identity and
 // closing reads. Runtime and wallet inputs remain original fixture authority.
 package main
