@@ -311,7 +311,7 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 						defer tlsCancel()
 						err = tlsConn.HandshakeContext(tlsCtx)
 					}()
-					noteTlsHandshake(tlsConn.ConnectionState(), err)
+					noteTlsHandshake(tlsPathNormalProxy, host, tlsConn.ConnectionState(), err)
 					if err != nil {
 						tlsConn.Close()
 						return nil, err
@@ -325,10 +325,11 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 				}
 				tlsDialContext = func(ctx context.Context, network string, addr string) (net.Conn, error) {
 					conn, err := tlsDialer.DialContext(ctx, network, addr)
+					host, _, _ := net.SplitHostPort(addr)
 					if tlsConn, ok := conn.(*tls.Conn); ok {
-						noteTlsHandshake(tlsConn.ConnectionState(), err)
+						noteTlsHandshake(tlsPathNormal, host, tlsConn.ConnectionState(), err)
 					} else if err != nil {
-						noteTlsHandshake(tls.ConnectionState{}, err)
+						noteTlsHandshake(tlsPathNormal, host, tls.ConnectionState{}, err)
 					}
 					return conn, err
 				}

@@ -85,21 +85,91 @@ type streamMetricsState struct {
 	dialBackoffLongEntered atomic.Int64
 	dialBackoffLongActive  atomic.Int64
 
-	tlsFull    atomic.Int64
-	tlsResumed atomic.Int64
-	tlsFailed  atomic.Int64
+	// TLS handshakes by dial path, target host class and result
+	tls [tlsPathCount][tlsHostCount][tlsResultCount]atomic.Int64
+}
+
+// The dial path a TLS handshake ran on (the strategy's dialers), the class of
+// host it dialed (a fixed set, so the series stay bounded) and its result.
+type tlsPath int
+
+const (
+	tlsPathNormal tlsPath = iota
+	tlsPathNormalProxy
+	tlsPathResilientFragmentReorder
+	tlsPathResilientFragment
+	tlsPathResilientReorder
+	tlsPathResilientSegment
+	tlsPathCount
+)
+
+var tlsPathNames = [tlsPathCount]string{"normal", "normal_proxy", "resilient_fragment_reorder", "resilient_fragment", "resilient_reorder", "resilient_segment"}
+
+const (
+	tlsHostApi = iota
+	tlsHostConnect
+	tlsHostOther
+	tlsHostCount
+)
+
+var tlsHostNames = [tlsHostCount]string{"api", "connect", "other"}
+
+const (
+	tlsResultFull = iota
+	tlsResultResumed
+	tlsResultFailed
+	tlsResultCount
+)
+
+var tlsResultNames = [tlsResultCount]string{"full", "resumed", "failed"}
+
+func tlsHostClass(host string) int {
+	host = strings.ToLower(host)
+	switch {
+	case strings.HasPrefix(host, "api."):
+		return tlsHostApi
+	case strings.HasPrefix(host, "connect."):
+		return tlsHostConnect
+	default:
+		return tlsHostOther
+	}
+}
+
+func resilientTlsPath(fragment bool, reorder bool, segment bool) tlsPath {
+	switch {
+	case segment:
+		return tlsPathResilientSegment
+	case fragment && reorder:
+		return tlsPathResilientFragmentReorder
+	case fragment:
+		return tlsPathResilientFragment
+	default:
+		return tlsPathResilientReorder
+	}
 }
 
 // noteTlsHandshake counts one finished client handshake. Called once per dial.
-func noteTlsHandshake(state tls.ConnectionState, err error) {
+// host is the dialed host name (without the port).
+func noteTlsHandshake(path tlsPath, host string, state tls.ConnectionState, err error) {
+	result := tlsResultFull
 	switch {
 	case err != nil:
-		streamMetrics.tlsFailed.Add(1)
+		result = tlsResultFailed
 	case state.DidResume:
-		streamMetrics.tlsResumed.Add(1)
-	default:
-		streamMetrics.tlsFull.Add(1)
+		result = tlsResultResumed
 	}
+	streamMetrics.tls[path][tlsHostClass(host)][result].Add(1)
+}
+
+// tlsHandshakeTotal sums one result over every path and host.
+func (self *streamMetricsState) tlsHandshakeTotal(result int) int64 {
+	var total int64
+	for p := 0; p < int(tlsPathCount); p += 1 {
+		for h := 0; h < tlsHostCount; h += 1 {
+			total += self.tls[p][h][result].Load()
+		}
+	}
+	return total
 }
 
 var streamMetrics streamMetricsState
@@ -184,12 +254,15 @@ func (self *streamMetricsState) writePrometheus(b *strings.Builder) {
 	fmt.Fprintf(b, "# TYPE urnet_p2p_connect_failures_total counter\n")
 	fmt.Fprintf(b, "urnet_p2p_connect_failures_total %d\n", self.p2pConnFailures.Load())
 
-	fmt.Fprintf(b, "# HELP urnet_tls_handshakes_total Client TLS handshakes on the platform and API dial paths, by result (resumed ones skip certificate verification).\n")
+	fmt.Fprintf(b, "# HELP urnet_tls_handshakes_total Client TLS handshakes on the platform and API dial paths, by dial path, target host class and result (resumed ones skip certificate verification).\n")
 	fmt.Fprintf(b, "# TYPE urnet_tls_handshakes_total counter\n")
-	fmt.Fprintf(b, "urnet_tls_handshakes_total{result=\"full\"} %d\n", self.tlsFull.Load())
-	fmt.Fprintf(b, "urnet_tls_handshakes_total{result=\"resumed\"} %d\n", self.tlsResumed.Load())
-	fmt.Fprintf(b, "urnet_tls_handshakes_total{result=\"failed\"} %d\n", self.tlsFailed.Load())
-
+	for p := 0; p < int(tlsPathCount); p += 1 {
+		for h := 0; h < tlsHostCount; h += 1 {
+			for r := 0; r < tlsResultCount; r += 1 {
+				fmt.Fprintf(b, "urnet_tls_handshakes_total{path=%q,host=%q,result=%q} %d\n", tlsPathNames[p], tlsHostNames[h], tlsResultNames[r], self.tls[p][h][r].Load())
+			}
+		}
+	}
 	fmt.Fprintf(b, "# HELP urnet_dial_backoff_long_tier_active Identities currently waiting in the long dial backoff tier because their own path keeps failing.\n")
 	fmt.Fprintf(b, "# TYPE urnet_dial_backoff_long_tier_active gauge\n")
 	fmt.Fprintf(b, "urnet_dial_backoff_long_tier_active %d\n", self.dialBackoffLongActive.Load())

@@ -79,17 +79,17 @@ func TestResilientDialResumesOnRedial(t *testing.T) {
 	dial := NewResilientDialTlsContext(settings, false, false)
 	addr := server.Listener.Addr().String()
 
-	fullBefore := streamMetrics.tlsFull.Load()
-	resumedBefore := streamMetrics.tlsResumed.Load()
+	fullBefore := streamMetrics.tlsHandshakeTotal(tlsResultFull)
+	resumedBefore := streamMetrics.tlsHandshakeTotal(tlsResultResumed)
 
 	got := []bool{dialResumed(t, dial, addr), dialResumed(t, dial, addr), dialResumed(t, dial, addr)}
 	if got[0] || !got[1] || !got[2] {
 		t.Fatalf("want full, resumed, resumed; got %v", got)
 	}
-	if d := streamMetrics.tlsFull.Load() - fullBefore; d != 1 {
+	if d := streamMetrics.tlsHandshakeTotal(tlsResultFull) - fullBefore; d != 1 {
 		t.Fatalf("one full handshake expected, counted %d", d)
 	}
-	if d := streamMetrics.tlsResumed.Load() - resumedBefore; d != 2 {
+	if d := streamMetrics.tlsHandshakeTotal(tlsResultResumed) - resumedBefore; d != 2 {
 		t.Fatalf("two resumed handshakes expected, counted %d", d)
 	}
 }
@@ -122,12 +122,12 @@ func TestResilientDialStillVerifiesTheServerCertificate(t *testing.T) {
 	dial := NewResilientDialTlsContext(settings, false, false)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	failedBefore := streamMetrics.tlsFailed.Load()
+	failedBefore := streamMetrics.tlsHandshakeTotal(tlsResultFailed)
 	if conn, err := dial(ctx, "tcp", server.Listener.Addr().String()); err == nil {
 		conn.Close()
 		t.Fatal("a server outside the pinned roots must be refused")
 	}
-	if streamMetrics.tlsFailed.Load()-failedBefore != 1 {
+	if streamMetrics.tlsHandshakeTotal(tlsResultFailed)-failedBefore != 1 {
 		t.Fatal("the refused handshake must be counted as failed")
 	}
 }
