@@ -1024,7 +1024,11 @@ r_assert_env() {
   # r_assert_env "label" "regex" ["absent"]
   local label="$1" pat="$2" mode="${3:-present}"
   PROC_PID=$(pgrep -u urnet -f 'urnetwork provide' | head -1)
-  if [ -z "$PROC_PID" ]; then bad "R: $label (no provider process)"; return; fi
+  if [ -z "$PROC_PID" ]; then
+    bad "R: $label (no provider process)"
+    restart_failure_dump "R: $label"
+    return
+  fi
   if [ "$mode" = "absent" ]; then
     if tr '\0' '\n' < /proc/$PROC_PID/environ | grep -qE "$pat"; then
       bad "R: $label (expected ABSENT, but matched $pat)"
@@ -1042,9 +1046,32 @@ r_assert_env() {
 r_restart() {
   runuser -u urnet -- env XDG_RUNTIME_DIR=/run/user/$(id -u urnet) systemctl --user daemon-reload
   local mark cid
-  __RP_OUT=$(restart_provider); RAMLOG_MARK=${__RP_OUT%% *}; mark=${__RP_OUT##* }
+  __RP_OUT=$(restart_provider); RP_RC=$?; RAMLOG_MARK=${__RP_OUT%% *}; mark=${__RP_OUT##* }
   cid=$(wait_client_id "$mark" 120)
-  [ -n "$cid" ] || bad "R: restart after $1 produced no client_id"
+  if [ -z "$cid" ]; then
+    bad "R: restart after $1 produced no client_id (systemctl restart rc=$RP_RC)"
+    restart_failure_dump "R: $1"
+  fi
+}
+
+# restart_failure_dump "label": a restart check has just failed with no
+# client_id or no provider process. Capture WHY while the unit state is still
+# live: the restart rc the caller put in RP_RC (restart_provider returns the
+# systemctl restart exit status), the unit's failure and rate-limit counters
+# (Result=start-limit-hit is what a StartLimitBurst refusal looks like; with
+# no StartLimit* set anywhere the systemd default of 5 starts per 10 s
+# applies, and the W3 battery handles the same limit), and the last 40
+# journal lines.
+restart_failure_dump() {
+  local label="$1"
+  echo "  --- restart diagnostics ($label) ---" | tee -a "$REPORT"
+  echo "  systemctl restart rc: ${RP_RC:-unknown}" | tee -a "$REPORT"
+  runuser -u urnet -- env XDG_RUNTIME_DIR=/run/user/$(id -u urnet) \
+    systemctl --user show -p ActiveState,SubState,Result,NRestarts,StartLimitBurst,StartLimitIntervalUSec,ExecMainStatus urnetwork.service 2>&1 \
+    | sed 's/^/    /' | tee -a "$REPORT"
+  runuser -u urnet -- env XDG_RUNTIME_DIR=/run/user/$(id -u urnet) \
+    journalctl --user -u urnetwork.service --no-pager -q -n 40 2>&1 \
+    | sed 's/^/    /' | tee -a "$REPORT"
 }
 
 # R1. remove override.conf entirely -> REPORT_URL falls back to hub.conf's
@@ -1157,9 +1184,14 @@ Environment="GOTRACEBACK=all"
 EOF
 chown -R urnet:urnet /home/urnet/.config
 runuser -u urnet -- env XDG_RUNTIME_DIR=/run/user/$(id -u urnet) systemctl --user daemon-reload
-__RP_OUT=$(restart_provider); RAMLOG_MARK=${__RP_OUT%% *}; MARK=${__RP_OUT##* }
+__RP_OUT=$(restart_provider); RP_RC=$?; RAMLOG_MARK=${__RP_OUT%% *}; MARK=${__RP_OUT##* }
 CID=$(wait_client_id "$MARK" 120)
-[ -n "$CID" ] && ok "S: seeded non-default settings and restarted (client_id ${CID:0:12}…)" || bad "S: seed restart produced no client_id"
+if [ -n "$CID" ]; then
+  ok "S: seeded non-default settings and restarted (client_id ${CID:0:12}…)"
+else
+  bad "S: seed restart produced no client_id (systemctl restart rc=$RP_RC)"
+  restart_failure_dump "S: seed restart"
+fi
 
 S_KEYS=(
   "URNETWORK_PROFILE=turbo-v8"
@@ -1206,14 +1238,22 @@ fi
 # markers are gone (restore actually worked, not assumed).
 rm -f "$OVERRIDE_DIR/override.conf"
 runuser -u urnet -- env XDG_RUNTIME_DIR=/run/user/$(id -u urnet) systemctl --user daemon-reload
-__RP_OUT=$(restart_provider); RAMLOG_MARK=${__RP_OUT%% *}; MARK=${__RP_OUT##* }
+__RP_OUT=$(restart_provider); RP_RC=$?; RAMLOG_MARK=${__RP_OUT%% *}; MARK=${__RP_OUT##* }
 CID=$(wait_client_id "$MARK" 120)
-[ -n "$CID" ] && ok "S: cleanup restart ok" || bad "S: cleanup restart produced no client_id"
-PROC_PID=$(pgrep -u urnet -f 'urnetwork provide' | head -1)
-if [ -n "$PROC_PID" ] && ! tr '\0' '\n' < /proc/$PROC_PID/environ | grep -qxF "GOGC=150"; then
-  ok "S: GOGC=150 gone after override.conf removed (restore verified)"
+if [ -n "$CID" ]; then
+  ok "S: cleanup restart ok"
 else
+  bad "S: cleanup restart produced no client_id (systemctl restart rc=$RP_RC)"
+  restart_failure_dump "S: cleanup restart"
+fi
+PROC_PID=$(pgrep -u urnet -f 'urnetwork provide' | head -1)
+if [ -z "$PROC_PID" ]; then
+  bad "S: GOGC=150 state after override.conf removed (no provider process)"
+  restart_failure_dump "S: GOGC restore check"
+elif tr '\0' '\n' < /proc/$PROC_PID/environ | grep -qxF "GOGC=150"; then
   bad "S: GOGC=150 still present after override.conf removed (restore did not take)"
+else
+  ok "S: GOGC=150 gone after override.conf removed (restore verified)"
 fi
 
 # ---------- T. Bare update (fetchLatestRelease leg) ----------
