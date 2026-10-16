@@ -233,3 +233,16 @@ These come from `provider claim`, `provider wallet challenge`, `provider wallet 
 | `use either --coldkey_seed_file or --message with --signature, not both` | Give exactly one way to prove the coldkey. |
 
 `provider wallet challenge <coldkey_ss58>` prints the server's sign-in challenge so it can be signed elsewhere (btcli) and sent back with `--message`/`--signature`; the seed then never has to be on the node. `provider wallet set` sends the proof. The unsigned network wallet request is still refused unless `--legacy-network-wallet` is passed.
+
+### Hotkey, daemon and fleet messages
+
+These come from the hotkey delegation, the claim daemons and the fleet group. Their pages carry the full behavior: [Bittensor hotkey delegation](Bittensor-Hotkey-Delegation.md), [Bittensor claim daemons](Bittensor-Claim-Daemons.md), [Bittensor fleet](Bittensor-Fleet.md).
+
+| Message | Meaning and fix |
+|---------|-----------------|
+| `wallet consent: --wallet-from-epoch=<n> is far beyond the current epoch <m>; ...` | The explicit consent interval would leave epochs unpaid. Use the default window, or set `URNETWORK_WALLET_ALLOW_ODD_INTERVAL=1` to override deliberately. See [Wallet consent](Bittensor-Operations.md). |
+| `claim-daemon: <reason>; driving retained signed work only` | The v1 daemon's claim credential is missing or no longer accepted. Fix the token; new claims pause while already signed entries still finish. |
+| `explicit durable-volume declaration and hash are required` | Pass `--durable-volumes` with `--durable-volumes-sha256`; fleet mainnet writes and the claim daemons require a matching declaration. |
+| `fleet status does not match the canonical manifest` | The chain differs from the manifest (a missing publish or binding, or a newer generation). Re-run the write, then status again. |
+| `N of M authenticated operators do not adopt the head yet; ...` | The hotkey submission failed at the operator it resolved. Set the same message and signature again to retry. |
+| `private seed file custody is unsupported on this platform` | Seed-bearing commands (`wallet hotkey`, the `fleet` writes) run on Linux or macOS only. |

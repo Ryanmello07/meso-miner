@@ -72,6 +72,8 @@ The network wallet consent is one signature from your coldkey that covers every 
 
 A later consent must start at a later epoch than the one before it. Use `--wallet-from-epoch`/`--wallet-through-epoch` with `wallet challenge` and `wallet set` for an explicit interval; the default is the next epoch through the full 65,536-epoch span.
 
+The full flow, including where to run each form and what settlement pays, is in [Bittensor operations](Bittensor-Operations.md). Delegating the consent to a hotkey is covered in [Bittensor hotkey delegation](Bittensor-Hotkey-Delegation.md), and automatic claims in [Bittensor claim daemons](Bittensor-Claim-Daemons.md).
+
 ### Proxy Management Commands
 
 | Command | What it does |
