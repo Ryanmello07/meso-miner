@@ -3,16 +3,22 @@
 // command left in the docs sends the reader to something that does not exist.
 //
 // Ported from sn's miner/cli_command_refs_test.go (TestDocumentedCliCommandsExist).
-// The sn original also checks the snclaim binary and a nested fleet namespace;
-// neither exists on this line (head binding here is the top-level
-// `provider bind-head` / `provider unbind-head`), so only the provider's own
-// command set is checked.
+// The sn original also checks the snclaim binary; there is none on this line, so
+// this checks the provider's own command set: the first word after `provider`
+// on every usage line, plus the nested groups whose next word is always a
+// subcommand (`provider fleet <sub>`, `provider wallet <sub>` and
+// `provider wallet hotkey <sub>`).
+//
+// The nested checks cover the families the v33 Bittensor port adds, so a docs
+// reference such as `provider fleet manifest` is verified against the fleet
+// subcommands and not just against the top-level word `fleet`.
 package main
 
 import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -20,18 +26,17 @@ import (
 )
 
 func TestDocumentedCliCommandsExist(t *testing.T) {
-	commands := usageCommands(mainUsage(), "provider")
-	if len(commands) == 0 {
-		t.Fatal("no provider commands found in the usage")
+	sets := documentedCommandSets(mainUsage())
+	for group, set := range sets {
+		if len(set) == 0 {
+			t.Fatalf("no %s commands found in the usage", group)
+		}
 	}
 	// `provider help` is a real alias handled before docopt is consulted (see
 	// main), so it is deliberately absent from the usage text. Everything else
 	// the docs name has to be a usage command.
-	for _, alias := range []string{"help"} {
-		commands[alias] = true
-	}
+	sets["provider"]["help"] = true
 
-	reference := regexp.MustCompile("`provider ([a-z][a-z0-9_-]*)")
 	root := ".."
 	skip := map[string]bool{
 		".git":                          true,
@@ -59,10 +64,8 @@ func TestDocumentedCliCommandsExist(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		for _, match := range reference.FindAllStringSubmatch(string(b), -1) {
-			if !commands[match[1]] {
-				missing = append(missing, rel+": provider "+match[1])
-			}
+		for _, ref := range missingCommandRefs(string(b), sets) {
+			missing = append(missing, rel+": "+ref)
 		}
 		return nil
 	})
@@ -73,6 +76,73 @@ func TestDocumentedCliCommandsExist(t *testing.T) {
 	if len(missing) > 0 {
 		t.Fatalf("documented commands missing from the CLI usage:\n  %s", strings.Join(missing, "\n  "))
 	}
+}
+
+// TestDocumentedCliCommandCheckerFlagsUnknown exercises the checker on
+// synthetic content so a regression that quietly makes it blind (a broken
+// nested reference, a lost pattern) fails loudly instead of passing suites.
+func TestDocumentedCliCommandCheckerFlagsUnknown(t *testing.T) {
+	// The references are assembled from pieces: the walk above also reads this
+	// file, and a literal reference to an unknown fleet subcommand here would
+	// itself be reported as a documented command the CLI does not have.
+	ref := func(words ...string) string { return "`provider " + strings.Join(words, " ") + "`" }
+	content := strings.Join([]string{
+		"Real: " + ref("fleet", "manifest") + ", " + ref("fleet", "status") + ", " + ref("fleet", "revoke") + ".",
+		"Real: " + ref("wallet", "hotkey", "challenge") + ", " + ref("wallet", "hotkey", "set") + ", " + ref("wallet", "status") + ".",
+		"Real: " + ref("claim-daemon") + ", " + ref("claim-daemon-v2") + ", " + ref("operators") + ".",
+		"Not real: " + ref("fleet", "evacuate") + ".",
+		"Not real: " + ref("fleet-cmd") + ".",
+		"Not real: " + ref("wallet", "hotkey", "rotate") + ".",
+		"Not real: " + ref("wallet", "rotate") + ".",
+	}, "\n")
+	want := []string{
+		"provider fleet evacuate",
+		"provider fleet-cmd",
+		"provider wallet hotkey rotate",
+		"provider wallet rotate",
+	}
+	got := missingCommandRefs(content, documentedCommandSets(mainUsage()))
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("checker mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// documentedCommandSets extracts the command sets the checker uses from the
+// usage: the first word after `provider` on every usage line, plus the nested
+// groups whose next word is always a subcommand.
+func documentedCommandSets(usage string) map[string]map[string]bool {
+	return map[string]map[string]bool{
+		"provider":               usageCommands(usage, "provider"),
+		"provider fleet":         usageCommands(usage, "provider fleet"),
+		"provider wallet":        usageCommands(usage, "provider wallet"),
+		"provider wallet hotkey": usageCommands(usage, "provider wallet hotkey"),
+	}
+}
+
+// missingCommandRefs returns every backticked `provider ...` reference in
+// content that does not name a command the usage declares. Each nested group
+// is checked at its own depth, so `provider fleet status` is verified against
+// the fleet subcommands, not only against the word `fleet`.
+func missingCommandRefs(content string, sets map[string]map[string]bool) []string {
+	refs := []struct {
+		group string
+		re    *regexp.Regexp
+	}{
+		{"provider", regexp.MustCompile("`provider ([a-z][a-z0-9_-]*)")},
+		{"provider fleet", regexp.MustCompile("`provider fleet ([a-z][a-z0-9_-]*)")},
+		{"provider wallet", regexp.MustCompile("`provider wallet ([a-z][a-z0-9_-]*)")},
+		{"provider wallet hotkey", regexp.MustCompile("`provider wallet hotkey ([a-z][a-z0-9_-]*)")},
+	}
+	var missing []string
+	for _, ref := range refs {
+		for _, match := range ref.re.FindAllStringSubmatch(content, -1) {
+			if !sets[ref.group][match[1]] {
+				missing = append(missing, ref.group+" "+match[1])
+			}
+		}
+	}
+	return missing
 }
 
 // usageCommands returns the first word after the binary name on each docopt
