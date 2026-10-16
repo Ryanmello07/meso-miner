@@ -185,6 +185,10 @@ type dmcaFlowState struct {
 	terminalReason int32
 
 	key Ip6Path
+	// resumedAfterReclaim marks a flow created for a path that was idle
+	// reclaimed inside the recent window; read once when the terminal
+	// verdict publishes (set before the flow is published to the shard)
+	resumedAfterReclaim bool
 
 	// mu guards the inspection bookkeeping below, touched only while INSPECTING
 	mu               sync.Mutex
@@ -223,6 +227,10 @@ func (self *dmcaFlowState) Cancel() {
 func (self *dmcaFlowState) setTerminal(v dmcaVerdict, reason SecurityPolicyReason) (dmcaVerdict, SecurityPolicyReason, bool) {
 	atomic.StoreInt32(&self.terminalReason, int32(reason))
 	atomic.StoreInt32(&self.terminal, int32(v))
+	noteDmcaVerdict(v, self.key.Protocol)
+	if self.resumedAfterReclaim && v != dmcaAllow && v != dmcaInspecting {
+		dmcaResumedDroppedTotal[dmcaProtocolBucket(self.key.Protocol)].Add(1)
+	}
 	return v, reason, true
 }
 
@@ -539,9 +547,18 @@ func (self *dmcaDetector) run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			self.evictIdle(time.Now())
+			self.scanOnce()
 		}
 	}
+}
+
+// scanOnce is one FlowTtl scan pass with its metrics; split from the ticker
+// loop so tests can drive it deterministically.
+func (self *dmcaDetector) scanOnce() {
+	dmcaIdleScanRunsTotal.Add(1)
+	scanStart := time.Now()
+	self.evictIdle(scanStart)
+	dmcaIdleScanLastNanos.Store(int64(time.Since(scanStart)))
 }
 
 // evictIdle drops every tracked flow whose last activity is older than FlowTtl.
@@ -556,6 +573,9 @@ func (self *dmcaDetector) evictIdle(now time.Time) {
 		for key, st := range shard.flows {
 			if st.LastActivityTime().Before(cutoff) {
 				delete(shard.flows, key)
+				dmcaFlowsTracked.Add(-1)
+				dmcaIdleReclaimedTotal.Add(1)
+				noteDmcaRecentReclaim(key, now)
 			}
 		}
 		shard.mu.Unlock()
@@ -702,6 +722,11 @@ func (self *dmcaDetector) classifyDetailed(ipPath *IpPath, payload []byte) (dmca
 			}
 			self.evictWithLock(shard)
 			shard.flows[key] = st
+			dmcaFlowsTracked.Add(1)
+			if resumed, protocol := dmcaRecentlyReclaimed(key, time.Now()); resumed {
+				dmcaResumedAfterReclaimTotal[protocol].Add(1)
+				st.resumedAfterReclaim = true
+			}
 		}
 		shard.mu.Unlock()
 	}
@@ -733,6 +758,8 @@ func (self *dmcaDetector) evictWithLock(shard *dmcaFlowShard) {
 	}
 	applyLruUserLimit(maps.Values(shard.flows), self.perShardCap-1, func(st *dmcaFlowState) bool {
 		delete(shard.flows, st.key)
+		dmcaFlowsTracked.Add(-1)
+		dmcaCapacityEvictionsTotal.Add(1)
 		return true
 	})
 }
