@@ -136,7 +136,7 @@ Key variables:
 | `USER_AUTH` / `PASSWORD` | Email/password auth |
 | `URNETWORK_AUTH_CODE` | JWT auth code (first-run) |
 | `UR_API_URL` / `UR_CONNECT_URL` | Custom API/connect backend (must be set together, Docker only) |
-| `ENABLE_VNSTAT` | Traffic monitor on port 8080 |
+| `ENABLE_VNSTAT` | Accepted, removed: vnStat and port 8080 are gone, a `true` value logs a warning |
 | `URNETWORK_PROFILE` | `auto` (tiers: low/balanced/perf/extreme), `lowmem`, `eco`, `turbo-v4`, `turbo-v8` |
 | `URNETWORK_REPORT_URL` | URL for bandwidth reports |
 | `URNETWORK_REPORT_INTERVAL` | Report interval (default 5m) |

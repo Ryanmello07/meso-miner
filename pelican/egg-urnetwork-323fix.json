@@ -158,7 +158,7 @@
         },
         {
             "name": "Traffic monitor",
-            "description": "vnStat web UI on port 8080. Disabled by default for security (it exposes fleet traffic without authentication). Enable only via a custom image build.",
+            "description": "Accepted for backward compatibility only. vnStat and its port-8080 web UI were removed from the image: setting this to true logs a warning and starts nothing. Use Prometheus metrics for bandwidth telemetry.",
             "env_variable": "ENABLE_VNSTAT",
             "default_value": "false",
             "user_viewable": false,

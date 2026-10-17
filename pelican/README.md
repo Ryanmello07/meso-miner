@@ -21,7 +21,7 @@ Pelican panel support for the hardened provider image.
 | `PROXY_URL_REFRESH` | user-editable | re-fetch interval (default `1h`) |
 | `PROXY_URL_MAX` | user-editable | max proxies from URLs (default `500`) |
 | `PELICAN` | hidden, fixed `yes` | routes the entrypoint into panel mode |
-| `ENABLE_VNSTAT` | hidden, fixed `false` | see security note below |
+| `ENABLE_VNSTAT` | hidden, fixed `false` | accepted and ignored with a warning (vnStat removed) |
 | `ENABLE_IP_CHECKER` | hidden, fixed `false` | diagnostic only |
 
 Auth modes:
@@ -73,10 +73,9 @@ serves mid-flight.
 
 ## Security notes
 
-- vnStat ships OFF by default: its port-8080 web UI exposes traffic counters
-  publicly, which is why the default is off. It was hardened a long time ago,
-  so this is a conservative default, not an open vulnerability — enable it if
-  you want the counters and accept the exposure.
+- vnStat was removed from the image. `ENABLE_VNSTAT` is still accepted so
+  existing egg definitions do not error, but it starts nothing and logs a
+  warning. Use the Prometheus `/metrics` endpoint for bandwidth telemetry.
 - State lives under `$HOME/.urnetwork` inside the server's data volume.
   All scripts resolve state there, so no path is hardwired to /root.
 - Credentials are admin-only in the egg definition; users of the server
