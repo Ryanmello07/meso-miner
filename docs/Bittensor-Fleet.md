@@ -105,7 +105,7 @@ The broadcast is journaled under the provider state (exact SCALE bytes plus a tr
 provider fleet publish --manifest=/path/to/fleet-manifest.json --hotkey_seed_file=/path/to/hotkey.seed --substrate=<ws_url>
 ```
 
-There is no plan flag and no dry run for publish: it always writes. Run it after `register`, and again whenever the manifest generation changes.
+There is no plan flag and no dry run for publish: it always writes. Before signing, it refuses a hotkey that is the subnet owner hotkey or whose UID holds a validator permit; the role is read at the finalized block it signs against and any read error refuses. Run it after `register`, and again whenever the manifest generation changes.
 
 ## bind
 
