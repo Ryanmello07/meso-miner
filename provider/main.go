@@ -974,7 +974,11 @@ func main() {
 	} else if unbindHead_, _ := opts.Bool("unbind-head"); unbindHead_ {
 		unbindHead(opts)
 	} else if auth_, _ := opts.Bool("auth"); auth_ {
-		auth(opts)
+		if operator, _ := opts.String("--operator"); operator != "" {
+			operatorAuthCmd(opts)
+		} else {
+			auth(opts)
+		}
 	} else if provide_, _ := opts.Bool("provide"); provide_ {
 		// docopt-go matches the plain provide pattern even when
 		// --all-operators is present (the option lands outside the matched
@@ -2793,6 +2797,14 @@ func runDegradedProxyReaper(ctx context.Context, proxyCancelMap map[string]conte
 }
 
 func provide(opts docopt.Opts) {
+	// An operator child of provide --all-operators gets the strict identity
+	// gate: a missing .provider.key there is recovery work, never a request
+	// for a new identity. Plain provide and auth-provide keep the v33
+	// behavior: a missing key is minted and persisted on first run.
+	if err := providerClientIdentityGateForOpts(opts); err != nil {
+		fmt.Fprintf(os.Stderr, "provider client identity: %v\n", err)
+		os.Exit(1)
+	}
 	connect.CritLogger = critLog
 	installScoutScorer()
 	// the durable enforcement log must exist before the governors emit their first
@@ -3412,6 +3424,13 @@ func provide(opts docopt.Opts) {
 						}
 						return byClientJwt, clientId, reused, nil
 					}
+				}
+
+				if quarantine, ok, quarantineErr := quarantineRejectedOperatorSignIn(opts, err); ok {
+					fmt.Fprintf(os.Stderr, "provider network sign-in was rejected; set it aside at %s and exiting %d so the supervisor signs in again\n", quarantine.Path, providerQuarantinedExitCode)
+					os.Exit(providerQuarantinedExitCode)
+				} else if quarantineErr != nil {
+					fmt.Fprintf(os.Stderr, "provider rejected network sign-in could not be set aside: %v\n", quarantineErr)
 				}
 
 				if errors.Is(err, ErrTokenInvalid) {
@@ -5279,7 +5298,11 @@ func provideAuth(ctx context.Context, clientStrategy *connect.ClientStrategy, ap
 	}
 
 	if authClientResult.Error != nil {
-		returnErr = authClientResult.Error
+		// A 401 here is the server's confirmed rejection of the network token
+		// this request carried. Type it so the rejection path can set the
+		// token aside and the supervisor can sign in again; every other error
+		// passes through unchanged.
+		returnErr = networkCredentialRejection(authClientResult.Error)
 		return
 	}
 	if authClientResult.Result == nil {
@@ -7316,7 +7339,12 @@ Usage:
     	[--api_url=<api_url>]
     	[--max-memory=<mem>]
     	[-v...]
+    provider auth --operator=<domain> ([<auth_code>] | --user_auth=<user_auth> [--password=<password>] | --hotkey_seed_file=<file>) [-f]
+        [--operators-url=<url>]
+        [-v...]
     provider provide --all-operators [--operators-url=<url>] [--operators-refresh=<duration>]
+        [--auto-register --hotkey_seed_file=<file> | --hotkey_seed_file=<file>]
+        [--port=<port>] [--max-memory=<mem>] [--allow-client-registration]
         [--api_url=<api_url>]
         [-v...]
     provider provide [--port=<port>]
@@ -7324,6 +7352,9 @@ Usage:
         [--connect_url=<connect_url>]
         [--wallet=<coldkey_ss58> [--legacy-network-wallet]]
         [--max-memory=<mem>]
+        [--allow-client-registration]
+        [--quarantine-rejected-sign-in]
+        [--operator-child]
         [--proxy_file=<proxy_file>]
         [--file=<file>]
         [--proxy_url=<proxy_url>...]
@@ -7340,6 +7371,7 @@ Usage:
         [--connect_url=<connect_url>]
         [--wallet=<coldkey_ss58> [--legacy-network-wallet]]
         [--max-memory=<mem>]
+        [--allow-client-registration]
         [--proxy_file=<proxy_file>]
         [--file=<file>]
         [--proxy_url=<proxy_url>...]
@@ -7446,6 +7478,21 @@ Options:
     --no-open                        wallet sign: do not open the browser; print the address only.
     --api_url=<api_url>              Specify a custom API URL to use.
     --connect_url=<connect_url>      Specify a custom connect URL to use.
+    --all-operators                  provide: run one provider per operator in the operator list, each in its
+                                     own state directory operators/<domain> below the provider state directory.
+                                     Excludes --api_url, --connect_url, and the wallet flags.
+    --operators-url=<url>            Operator list URL. Defaults to the published list.
+    --operators-refresh=<duration>   How often to refresh the operator list; at least 1m. Default: 1h.
+    --operator=<domain>              auth: sign in to this listed operator and write its jwt below its directory.
+    --auto-register                  Provide --all-operators: sign in with the hotkey for every operator that
+                                     has no jwt yet. Needs --hotkey_seed_file.
+    --allow-client-registration      With provide --all-operators: allow a new operator's provider to create its
+                                     client identity when that operator's state directory has no .provider.key
+                                     yet. Without it a new operator directory is refused. Plain provide is unchanged.
+    --quarantine-rejected-sign-in    Internal: a rejected network sign-in is set aside and the process exits so
+                                     its supervisor can sign in again.
+    --operator-child                 Internal: this process is one operator child of provide --all-operators.
+                                     A missing .provider.key is refused instead of created.
     <api_url>                        API URL to save as the chosen network (http:// or https://),
                                      or a preset: main | beta.
     <connect_url>                    Connect URL to save as the chosen network (ws:// or wss://).
@@ -7491,7 +7538,9 @@ Options:
                                      the manifest is the single source for the fleet identity.
     --hotkey_seed_file=<file>        sr25519 hotkey seed file (raw or hex 32 bytes). Required by
                                      bind-head: the fleet binding is dual-signed, and this key must
-                                     match the manifest hotkey.
+                                     match the manifest hotkey. With provide --all-operators and --auto-register
+                                     it signs in to each listed operator; with auth --operator it signs in
+                                     to that operator. The file is never created and never logged.
     --client_id=<hex16>              The provider's 16-byte client_id (hex). Defaults to the client_id in
                                      the provider's client JWT store (the "direct" entry).
     --client_seed_file=<file>        Ed25519 client seed file (raw or hex 32 bytes) overriding the

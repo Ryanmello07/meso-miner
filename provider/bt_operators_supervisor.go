@@ -1,8 +1,8 @@
 package main
 
 // The supervisor of "provide --all-operators". Ported from the sn miner's
-// operators_supervisor.go (upstream 4ca8316e), adapted to the v33 provider's
-// frozen grammar and state model:
+// operators_supervisor.go (upstream 6608298e), adapted to the v33 provider's
+// state model:
 //
 //   - It re-executes this binary as one "provide" child per listed operator
 //     that has a jwt, with the operator's urls from the list.
@@ -11,37 +11,47 @@ package main
 //     (operatorlist.DomainStateDir below the provider state directory) as
 //     HOME, and the child's state directory is the .urnetwork inside it
 //     (operatorJwtPath is the jwt there). An inherited HOME is dropped.
-//   - Without --auto-register, --hotkey_seed_file and --port in the grammar
-//     there is no hotkey sign-in, no hotkey wallet upkeep, no memory share
-//     and no status server here. An operator without a jwt is awaiting auth:
-//     it gets no child and its jwt is checked again every 5 minutes, so it
-//     starts as soon as its jwt is written.
+//   - An operator without a jwt is awaiting auth. Without --auto-register it
+//     gets no child and its jwt is checked again every 5 minutes. With
+//     --auto-register the hotkey signs in to the operator and writes the jwt.
+//   - The hotkey wallet upkeep of sn's operator lane is not ported here
+//     (Stage A): there is no hotkey wallet fan-out in this supervisor.
 //
 // The loop keeps the rest of the sn behavior unchanged:
 //   - a child that exits restarts after a backoff, 30s doubling to 10m. A
 //     child that ran for 10m starts the doubling over.
-//   - the child of a delisted operator, or one whose urls changed, gets
-//     SIGTERM and SIGKILL 60s later. The state directory stays.
+//   - the child of a delisted operator, or one whose urls or memory share
+//     changed, gets SIGTERM and SIGKILL 60s later. The state directory stays.
 //   - SIGINT, SIGTERM and SIGQUIT are forwarded to every child, and the
-//     supervisor returns once all of them have exited.
+//     supervisor returns once all of them have exited and no sign-in runs.
+//   - --port serves the supervisor's status, and is off at 0 (the default),
+//     exactly as in sn.
 //
-// Only the Run loop touches operator state. Child exits and credential
-// checks reach it over channels.
+// Only the Run loop touches operator state. Child exits and sign-ins reach it
+// over channels; the status page reads a published snapshot.
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/urnetwork/connect"
+
+	"github.com/urfoundation/sn/crv4"
+	"github.com/urfoundation/sn/hotkeyauth"
 	"github.com/urfoundation/sn/operatorlist"
 )
 
@@ -50,12 +60,27 @@ const operatorRestartMaximumDelay = 10 * time.Minute
 const operatorStopGrace = 60 * time.Second
 const operatorAuthRecheckInterval = 5 * time.Minute
 
+// After a child set a rejected network sign-in aside, the next automatic
+// sign-in is at once for the first rejection in a while, then waits this long
+// after the latest rejection, doubling with each one in a row up to the
+// maximum. The set-aside files carry the times and the count, so the limit
+// survives a supervisor restart (QuarantineNetworkToken).
+const operatorAutomaticSignInMinimumDelay = time.Hour
+const operatorAutomaticSignInMaximumDelay = 24 * time.Hour
+
 // The supervisor's command line, read by newOperatorSupervisorSettings.
 type operatorSupervisorSettings struct {
 	// today's provider state directory; each operator's lies below it
 	baseStateDir string
 	executable   string
-	verbosity    int
+	// loaded from --hotkey_seed_file: signs in only with autoRegister
+	hotkey       *crv4.Keypair
+	autoRegister bool
+	// divided evenly over the children; nonpositive passes none
+	maxMemory               connect.ByteCount
+	verbosity               int
+	allowClientRegistration bool
+	port                    int
 }
 
 // A started child: a real process, or a test's stand-in.
@@ -75,18 +100,20 @@ type operatorChildCommand struct {
 
 // Tests replace these, so they run no process and wait on no real timer.
 type operatorSupervisorHooks struct {
-	start func(operatorChildCommand) (operatorChildProcess, error)
-	now   func() time.Time
-	after func(time.Duration) <-chan time.Time
+	start  func(operatorChildCommand) (operatorChildProcess, error)
+	now    func() time.Time
+	after  func(time.Duration) <-chan time.Time
+	signIn func(context.Context, hotkeyauth.Settings) (*hotkeyauth.Network, error)
 	// sees each next deadline (zero for none) just before the loop waits
 	idle func(time.Time)
 }
 
 func defaultOperatorSupervisorHooks() operatorSupervisorHooks {
 	return operatorSupervisorHooks{
-		start: startOperatorChild,
-		now:   time.Now,
-		after: time.After,
+		start:  startOperatorChild,
+		now:    time.Now,
+		after:  time.After,
+		signIn: hotkeyauth.SignIn,
 	}
 }
 
@@ -99,25 +126,30 @@ type operatorListSource interface {
 type operatorChildSpec struct {
 	apiUrl     string
 	connectUrl string
+	// "" passes no --max-memory
+	maxMemory string
 }
 
 // The loop's record of one operator. It outlives a delisting until the
-// operator's child has stopped.
+// operator's child has stopped and no sign-in is pending.
 type operatorState struct {
 	// the latest listing, kept after delisting
 	operator operatorlist.Operator
 	listed   bool
-	// a jwt was found; the child may start
+	// a jwt was found or written; counts toward the memory share
 	credentialed bool
+	signingIn    bool
 	// while awaiting auth, when the jwt is checked again
 	authCheckAt time.Time
-	child       operatorChildProcess
-	spec        operatorChildSpec
-	startedAt   time.Time
-	stopping    bool
-	killAt      time.Time
-	killed      bool
-	restartAt   time.Time
+	// the automatic sign-in limit last logged, so each change logs once
+	signInLimitedUntil time.Time
+	child              operatorChildProcess
+	spec               operatorChildSpec
+	startedAt          time.Time
+	stopping           bool
+	killAt             time.Time
+	killed             bool
+	restartAt          time.Time
 	// consecutive runs shorter than the maximum backoff
 	failures int
 }
@@ -129,6 +161,13 @@ type operatorChildExit struct {
 	err    error
 }
 
+// From a finished sign-in, after it wrote the jwt.
+type operatorSignIn struct {
+	domain  string
+	created bool
+	err     error
+}
+
 type operatorSupervisor struct {
 	settings     operatorSupervisorSettings
 	hooks        operatorSupervisorHooks
@@ -136,28 +175,41 @@ type operatorSupervisor struct {
 	operators    map[string]*operatorState
 	listSha256   string
 	exits        chan operatorChildExit
+	signIns      chan operatorSignIn
+	signInCount  int
 	shuttingDown bool
+	status       atomic.Pointer[operatorSupervisorStatus]
 }
 
 func newOperatorSupervisor(settings operatorSupervisorSettings, hooks operatorSupervisorHooks, log io.Writer) *operatorSupervisor {
-	return &operatorSupervisor{
+	self := &operatorSupervisor{
 		settings:  settings,
 		hooks:     hooks,
 		log:       log,
 		operators: map[string]*operatorState{},
 		exits:     make(chan operatorChildExit),
+		// one result can be in flight per listed operator, and the send must
+		// never block a shutting-down supervisor: capacity is the operator
+		// bound, so every completion drains through the loop's signInCount.
+		signIns: make(chan operatorSignIn, operatorlist.MaximumOperators),
 	}
+	self.status.Store(&operatorSupervisorStatus{Operators: []operatorStatus{}})
+	return self
 }
 
 // Supervises until a signal or ctx stops it and every child has exited.
 func (self *operatorSupervisor) Run(ctx context.Context, list operatorListSource, signals <-chan os.Signal) {
+	// sign-ins end with the supervisor
+	requestCtx, cancelRequests := context.WithCancel(ctx)
+	defer cancelRequests()
 	snapshot, update := list.Snapshot()
 	self.applyList(snapshot)
 	done := ctx.Done()
 	for {
 		now := self.hooks.now()
-		next := self.reconcile(now)
-		if self.shuttingDown && !self.anyChild() {
+		next := self.reconcile(requestCtx, now)
+		self.publishStatus()
+		if self.shuttingDown && self.signInCount == 0 && !self.anyChild() {
 			return
 		}
 		var timeout <-chan time.Time
@@ -173,10 +225,14 @@ func (self *operatorSupervisor) Run(ctx context.Context, list operatorListSource
 			self.applyList(snapshot)
 		case exit := <-self.exits:
 			self.childExited(exit)
+		case result := <-self.signIns:
+			self.signedIn(result)
 		case received := <-signals:
+			cancelRequests()
 			self.shutdown(received)
 		case <-done:
 			done = nil
+			cancelRequests()
 			self.shutdown(syscall.SIGTERM)
 		case <-timeout:
 		}
@@ -224,18 +280,19 @@ func (self *operatorSupervisor) applyList(snapshot *operatorlist.Snapshot) {
 
 // Moves every operator toward what the list and its credentials ask for, and
 // returns the earliest deadline still ahead, or zero.
-func (self *operatorSupervisor) reconcile(now time.Time) time.Time {
+func (self *operatorSupervisor) reconcile(requestCtx context.Context, now time.Time) time.Time {
 	domains := self.domains()
 	if !self.shuttingDown {
-		// credentials first, so every operator that can start does in this
-		// pass
+		// credentials first, so the memory share counts every operator that
+		// starts in this pass
 		for _, domain := range domains {
 			state := self.operators[domain]
-			if state.listed && state.child == nil && !now.Before(state.restartAt) && !now.Before(state.authCheckAt) {
-				self.checkCredentials(domain, state, now)
+			if state.listed && state.child == nil && !state.signingIn && !now.Before(state.restartAt) && !now.Before(state.authCheckAt) {
+				self.checkCredentials(requestCtx, domain, state, now)
 			}
 		}
 	}
+	share := self.memoryShare()
 	var next time.Time
 	earliest := func(deadline time.Time) {
 		if next.IsZero() || deadline.Before(next) {
@@ -258,12 +315,12 @@ func (self *operatorSupervisor) reconcile(now time.Time) time.Time {
 			fmt.Fprintf(self.log, "operator %s: stopping its provider (pid %d)\n", domain, state.child.Pid())
 			self.stop(domain, state, syscall.SIGTERM, now)
 			earliest(state.killAt)
-		case state.child != nil && self.childSpec(state) != state.spec:
-			fmt.Fprintf(self.log, "operator %s: restarting its provider (pid %d) with its new urls\n", domain, state.child.Pid())
+		case state.child != nil && self.childSpec(state, share) != state.spec:
+			fmt.Fprintf(self.log, "operator %s: restarting its provider (pid %d) for its new urls or memory share\n", domain, state.child.Pid())
 			self.stop(domain, state, syscall.SIGTERM, now)
 			earliest(state.killAt)
 		case state.child != nil:
-		case self.shuttingDown:
+		case self.shuttingDown || state.signingIn:
 		case !state.listed:
 			delete(self.operators, domain)
 		case now.Before(state.restartAt):
@@ -271,7 +328,7 @@ func (self *operatorSupervisor) reconcile(now time.Time) time.Time {
 		case !state.credentialed:
 			earliest(state.authCheckAt)
 		default:
-			self.start(domain, state, self.childSpec(state), now)
+			self.start(domain, state, self.childSpec(state, share), now)
 			if state.child == nil {
 				earliest(state.restartAt)
 			}
@@ -280,30 +337,143 @@ func (self *operatorSupervisor) reconcile(now time.Time) time.Time {
 	return next
 }
 
-// Finds the operator's jwt, or logs that the operator awaits auth and
-// schedules the next check. There is no hotkey sign-in here: without
-// --auto-register the jwt is written outside this command, at
-// operatorJwtPath below the operator's directory.
-func (self *operatorSupervisor) checkCredentials(domain string, state *operatorState, now time.Time) {
+// Finds the operator's jwt, or signs in for it with --auto-register, or logs
+// that the operator awaits auth and schedules the next check.
+func (self *operatorSupervisor) checkCredentials(requestCtx context.Context, domain string, state *operatorState, now time.Time) {
 	jwtPath := operatorJwtPath(self.settings.baseStateDir, domain)
 	if _, err := readOperatorJwt(jwtPath); err == nil {
 		state.credentialed = true
 		return
 	}
 	state.credentialed = false
-	fmt.Fprintf(self.log, "operator %s is awaiting auth: its network jwt goes at %s\n", domain, jwtPath)
-	state.authCheckAt = now.Add(operatorAuthRecheckInterval)
+	if !self.settings.autoRegister {
+		fmt.Fprintf(self.log, "operator %s is awaiting auth: provider auth --operator=%s\n", domain, domain)
+		state.authCheckAt = now.Add(operatorAuthRecheckInterval)
+		return
+	}
+	quarantine, quarantined, err := LatestNetworkTokenQuarantine(jwtPath)
+	if err != nil {
+		// unknown rejections are never a reason to sign in at once
+		fmt.Fprintf(self.log, "operator %s: its set-aside network sign-ins cannot be read: %v; checking again in %s\n", domain, err, operatorAuthRecheckInterval)
+		state.authCheckAt = now.Add(operatorAuthRecheckInterval)
+		return
+	}
+	if quarantined {
+		if allowedAt := operatorAutomaticSignInAt(quarantine); now.Before(allowedAt) {
+			if !state.signInLimitedUntil.Equal(allowedAt) {
+				state.signInLimitedUntil = allowedAt
+				fmt.Fprintln(self.log, operatorAutomaticSignInLimitedLog(domain, quarantine, allowedAt))
+			}
+			// a manual sign-in is still noticed at the usual recheck
+			state.authCheckAt = now.Add(operatorAuthRecheckInterval)
+			if allowedAt.Before(state.authCheckAt) {
+				state.authCheckAt = allowedAt
+			}
+			return
+		}
+	}
+	state.signInLimitedUntil = time.Time{}
+	state.signingIn = true
+	self.signInCount++
+	apiUrl := state.operator.ApiUrl
+	if quarantined {
+		fmt.Fprintf(self.log, "operator %s: signing in again with the hotkey after %d rejected network sign-ins in a row\n", domain, quarantine.Consecutive)
+	} else {
+		fmt.Fprintf(self.log, "operator %s: signing in with the hotkey\n", domain)
+	}
+	go func() {
+		result := operatorSignIn{domain: domain}
+		network, err := self.hooks.signIn(requestCtx, hotkeyauth.Settings{ApiUrl: apiUrl, Hotkey: self.settings.hotkey})
+		if err == nil {
+			result.created = network.Created
+			err = persistOperatorJwt(jwtPath, network.ByJwt)
+		}
+		result.err = err
+		self.signIns <- result
+	}()
 }
 
-func (self *operatorSupervisor) childSpec(state *operatorState) operatorChildSpec {
-	return operatorChildSpec{apiUrl: state.operator.ApiUrl, connectUrl: state.operator.ConnectUrl}
+// A failed sign-in is tried again at the next credential check.
+func (self *operatorSupervisor) signedIn(result operatorSignIn) {
+	self.signInCount--
+	state, ok := self.operators[result.domain]
+	if !ok {
+		return
+	}
+	state.signingIn = false
+	if result.err != nil {
+		if !self.shuttingDown {
+			fmt.Fprintf(self.log, "operator %s: hotkey sign-in failed: %v; trying again in %s\n", result.domain, result.err, operatorAuthRecheckInterval)
+		}
+		state.authCheckAt = self.hooks.now().Add(operatorAuthRecheckInterval)
+		return
+	}
+	state.credentialed = true
+	state.authCheckAt = time.Time{}
+	if result.created {
+		fmt.Fprintf(self.log, "operator %s: signed in with the hotkey and created its network\n", result.domain)
+	} else {
+		fmt.Fprintf(self.log, "operator %s: signed in with the hotkey\n", result.domain)
+	}
 }
 
-// A child never gets --all-operators. A new operator directory needs no
-// client-registration flag on this line: the v33 provider registers its own
-// client identity without one.
+// Splits --max-memory evenly over the operators that run, or will once signed
+// in, in the format --max-memory reads back exactly. A child restarts into a
+// new share, so the shares never add up to more than the limit for long.
+func (self *operatorSupervisor) memoryShare() string {
+	if self.settings.maxMemory <= 0 {
+		return ""
+	}
+	count := 0
+	for _, state := range self.operators {
+		if state.listed && (state.credentialed || self.settings.autoRegister) {
+			count++
+		}
+	}
+	if count == 0 {
+		return ""
+	}
+	return formatMemoryShare(max(1, self.settings.maxMemory/connect.ByteCount(count)))
+}
+
+// The largest unit that divides the count exactly, else bytes, so
+// connect.ParseByteCount reads back the same count.
+func formatMemoryShare(byteCount connect.ByteCount) string {
+	for _, unit := range []struct {
+		suffix    string
+		byteCount connect.ByteCount
+	}{
+		{suffix: "gib", byteCount: 1024 * 1024 * 1024},
+		{suffix: "mib", byteCount: 1024 * 1024},
+		{suffix: "kib", byteCount: 1024},
+	} {
+		if byteCount%unit.byteCount == 0 {
+			return fmt.Sprintf("%d%s", byteCount/unit.byteCount, unit.suffix)
+		}
+	}
+	return fmt.Sprintf("%db", byteCount)
+}
+
+func (self *operatorSupervisor) childSpec(state *operatorState, share string) operatorChildSpec {
+	return operatorChildSpec{apiUrl: state.operator.ApiUrl, connectUrl: state.operator.ConnectUrl, maxMemory: share}
+}
+
+// A child never gets --all-operators. A new operator directory has no provider
+// client yet, so with --allow-client-registration or --auto-register every
+// child may register one; the flag never replaces a retained identity.
 func (self *operatorSupervisor) childArgs(spec operatorChildSpec) []string {
-	args := []string{"provide", "--api_url=" + spec.apiUrl, "--connect_url=" + spec.connectUrl, "--port=0"}
+	args := []string{"provide", "--api_url=" + spec.apiUrl, "--connect_url=" + spec.connectUrl, "--port=0", "--operator-child"}
+	if spec.maxMemory != "" {
+		args = append(args, "--max-memory="+spec.maxMemory)
+	}
+	if self.settings.allowClientRegistration || self.settings.autoRegister {
+		args = append(args, "--allow-client-registration")
+	}
+	if self.settings.autoRegister {
+		// a rejected network sign-in is set aside and the child exits, so
+		// this supervisor signs in again with the hotkey
+		args = append(args, "--quarantine-rejected-sign-in")
+	}
 	if 0 < self.settings.verbosity {
 		args = append(args, "-"+strings.Repeat("v", self.settings.verbosity))
 	}
@@ -370,8 +540,7 @@ func (self *operatorSupervisor) backoff(state *operatorState, uptime time.Durati
 }
 
 // A child stopped on purpose starts again at once if still wanted; any other
-// exit waits out the backoff. A child that exited after its jwt went away is
-// rechecked at once, without the crash backoff.
+// exit waits out the backoff.
 func (self *operatorSupervisor) childExited(exit operatorChildExit) {
 	state, ok := self.operators[exit.domain]
 	if !ok || state.child != exit.child {
@@ -385,10 +554,17 @@ func (self *operatorSupervisor) childExited(exit operatorChildExit) {
 		return
 	}
 	if _, err := os.Stat(operatorJwtPath(self.settings.baseStateDir, exit.domain)); errors.Is(err, os.ErrNotExist) {
+		// the child set a rejected network sign-in aside, or the jwt went
+		// away: the credential check decides at once, without the crash
+		// backoff, and signs in again with --auto-register
 		state.credentialed = false
 		state.restartAt = time.Time{}
 		state.authCheckAt = time.Time{}
-		fmt.Fprintf(self.log, "operator %s: provider (pid %d) exited without a network sign-in; checking its credentials\n", exit.domain, exit.child.Pid())
+		if operatorChildQuarantined(exit.err) {
+			fmt.Fprintf(self.log, "operator %s: provider (pid %d) set its rejected network sign-in aside; checking its credentials\n", exit.domain, exit.child.Pid())
+		} else {
+			fmt.Fprintf(self.log, "operator %s: provider (pid %d) exited without a network sign-in; checking its credentials\n", exit.domain, exit.child.Pid())
+		}
 		return
 	}
 	now := self.hooks.now()
@@ -399,6 +575,13 @@ func (self *operatorSupervisor) childExited(exit operatorChildExit) {
 		cause = fmt.Sprintf("exited: %v", exit.err)
 	}
 	fmt.Fprintf(self.log, "operator %s: provider (pid %d) %s; restarting in %s\n", exit.domain, exit.child.Pid(), cause, delay)
+}
+
+// operatorChildQuarantined reports a child that exited because it set its
+// rejected network sign-in aside (providerQuarantinedExitCode).
+func operatorChildQuarantined(err error) bool {
+	var exited interface{ ExitCode() int }
+	return errors.As(err, &exited) && exited.ExitCode() == providerQuarantinedExitCode
 }
 
 // Forwards a stop signal to every child and starts nothing after it.
@@ -521,4 +704,89 @@ func startOperatorChild(command operatorChildCommand) (operatorChildProcess, err
 		return nil, err
 	}
 	return &operatorExecChild{command: child}, nil
+}
+
+// Published after every pass of the loop; never changed once published.
+type operatorSupervisorStatus struct {
+	OperatorListSha256 string           `json:"operator_list_sha256,omitempty"`
+	Operators          []operatorStatus `json:"operators"`
+}
+
+type operatorStatus struct {
+	Domain string `json:"domain"`
+	// running, stopping, restarting, signing in, awaiting auth, delisted or stopped
+	State string `json:"state"`
+	Pid   int    `json:"pid,omitempty"`
+}
+
+func (self *operatorSupervisor) publishStatus() {
+	status := &operatorSupervisorStatus{OperatorListSha256: self.listSha256, Operators: []operatorStatus{}}
+	for _, domain := range self.domains() {
+		state := self.operators[domain]
+		entry := operatorStatus{Domain: domain}
+		if state.child != nil {
+			entry.Pid = state.child.Pid()
+		}
+		switch {
+		case state.child != nil && state.stopping:
+			entry.State = "stopping"
+		case state.child != nil:
+			entry.State = "running"
+		case self.shuttingDown:
+			entry.State = "stopped"
+		case !state.listed:
+			entry.State = "delisted"
+		case state.signingIn:
+			entry.State = "signing in"
+		case !state.restartAt.IsZero():
+			entry.State = "restarting"
+		default:
+			entry.State = "awaiting auth"
+		}
+		status.Operators = append(status.Operators, entry)
+	}
+	self.status.Store(status)
+}
+
+// The process status the single-operator provider serves at --port, with
+// each operator's state in place of the provider diagnostics.
+func (self *operatorSupervisor) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+	status := self.status.Load()
+	host, _ := Host()
+	responseJson, err := json.Marshal(struct {
+		Version string `json:"version,omitempty"`
+		Status  string `json:"status"`
+		Host    string `json:"host"`
+		*operatorSupervisorStatus
+	}{
+		Version:                  RequireVersion(),
+		Status:                   "ok",
+		Host:                     host,
+		operatorSupervisorStatus: status,
+	})
+	if err != nil {
+		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	_, _ = writer.Write(responseJson)
+}
+
+// Serves the status at --port until the returned server is closed; nil when
+// the port is 0.
+func (self *operatorSupervisor) serveStatus(port int) (*http.Server, error) {
+	if port <= 0 {
+		return nil, nil
+	}
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return nil, err
+	}
+	server := &http.Server{Handler: self, ReadHeaderTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second}
+	go func() {
+		if serveErr := server.Serve(listener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+			fmt.Fprintf(self.log, "operator status server: %v\n", serveErr)
+		}
+	}()
+	return server, nil
 }

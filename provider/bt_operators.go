@@ -1,19 +1,17 @@
-// The operators surface: `provider operators` and `provider provide
-// --all-operators`. Ported from the sn miner's operators_cmd.go (upstream
-// 4ca8316e; the fork branch's provider lane has no operators code), adapted
-// to the v33 provider:
+// The operators surface: `provider operators`, `provider provide
+// --all-operators` and `provider auth --operator=<domain>`. Ported from the sn
+// miner's operators_cmd.go (upstream 6608298e), adapted to the v33 provider:
 //
 //   - The state directory is ~/.urnetwork: this binary keys every state path
 //     off HOME and has no URNETWORK_STATE_DIR, so each operator's directory
 //     below operators/ doubles as its child provider's home (see
 //     bt_operators_supervisor.go, operatorChildEnv).
-//   - The frozen grammar carries --operators-url, --operators-refresh and -v
-//     only. There is no --auto-register, --hotkey_seed_file, --port,
-//     --max-memory or --allow-client-registration here, so this file has no
-//     hotkey sign-in, memory share or status server; an operator without a
-//     jwt is reported as awaiting auth and is picked up once its jwt appears.
-//   - `auth --operator` does not exist on this line, so the jwt is written
-//     outside this command; the operator directory layout is the contract.
+//   - `auth --operator` writes the operator's jwt from a hotkey sign-in, an
+//     auth code or a username and password, against the operator's api url
+//     from the list. It never creates a hotkey seed: a missing or unsafe seed
+//     file is an error naming its path.
+//   - --api_url stays in the --all-operators pattern so an explicit value is
+//     refused by name, as before.
 //
 // Every operator keeps its own state directory, operatorlist.DomainStateDir
 // below the provider state directory, and the list is cached as operators.yml
@@ -22,6 +20,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -35,7 +34,11 @@ import (
 	"time"
 
 	"github.com/docopt/docopt-go"
+	"golang.org/x/term"
 
+	"github.com/urnetwork/connect"
+
+	"github.com/urfoundation/sn/hotkeyauth"
 	"github.com/urfoundation/sn/operatorlist"
 )
 
@@ -110,8 +113,8 @@ func allOperatorsArgsError(opts docopt.Opts) error {
 	return nil
 }
 
-// Reads the --all-operators options. Without a hotkey of any kind, the only
-// work here is the refresh validation and the executable path.
+// Reads the --all-operators options. The hotkey is loaded here, so a bad seed
+// file stops startup before any child runs.
 func newOperatorSupervisorSettings(opts docopt.Opts) (operatorSupervisorSettings, operatorlist.RefreshSettings, error) {
 	base, err := operatorBaseStateDir()
 	if err != nil {
@@ -126,7 +129,27 @@ func newOperatorSupervisorSettings(opts docopt.Opts) (operatorSupervisorSettings
 	}
 	operatorsUrl, _ := opts.String("--operators-url")
 	settings := operatorSupervisorSettings{baseStateDir: base}
+	// as for one operator, a nonpositive limit is no limit
+	if raw, err := opts.String("--max-memory"); err == nil {
+		settings.maxMemory, err = connect.ParseByteCount(raw)
+		if err != nil {
+			return operatorSupervisorSettings{}, operatorlist.RefreshSettings{}, fmt.Errorf("--max-memory=%s is not a byte count such as 2gib", raw)
+		}
+	}
+	if settings.port, err = opts.Int("--port"); err != nil {
+		return operatorSupervisorSettings{}, operatorlist.RefreshSettings{}, fmt.Errorf("--port: %w", err)
+	}
 	settings.verbosity, _ = opts["-v"].(int)
+	settings.allowClientRegistration, _ = opts.Bool("--allow-client-registration")
+	settings.autoRegister, _ = opts.Bool("--auto-register")
+	if seedPath, err := opts.String("--hotkey_seed_file"); err == nil && seedPath != "" {
+		if settings.hotkey, err = loadOperatorHotkey(seedPath); err != nil {
+			return operatorSupervisorSettings{}, operatorlist.RefreshSettings{}, err
+		}
+	}
+	if settings.autoRegister && settings.hotkey == nil {
+		return operatorSupervisorSettings{}, operatorlist.RefreshSettings{}, errors.New("--auto-register needs --hotkey_seed_file=<path>")
+	}
 	if settings.executable, err = os.Executable(); err != nil {
 		return operatorSupervisorSettings{}, operatorlist.RefreshSettings{}, err
 	}
@@ -146,6 +169,17 @@ func provideAllOperatorsCmd(opts docopt.Opts) {
 		os.Exit(1)
 	}
 	supervisor := newOperatorSupervisor(settings, defaultOperatorSupervisorHooks(), os.Stderr)
+	if settings.hotkey != nil && !settings.autoRegister {
+		// the hotkey only signs in with --auto-register on this line; Stage A
+		// has no hotkey wallet upkeep to use it for otherwise
+		fmt.Fprintln(os.Stderr, "provide --all-operators: the hotkey is loaded but --auto-register is not set; it is not used for operator sign-in")
+	}
+	// port 0 (the default) serves nothing
+	status, err := supervisor.serveStatus(settings.port)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "provide --all-operators: status server: %v\n", err)
+		os.Exit(1)
+	}
 	// subscribed before any child exists, so every stop signal reaches the
 	// children through the supervisor
 	signals := make(chan os.Signal, 4)
@@ -159,6 +193,184 @@ func provideAllOperatorsCmd(opts docopt.Opts) {
 	supervisor.Run(ctx, refresher, signals)
 	signal.Stop(signals)
 	refresher.Close()
+	if status != nil {
+		_ = status.Close()
+	}
+}
+
+// "provider auth --operator=<domain>".
+func operatorAuthCmd(opts docopt.Opts) {
+	event := connect.NewEventWithContext(context.Background())
+	event.SetOnSignals(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
+	ctx, cancel := context.WithCancel(event.Ctx())
+	err := operatorAuth(ctx, opts, os.Stdout)
+	cancel()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "auth --operator: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// confirmOperatorJwtOverwrite asks before replacing an existing jwt unless -f.
+// The prompt names the path only.
+func confirmOperatorJwtOverwrite(opts docopt.Opts, jwtPath string) bool {
+	if _, err := os.Stat(jwtPath); errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if force, _ := opts.Bool("-f"); force {
+		return true
+	}
+	fmt.Printf("%s exists. Overwrite? [yN]\n", jwtPath)
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	return strings.ToLower(strings.TrimSpace(line)) == "y"
+}
+
+// Writes one listed operator's network jwt, from the logins auth uses against
+// the operator's api url, or from a hotkey sign-in.
+func operatorAuth(ctx context.Context, opts docopt.Opts, out io.Writer) error {
+	domain, _ := opts.String("--operator")
+	base, err := operatorBaseStateDir()
+	if err != nil {
+		return err
+	}
+	snapshot, err := loadOperatorList(ctx, opts, base)
+	if err != nil {
+		return err
+	}
+	operator, ok := snapshot.List.Operator(domain)
+	if !ok {
+		return fmt.Errorf("operator %q is not in the operator list (%s); provider operators prints the list", domain, snapshot.Sha256)
+	}
+	// the domain was validated by the list, so it is safe as a path
+	jwtPath := operatorJwtPath(base, operator.Domain)
+	if !confirmOperatorJwtOverwrite(opts, jwtPath) {
+		return nil
+	}
+	var byJwt string
+	if seedPath, err := opts.String("--hotkey_seed_file"); err == nil && seedPath != "" {
+		hotkey, err := loadOperatorHotkey(seedPath)
+		if err != nil {
+			return err
+		}
+		network, err := hotkeyauth.SignIn(ctx, hotkeyauth.Settings{ApiUrl: operator.ApiUrl, Hotkey: hotkey})
+		if err != nil {
+			return err
+		}
+		if network.Created {
+			fmt.Fprintf(out, "Created the hotkey's network on %s\n", operator.Domain)
+		}
+		byJwt = network.ByJwt
+	} else if byJwt, err = operatorNetworkLogin(ctx, opts, operator.ApiUrl); err != nil {
+		return err
+	}
+	if byJwt == "" {
+		return fmt.Errorf("operator %s returned no jwt", operator.Domain)
+	}
+	if err := persistOperatorJwt(jwtPath, byJwt); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Jwt written to %s\n", jwtPath)
+	if _, err := os.Stat(filepath.Join(filepath.Dir(jwtPath), ".provider.key")); errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintln(out, "This operator has no provider client yet; its first run needs: provider provide --all-operators --allow-client-registration")
+	}
+	return nil
+}
+
+// operatorNetworkLogin is the auth code or username and password login the
+// single-operator auth command uses, against one operator's api url, without
+// writing anything: the caller writes the operator's jwt.
+func operatorNetworkLogin(ctx context.Context, opts docopt.Opts, apiUrl string) (string, error) {
+	clientStrategy := connect.NewClientStrategyWithDefaults(ctx)
+	api := connect.NewBringYourApi(ctx, clientStrategy, apiUrl)
+	if userAuth, err := opts.String("--user_auth"); err == nil && userAuth != "" {
+		password, _ := opts.String("--password")
+		if password == "" {
+			fmt.Print("Enter password: ")
+			passwordBytes, err := termReadPassword()
+			if err != nil {
+				return "", err
+			}
+			password = string(passwordBytes)
+			fmt.Printf("\n")
+		}
+		loginCallback, loginChannel := connect.NewBlockingApiCallback[*connect.AuthLoginWithPasswordResult](ctx)
+		api.AuthLoginWithPassword(&connect.AuthLoginWithPasswordArgs{UserAuth: userAuth, Password: password}, loginCallback)
+		var loginResult connect.ApiCallbackResult[*connect.AuthLoginWithPasswordResult]
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case loginResult = <-loginChannel:
+		}
+		if loginResult.Error != nil {
+			return "", loginResult.Error
+		}
+		if loginResult.Result == nil || loginResult.Result.Error != nil {
+			message := "authentication failed"
+			if loginResult.Result != nil && loginResult.Result.Error != nil && loginResult.Result.Error.Message != "" {
+				message = "authentication failed: " + loginResult.Result.Error.Message
+			}
+			return "", errors.New(message)
+		}
+		if loginResult.Result.VerificationRequired != nil {
+			return "", fmt.Errorf("verification required for %s; complete account setup via the app or web first", loginResult.Result.VerificationRequired.UserAuth)
+		}
+		if loginResult.Result.Network == nil {
+			return "", errors.New("authentication returned no network")
+		}
+		return loginResult.Result.Network.ByJwt, nil
+	}
+	authCode, _ := opts.String("<auth_code>")
+	if authCode == "" {
+		fmt.Print("Enter auth code: ")
+		authCodeBytes, err := termReadPassword()
+		if err != nil {
+			line, readErr := bufio.NewReader(os.Stdin).ReadString('\n')
+			if line == "" && readErr != nil {
+				return "", fmt.Errorf("could not read the auth code from stdin: %w", readErr)
+			}
+			authCodeBytes = []byte(line)
+		}
+		authCode = strings.TrimSpace(string(authCodeBytes))
+		fmt.Printf("\n")
+	}
+	authCodeCallback, authCodeChannel := connect.NewBlockingApiCallback[*connect.AuthCodeLoginResult](ctx)
+	api.AuthCodeLogin(&connect.AuthCodeLoginArgs{AuthCode: authCode}, authCodeCallback)
+	var authCodeResult connect.ApiCallbackResult[*connect.AuthCodeLoginResult]
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case authCodeResult = <-authCodeChannel:
+	}
+	if authCodeResult.Error != nil {
+		return "", authCodeResult.Error
+	}
+	if authCodeResult.Result == nil || authCodeResult.Result.Error != nil {
+		message := "authentication code rejected"
+		if authCodeResult.Result != nil && authCodeResult.Result.Error != nil && authCodeResult.Result.Error.Message != "" {
+			message = "authentication code rejected: " + authCodeResult.Result.Error.Message
+		}
+		return "", errors.New(message)
+	}
+	return authCodeResult.Result.ByJwt, nil
+}
+
+// persistOperatorJwt writes one operator's network token owner-only, below the
+// operator's .urnetwork state directory.
+func persistOperatorJwt(jwtPath string, token string) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return errors.New("refusing to persist an empty network token")
+	}
+	if err := os.MkdirAll(filepath.Dir(jwtPath), 0700); err != nil {
+		return err
+	}
+	return atomicWriteFile(jwtPath, []byte(token), 0600)
+}
+
+// termReadPassword reads one password or auth code from the terminal, with the
+// echo suppressed.
+func termReadPassword() ([]byte, error) {
+	return term.ReadPassword(int(syscall.Stdin))
 }
 
 // "provider operators".
@@ -204,7 +416,7 @@ func printOperators(ctx context.Context, opts docopt.Opts, out io.Writer) error 
 		return err
 	}
 	if awaiting {
-		fmt.Fprintf(out, "an operator awaiting auth needs its network jwt at %s\n", filepath.Join(base, "operators", "<domain>", operatorStateSubdirectory, "jwt"))
+		fmt.Fprintln(out, "authenticate an operator awaiting auth with: provider auth --operator=<domain>")
 	}
 	return nil
 }

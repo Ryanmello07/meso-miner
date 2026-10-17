@@ -10,6 +10,9 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -112,7 +115,7 @@ func TestPrintOperatorsShowsCredentialStateSourceAndDigest(t *testing.T) {
 	table := "" +
 		"alpha.example  jwt present    https://api.alpha.example  wss://connect.alpha.example\n" +
 		"beta.example   awaiting auth  https://api.beta.example   wss://connect.beta.example\n" +
-		"an operator awaiting auth needs its network jwt at " + filepath.Join(base, "operators", "<domain>", operatorStateSubdirectory, "jwt") + "\n"
+		"authenticate an operator awaiting auth with: provider auth --operator=<domain>\n"
 	if want := "source: fetched " + operator.listUrl() + "\ndigest: " + digest + "\n" + table; out.String() != want {
 		t.Fatalf("output:\n%s\nwant:\n%s", out.String(), want)
 	}
@@ -145,5 +148,73 @@ func TestPrintOperatorsFallsBackToTheCache(t *testing.T) {
 	}
 	if _, err := operatorlist.Parse(mustReadOperatorFile(t, operatorListCachePath(base))); err != nil {
 		t.Fatalf("operator list not cached: %v", err)
+	}
+}
+
+// The operator options Stage A adds: the memory share, the status port, the
+// client registration permission and the hotkey seed.
+func TestOperatorSupervisorSettingsReadTheOperatorOptions(t *testing.T) {
+	home := operatorTestHome(t)
+	seedPath := filepath.Join(home, "hotkey.seed")
+	seed := make([]byte, 32)
+	for i := range seed {
+		seed[i] = byte(i + 1)
+	}
+	if err := os.WriteFile(seedPath, seed, 0600); err != nil {
+		t.Fatal(err)
+	}
+	opts := parseOperatorsArgsForTest(t, []string{
+		"provide", "--all-operators",
+		"--operators-url=https://list.example/operators.yml",
+		"--max-memory=3gib", "--port=9090", "--allow-client-registration",
+		"--hotkey_seed_file=" + seedPath,
+	})
+	settings, _, err := newOperatorSupervisorSettings(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.maxMemory != 3*1024*1024*1024 || settings.port != 9090 || !settings.allowClientRegistration || settings.autoRegister || settings.hotkey == nil {
+		t.Fatalf("settings = %+v", settings)
+	}
+
+	// --auto-register needs the seed, and a bad seed or memory value is
+	// refused before any child runs.
+	if _, _, err := newOperatorSupervisorSettings(parseOperatorsArgsForTest(t, []string{"provide", "--all-operators", "--auto-register", "--hotkey_seed_file=" + seedPath})); err != nil {
+		t.Fatalf("--auto-register with a seed refused: %v", err)
+	}
+	if _, _, err := newOperatorSupervisorSettings(parseOperatorsArgsForTest(t, []string{"provide", "--all-operators", "--max-memory=plenty"})); err == nil {
+		t.Fatal("bad --max-memory accepted")
+	}
+	if _, _, err := newOperatorSupervisorSettings(parseOperatorsArgsForTest(t, []string{"provide", "--all-operators", "--hotkey_seed_file=" + filepath.Join(home, "missing.seed")})); err == nil || !strings.Contains(err.Error(), "missing.seed") {
+		t.Fatalf("missing seed file: %v", err)
+	}
+}
+
+func TestOperatorStatusServerIsOffByDefault(t *testing.T) {
+	server, err := newOperatorSupervisor(operatorSupervisorSettings{}, defaultOperatorSupervisorHooks(), io.Discard).serveStatus(0)
+	if err != nil || server != nil {
+		t.Fatalf("port 0 status server = %v, %v", server, err)
+	}
+}
+
+// auth --operator is its own grammar line and refuses a domain the list does
+// not carry before any sign-in is attempted.
+func TestOperatorAuthRefusesADomainNotInTheList(t *testing.T) {
+	home := operatorTestHome(t)
+	operator := newTestOperatorListServer(t)
+	operator.setList(t, testListedOperator("alpha.example"))
+	opts := parseOperatorsArgsForTest(t, []string{"auth", "--operator=beta.example", "--operators-url=" + operator.listUrl()})
+	if selected, _ := opts.Bool("auth"); !selected {
+		t.Fatal("auth not selected")
+	}
+	if domain, _ := opts.String("--operator"); domain != "beta.example" {
+		t.Fatalf("--operator = %q", domain)
+	}
+	err := operatorAuth(t.Context(), opts, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "is not in the operator list") {
+		t.Fatalf("unknown operator = %v", err)
+	}
+	if _, statErr := os.Stat(operatorJwtPath(filepath.Join(home, ".urnetwork"), "beta.example")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("an unknown operator wrote a jwt: %v", statErr)
 	}
 }
