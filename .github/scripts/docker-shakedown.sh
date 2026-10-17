@@ -101,6 +101,19 @@ EOF
   echo "$d"
 }
 
+# container_listen_ports <container>: space-separated sorted list of the TCP
+# ports the container holds in the LISTEN state. Reads /proc/net/tcp{,6} so it
+# needs no tooling inside the image, and converts the hex port column with
+# printf. Empty output means the container listens on nothing.
+container_listen_ports() {
+  local c="$1"
+  docker exec "$c" sh -c 'cat /proc/net/tcp /proc/net/tcp6 2>/dev/null' 2>/dev/null \
+    | awk '$4 == "0A" { split($2, p, ":"); print p[2] }' \
+    | sort -u \
+    | while read -r h; do printf '%d\n' "0x$h"; done \
+    | sort -n | tr '\n' ' ' | sed 's/ *$//'
+}
+
 # stage_hotswap_binary <container> <tag>: downloads the release tarball for
 # <tag> on the HOST and atomically `mv`s the extracted `provider` binary onto
 # the RUNNING container's on-disk provider path, WITHOUT touching the running
@@ -282,18 +295,35 @@ else
 fi
 cleanup_dsk
 
-# ---------- W4. ENABLE_VNSTAT / ENABLE_IP_CHECKER ----------
-section "W4. ENABLE_VNSTAT / ENABLE_IP_CHECKER"
+# ---------- W4. ENABLE_VNSTAT retired / ENABLE_IP_CHECKER ----------
+# vnStat, the CGI stats page and container port 8080 were retired: ENABLE_VNSTAT
+# is accepted as a no-op that warns, and there is no status port to poll. The
+# check therefore asserts the retirement warning and that nothing listens on
+# 8080, instead of curling a page that no longer exists.
+section "W4. ENABLE_VNSTAT retired / ENABLE_IP_CHECKER"
 d=$(fresh_state_dir)
-docker run -d --name dsk-w4-vnstat -p 127.0.0.1:18080:8080 -v "$d:/root/.urnetwork" \
+docker run -d --name dsk-w4-vnstat -v "$d:/root/.urnetwork" \
   -e BUILD=jwt -e PROXY_URL_MAX=200 -e ENABLE_VNSTAT=true "${IMAGE}:${EXPECTED_VERSION}" >/dev/null 2>&1
 CID=$(wait_cid_docker dsk-w4-vnstat 120)
 if [ -n "$CID" ]; then
   ok "W4 ENABLE_VNSTAT=true does not break startup (${CID:0:12}…)"
-  HTTP=$(curl -sS -o /dev/null -w "%{http_code}" --max-time 10 http://127.0.0.1:18080/ 2>/dev/null)
-  [ "$HTTP" != "000" ] && [ -n "$HTTP" ] && ok "W4 vnstat port 8080 serves (HTTP $HTTP)" || bad "W4 vnstat port 8080 did not serve (HTTP ${HTTP:-none})"
+  if docker logs dsk-w4-vnstat 2>&1 | grep -q "vnStat has been retired and removed"; then
+    ok "W4 ENABLE_VNSTAT=true logs the retirement warning"
+  else
+    bad "W4 ENABLE_VNSTAT=true set but the retirement warning was not logged"
+  fi
+  LISTEN=$(container_listen_ports dsk-w4-vnstat)
+  case " ${LISTEN} " in
+    *" 8080 "*)
+      bad "W4 something still listens on container port 8080 (listening: ${LISTEN})"
+      ;;
+    *)
+      ok "W4 no listener on container port 8080 (listening: ${LISTEN:-none})"
+      ;;
+  esac
 else
   bad "W4 ENABLE_VNSTAT=true broke startup"
+  docker logs dsk-w4-vnstat 2>&1 | tail -15 | sed 's/^/    | /' | tee -a "$REPORT"
 fi
 docker rm -f dsk-w4-vnstat >/dev/null 2>&1
 d=$(fresh_state_dir)
@@ -468,6 +498,78 @@ VAL=$(cat "$d/node-name" 2>/dev/null)
 cleanup_dsk
 docker volume rm dsk-w9-vol >/dev/null 2>&1
 prune_images
+
+# ---------- W10. AUTH onboarding contract (selector, warnings, fail-closed) ----------
+# The AUTH=userpass|authcode selector is additive over BUILD. These checks need
+# no live auth and make no API call: they assert the startup contract only (the
+# new-identity and wallet reminders, the BUILD deprecation hint, the conflict
+# resolution, the fail-closed error path, and that the auth code value never
+# reaches the logs). Cases that would otherwise reach the provider's login loop
+# are built so the script exits before any network call.
+section "W10. AUTH onboarding contract (selector, warnings, fail-closed)"
+empty=$(mktemp -d "$DSK_TMP/empty.XXXXXX")
+
+docker run -d --name dsk-w10-warn -v "$empty:/root/.urnetwork" -e BUILD=jwt -e PROXY_URL_MAX=50 \
+  "${IMAGE}:${EXPECTED_VERSION}" >/dev/null 2>&1
+sleep 20
+WLOG=/tmp/dsk-w10-warn.log; docker logs dsk-w10-warn > "$WLOG" 2>&1
+if grep -q "WARNING: Without a persistent volume mounted at /root/.urnetwork" "$WLOG"; then
+  ok "W10 empty state dir logs the new-identity warning"
+else
+  bad "W10 empty state dir did not log the new-identity warning"
+fi
+if grep -q "A payout wallet and consent must be set" "$WLOG"; then
+  ok "W10 the payout wallet reminder is logged at startup"
+else
+  bad "W10 the payout wallet reminder is missing from startup logs"
+fi
+docker rm -f dsk-w10-warn >/dev/null 2>&1
+
+docker run -d --name dsk-w10-hint -v "$empty:/root/.urnetwork" -e BUILD=jwt \
+  "${IMAGE}:${EXPECTED_VERSION}" >/dev/null 2>&1
+sleep 20
+HLOG=/tmp/dsk-w10-hint.log; docker logs dsk-w10-hint > "$HLOG" 2>&1
+HINTS=$(grep -c "BUILD is deprecated for auth selection" "$HLOG")
+if [ "$HINTS" -eq 1 ]; then
+  ok "W10 BUILD without AUTH logs exactly one deprecation hint"
+else
+  bad "W10 BUILD without AUTH logged $HINTS deprecation hints (want 1)"
+fi
+docker rm -f dsk-w10-hint >/dev/null 2>&1
+
+docker run -d --name dsk-w10-conflict -v "$empty:/root/.urnetwork" -e BUILD=stable -e AUTH=authcode \
+  -e AUTHCODE=shakedown-not-a-real-code "${IMAGE}:${EXPECTED_VERSION}" >/dev/null 2>&1
+sleep 20
+CLOG=/tmp/dsk-w10-conflict.log; docker logs dsk-w10-conflict > "$CLOG" 2>&1
+if grep -q "Conflicting AUTH='authcode' and BUILD='stable'" "$CLOG"; then
+  ok "W10 conflicting AUTH/BUILD logs the conflict warning"
+else
+  bad "W10 conflicting AUTH/BUILD did not log the conflict warning"
+fi
+if grep -q "USER_AUTH or PASSWORD not set" "$CLOG"; then
+  ok "W10 the conflict resolves in favour of BUILD (stable path ran, no login attempted)"
+else
+  bad "W10 the conflict did not resolve in favour of BUILD"
+fi
+if grep -q "shakedown-not-a-real-code" "$CLOG"; then
+  bad "W10 the AUTHCODE value leaked into the logs"
+else
+  ok "W10 the AUTHCODE value is never logged"
+fi
+docker rm -f dsk-w10-conflict >/dev/null 2>&1
+
+nostate=$(mktemp -d "$DSK_TMP/nostate.XXXXXX")
+docker run --name dsk-w10-fail -v "$nostate:/root/.urnetwork" -e AUTH=authcode \
+  "${IMAGE}:${EXPECTED_VERSION}" >/tmp/dsk-w10-fail.log 2>&1
+RC=$?
+FLOG=/tmp/dsk-w10-fail.log
+if [ "$RC" -eq 1 ] && grep -q "ERROR: AUTH=authcode requires AUTHCODE" "$FLOG"; then
+  ok "W10 AUTH=authcode with no code fails closed with exit 1 and a clear error"
+else
+  bad "W10 AUTH=authcode with no code did not fail closed (rc=$RC)"
+  tail -8 "$FLOG" | sed 's/^/    | /' | tee -a "$REPORT"
+fi
+docker rm -f dsk-w10-fail >/dev/null 2>&1
 
 # ============================================================
 # X. Lifecycle, PID 1, and restart policies
@@ -1135,13 +1237,16 @@ prune_images
 # ============================================================
 
 # ---------- AB1. Two provider containers: distinct names/mounts, no collision ----------
-section "AB1. Two provider containers: distinct state, ENABLE_VNSTAT port collision"
+# The status port is gone, so the shared host-port mapping below is only a
+# vehicle for the collision assertion: docker must refuse the second bind
+# loudly, whatever listens (or does not) inside the containers.
+section "AB1. Two provider containers: distinct state, host-port collision fails loudly"
 d1=$(fresh_state_dir); d2=$(fresh_state_dir)
-docker run -d --name dsk-ab1-a -v "$d1:/root/.urnetwork" -e BUILD=jwt -e PROXY_URL_MAX=50 -e ENABLE_VNSTAT=true \
+docker run -d --name dsk-ab1-a -v "$d1:/root/.urnetwork" -e BUILD=jwt -e PROXY_URL_MAX=50 \
   -p 127.0.0.1:18081:8080 "${IMAGE}:${EXPECTED_VERSION}" >/dev/null 2>&1
 CID1=$(wait_cid_docker dsk-ab1-a 120)
 [ -n "$CID1" ] && ok "AB1 first provider container up (${CID1:0:12}…)" || bad "AB1 first provider container failed to reach live"
-docker run -d --name dsk-ab1-b -v "$d2:/root/.urnetwork" -e BUILD=jwt -e PROXY_URL_MAX=50 -e ENABLE_VNSTAT=true \
+docker run -d --name dsk-ab1-b -v "$d2:/root/.urnetwork" -e BUILD=jwt -e PROXY_URL_MAX=50 \
   -p 127.0.0.1:18081:8080 "${IMAGE}:${EXPECTED_VERSION}" >/tmp/dsk-ab1-b.log 2>&1
 if [ $? -ne 0 ] && grep -qiE "port is already allocated|bind.*address already in use" /tmp/dsk-ab1-b.log; then
   ok "AB1 second container with the SAME host port fails LOUDLY (port collision refused at docker run), never silently"
