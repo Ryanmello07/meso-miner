@@ -2,7 +2,8 @@
 # Run before pushing a release tag. A tag push starts build.yml, which runs
 # gofmt and the full -short -race suite in shards; a failure there leaves a
 # published pre-release without its Docker image. This runs the same checks
-# locally, in the same shape, and stops at the first failure.
+# locally, in the same shape, and stops at the first failure. It also builds
+# the Docker image (amd64, no push) so a Dockerfile break cannot reach a tag.
 #
 #   scripts/pre-tag-check.sh            # everything
 #   scripts/pre-tag-check.sh --quick    # gofmt, vet and build only (no tests)
@@ -38,6 +39,14 @@ echo "== shard partition covers every package"
 if [ "$quick" = 1 ]; then
   echo "quick checks passed (tests not run)"
   exit 0
+fi
+
+echo "== docker build (amd64, no push; build.yml build-and-push job)"
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  docker build --progress=plain -t urnetwork-pre-tag-check:local .
+  echo "  docker build ok"
+else
+  echo "  docker unavailable; skipped (a tag push still runs it in build.yml)"
 fi
 
 echo "== go test -short -race, one shard at a time (build.yml test job)"
