@@ -265,7 +265,7 @@ urnet-tools sn-status --json
   Net Bandwidth:    1,234,567.89 MiB (1205.63 GiB) provided
   Coldkey (SS58):   5FjfHgd4K3H5Vge2igPtBYyWRbRKdgH84roTCnWwwtNgAhU5
   Coldkey (Hex):    0xa21b...
-  Subnet Epoch:     #1054 (Start: #1054000, Finalize: #1054720)
+  Subnet Epoch:     #1054 (Start: #53121600, Finalize: #53172000)
   Contract:         0x5FbDB2315678afecb367f032d93F642f64180aa3 (Chain ID: 964)
   Payout Share:     4.85% (485 bps in Epoch #1053)
 ════════════════════════════════════════════════════════════════════════════════
