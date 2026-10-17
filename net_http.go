@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1807,17 +1808,43 @@ func NewBlockingApiCallback[R any](ctx context.Context) (ApiCallback[R], chan Ap
 	return apiCallback, c
 }
 
+// HttpStatusError is a non-200 HTTP response from an API call.
+//
+// Error returns exactly the text this error had before it carried a type, so
+// every log line and every caller that prints it is unchanged. The status
+// code makes a confirmed rejection distinguishable from a transport error or
+// a 5xx without matching on text.
+type HttpStatusError struct {
+	StatusCode int
+	Status     string
+	Body       []byte
+}
+
+func (self *HttpStatusError) Error() string {
+	body := strings.TrimSpace(string(self.Body))
+	if strings.HasPrefix(body, "<") {
+		return fmt.Sprintf("%s: <html error page, %d bytes>", self.Status, len(self.Body))
+	}
+	return fmt.Sprintf("%s: %s", self.Status, body)
+}
+
+func (self *HttpStatusError) HTTPStatusCode() int {
+	return self.StatusCode
+}
+
 // httpErrorFromResponse builds an error from a non-200 response. Some
 // front-end proxies (nginx, Cloudflare) return an HTML error page as the
 // body instead of plain text or JSON; embedding that verbatim produces
 // multi-line, unreadable log spam at every call site that prints the error.
 // Collapse an HTML body down to a short descriptor instead.
 func httpErrorFromResponse(status string, bodyBytes []byte) error {
-	body := strings.TrimSpace(string(bodyBytes))
-	if strings.HasPrefix(body, "<") {
-		return fmt.Errorf("%s: <html error page, %d bytes>", status, len(bodyBytes))
+	statusCode := 0
+	if fields := strings.Fields(status); 0 < len(fields) {
+		if parsed, err := strconv.Atoi(fields[0]); err == nil {
+			statusCode = parsed
+		}
 	}
-	return fmt.Errorf("%s: %s", status, body)
+	return &HttpStatusError{StatusCode: statusCode, Status: status, Body: bodyBytes}
 }
 
 func HttpPostWithStrategyRaw(
