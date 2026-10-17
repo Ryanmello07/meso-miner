@@ -7,7 +7,7 @@
 #   - Configure proxy if provided
 #   - Detect system architecture
 #   - Optionally check public IP
-#   - Start vnStat monitoring and lightweight HTTP server
+#   - Log the vnStat retirement warning when ENABLE_VNSTAT is set
 #   - Authenticate and obtain JWT
 #   - Manage provider lifecycle (restart on crash)
 #   - Check for provider updates from GitHub releases (THIS FORK ONLY)
@@ -25,7 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 export TZ="America/Tijuana"
 APP_DIR="/app"
 JWT_FILE="$HOME/.urnetwork/jwt"
-ENABLE_VNSTAT="${ENABLE_VNSTAT:-true}"
+ENABLE_VNSTAT="${ENABLE_VNSTAT:-}"
 ENABLE_IP_CHECKER="${ENABLE_IP_CHECKER:-false}"
 IP_CHECKER_URL="https://raw.githubusercontent.com/techroy23/IP-Checker/refs/heads/main/app.sh"
 API_URL="https://api.github.com/repos/full-bars/urnetwork-3.23-fix/releases/latest"
@@ -147,24 +147,11 @@ func_ip_checker() {
   fi
 }
 
-# === vnStat Monitoring Setup ===
+# === vnStat Monitoring (Retired) ===
 func_start_vnstat() {
-    VNSTAT_LC="$(printf '%s' "$ENABLE_VNSTAT" | tr '[:upper:]' '[:lower:]')"
-    if [ "$VNSTAT_LC" = "true" ]; then
-        if [ -f /var/lib/vnstat/vnstat.db ]; then
-            log "[INFO] vnStat DB already exists (SQLite backend)"
-        elif [ -f /var/lib/vnstat/.config ]; then
-            log "[INFO] vnStat DB already exists (binary backend)"
-        else
-            log "[INFO] Initializing vnStat database"
-            vnstatd --initdb
-        fi
-        vnstatd -d --alwaysadd >/dev/null 2>&1
-        log "[INFO] vnstatd started"
-        mkdir -p /app/www && ln -sf /app/cgi-bin /app/www/cgi-bin && httpd -f -p 8080 -h /app/www &
-        log "[INFO] HTTP server started on container port 8080"
-    else
-        log "[INFO] VNSTAT disabled ..."
+    VNSTAT_LC="$(printf '%s' "${ENABLE_VNSTAT:-}" | tr '[:upper:]' '[:lower:]')"
+    if [ "$VNSTAT_LC" = "true" ] || [ "$VNSTAT_LC" = "1" ] || [ "$VNSTAT_LC" = "yes" ]; then
+        log "[WARN] vnStat has been retired and removed; use URNETWORK_METRICS and Prometheus for telemetry"
     fi
 }
 

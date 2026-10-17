@@ -7,7 +7,7 @@
 #   - Configure proxy if provided
 #   - Detect system architecture
 #   - Optionally check public IP
-#   - Start vnStat monitoring and lightweight HTTP server
+#   - Log the vnStat retirement warning when ENABLE_VNSTAT is set
 #   - Authenticate and obtain JWT
 #   - Manage provider lifecycle (restart on crash)
 
@@ -18,9 +18,17 @@ set -e
 export TZ="America/Tijuana"
 APP_DIR="/app"
 JWT_FILE="$HOME/.urnetwork/jwt"
-ENABLE_VNSTAT="${ENABLE_VNSTAT:-true}"
+ENABLE_VNSTAT="${ENABLE_VNSTAT:-}"
 ENABLE_IP_CHECKER="${ENABLE_IP_CHECKER:-false}"
 IP_CHECKER_URL="https://raw.githubusercontent.com/techroy23/IP-Checker/refs/heads/main/app.sh"
+
+# Sourcing JWT verification helper
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/jwt_verify.sh" ]; then
+  . "$SCRIPT_DIR/jwt_verify.sh"
+elif [ -f "/app/jwt_verify.sh" ]; then
+  . "/app/jwt_verify.sh"
+fi
 
 # === Logging Helper ===
 log() {
@@ -128,24 +136,11 @@ func_ip_checker() {
   fi
 }
 
-# === vnStat Monitoring Setup ===
+# === vnStat Monitoring (Retired) ===
 func_start_vnstat() {
-    VNSTAT_LC="$(printf '%s' "$ENABLE_VNSTAT" | tr '[:upper:]' '[:lower:]')"
-    if [ "$VNSTAT_LC" = "true" ]; then
-        if [ -f /var/lib/vnstat/vnstat.db ]; then
-            log "[INFO] vnStat DB already exists (SQLite backend)"
-        elif [ -f /var/lib/vnstat/.config ]; then
-            log "[INFO] vnStat DB already exists (binary backend)"
-        else
-            log "[INFO] Initializing vnStat database"
-            vnstatd --initdb
-        fi
-        vnstatd -d --alwaysadd >/dev/null 2>&1
-        log "[INFO] vnstatd started"
-        mkdir -p /app/www && ln -sf /app/cgi-bin /app/www/cgi-bin && httpd -f -p 8080 -h /app/www &
-        log "[INFO] HTTP server started on container port 8080"
-    else
-        log "[INFO] VNSTAT disabled ..."
+    VNSTAT_LC="$(printf '%s' "${ENABLE_VNSTAT:-}" | tr '[:upper:]' '[:lower:]')"
+    if [ "$VNSTAT_LC" = "true" ] || [ "$VNSTAT_LC" = "1" ] || [ "$VNSTAT_LC" = "yes" ]; then
+        log "[WARN] vnStat has been retired and removed; use URNETWORK_METRICS and Prometheus for telemetry"
     fi
 }
 
@@ -153,11 +148,19 @@ func_start_vnstat() {
 func_do_login() {
     PROVIDER_BIN="$APP_DIR/urnetwork_${A_SYS_ARCH}_stable"
 
-    # If a JWT already exists (e.g. persisted via a Docker volume), skip auth entirely.
-    # This is the Watchtower-safe path: container restarts after an image update reuse
-    # the existing token rather than hitting the API again with a spent auth code.
+    # If a JWT already exists (e.g. persisted via a Docker volume), validate it locally.
+    # If expired or invalid, delete it so re-authentication can proceed cleanly.
     if [ -s "$JWT_FILE" ]; then
-        log "[INFO] Existing JWT found at $JWT_FILE — skipping authentication"
+        if command -v validate_jwt_file >/dev/null 2>&1; then
+            if ! validate_jwt_file "$JWT_FILE"; then
+                log "[WARN] Stored JWT expired or invalid - removing stale token"
+                rm -f "$JWT_FILE"
+            fi
+        fi
+    fi
+
+    if [ -s "$JWT_FILE" ]; then
+        log "[INFO] Existing JWT found at $JWT_FILE - skipping authentication"
         return 0
     fi
 
