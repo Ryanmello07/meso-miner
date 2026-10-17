@@ -555,9 +555,18 @@ func TestAuxiliaryH3SwitchOffWhileLiveDoesNotMarkProxyDown(t *testing.T) {
 			t.Fatal("timed out waiting for server connection")
 		}
 
-		proxyHealthMu.Lock()
-		initialUp := proxyHealthByIndex[0].currentlyUp
-		proxyHealthMu.Unlock()
+		// The route observer fires as the route registers, which can be a moment
+		// before the proxy is marked up, so wait for the mark instead of reading it once.
+		upDeadline := time.Now().Add(5 * time.Second)
+		initialUp := false
+		for !initialUp && time.Now().Before(upDeadline) {
+			proxyHealthMu.Lock()
+			initialUp = proxyHealthByIndex[0].currentlyUp
+			proxyHealthMu.Unlock()
+			if !initialUp {
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
 		if !initialUp {
 			t.Fatal("expected explicit H3 connection to mark proxy up")
 		}
