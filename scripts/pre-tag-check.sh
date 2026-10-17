@@ -3,10 +3,12 @@
 # gofmt and the full -short -race suite in shards; a failure there leaves a
 # published pre-release without its Docker image. This runs the same checks
 # locally, in the same shape, and stops at the first failure. It also builds
-# the Docker image (amd64, no push) so a Dockerfile break cannot reach a tag.
+# the Docker image (amd64, no push) so a Dockerfile break cannot reach a tag; if docker is
+# missing or not running that is a FAILURE unless --skip-docker is passed.
 #
-#   scripts/pre-tag-check.sh            # everything
-#   scripts/pre-tag-check.sh --quick    # gofmt, vet and build only (no tests)
+#   scripts/pre-tag-check.sh                  # everything, including the docker build
+#   scripts/pre-tag-check.sh --quick          # gofmt, vet and build only (no tests, no docker build)
+#   scripts/pre-tag-check.sh --skip-docker    # everything except the docker build (the run must say why)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -17,7 +19,18 @@ cd "$(dirname "$0")/.."
 export TMPDIR=/tmp
 
 quick=0
-[ "${1:-}" = "--quick" ] && quick=1
+skip_docker=0
+for arg in "$@"; do
+  case "$arg" in
+    --quick) quick=1 ;;
+    --skip-docker) skip_docker=1 ;;
+    *)
+      echo "unknown option: $arg" >&2
+      echo "usage: scripts/pre-tag-check.sh [--quick] [--skip-docker]" >&2
+      exit 2
+      ;;
+  esac
+done
 
 echo "== gofmt (build.yml lint job)"
 unformatted=$(gofmt -l . | grep -v "^third_party/" || true)
@@ -37,16 +50,22 @@ echo "== shard partition covers every package"
 ./.github/scripts/test_shard.sh --verify
 
 if [ "$quick" = 1 ]; then
-  echo "quick checks passed (tests not run)"
+  echo "quick checks passed (tests and the docker build not run)"
   exit 0
 fi
 
 echo "== docker build (amd64, no push; build.yml build-and-push job)"
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+if [ "$skip_docker" = 1 ]; then
+  echo "  SKIPPED via --skip-docker: build.yml still runs the Docker build at the tag;"
+  echo "  the run/report must state why this check was skipped."
+elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   docker build --progress=plain -t urnetwork-pre-tag-check:local .
   echo "  docker build ok"
 else
-  echo "  docker unavailable; skipped (a tag push still runs it in build.yml)"
+  echo "ERROR: docker is not installed or its daemon is not running, so the Dockerfile cannot be checked." >&2
+  echo "  This is the class the rc4 image build failed on (run 38981852019)." >&2
+  echo "  Install/start docker and re-run, or re-run with --skip-docker and state why it is skipped." >&2
+  exit 1
 fi
 
 echo "== go test -short -race, one shard at a time (build.yml test job)"
