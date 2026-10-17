@@ -8,12 +8,15 @@ package durablehead
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/urnetwork/connect/durablevolume"
 	"github.com/urnetwork/connect/internal/durablepath"
@@ -248,6 +251,112 @@ func TestReconcileRejectsAnUnknownTemporary(t *testing.T) {
 	defer cancel()
 	if _, _, _, err := tryReconcileOwner(t, self.root, ctx); !errors.Is(err, ErrUncertain) {
 		t.Fatalf("reconcile accepted an unknown temporary: %v", err)
+	}
+}
+
+// A marker left by a publish whose temporary never existed names no member; a
+// plain open clears it and keeps the committed value.
+func TestStaleCreateMarkerClearsOnOpen(t *testing.T) {
+	self := newFixture(t)
+	if err := self.owner.Publish([]byte("committed"), nil); err != nil {
+		t.Fatal(err)
+	}
+	prefix := self.owner.prefix()
+	if err := self.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(self.root, prefix+"create-"+strings.Repeat("ef", 16)), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(self.volume.Context, 5*time.Second)
+	defer cancel()
+	directory, lock, owner, err := tryOpenOwner(t, self.root, ctx)
+	if err != nil {
+		t.Fatalf("plain open with a stale marker: %v", err)
+	}
+	if names := durableTemporaryNames(t, self.root); len(names) != 0 {
+		closeOwner(t, directory, lock, owner)
+		t.Fatalf("stale marker was not cleared: %v", names)
+	}
+	if value := readOwnerValue(t, owner); value != "committed" {
+		closeOwner(t, directory, lock, owner)
+		t.Fatalf("committed value = %q", value)
+	}
+	closeOwner(t, directory, lock, owner)
+}
+
+// A prefixed member that is neither a marker nor a temporary is unknown; both
+// open modes refuse it.
+func TestUnrecognizedSnapshotMemberRefused(t *testing.T) {
+	self := newFixture(t)
+	if err := self.owner.Publish([]byte("committed"), nil); err != nil {
+		t.Fatal(err)
+	}
+	prefix := self.owner.prefix()
+	if err := self.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(self.root, prefix+"junk"), []byte("planted"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(self.volume.Context, 5*time.Second)
+	defer cancel()
+	if _, _, _, err := tryOpenOwner(t, self.root, ctx); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("plain open accepted an unrecognized member: %v", err)
+	}
+	if _, _, _, err := tryReconcileOwner(t, self.root, ctx); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("reconcile accepted an unrecognized member: %v", err)
+	}
+}
+
+// A pending that names a temporary which is gone keeps its marker as evidence.
+func TestMissingPendingTemporaryKeepsEvidence(t *testing.T) {
+	self := newFixture(t)
+	if err := self.owner.Publish([]byte("committed"), nil); err != nil {
+		t.Fatal(err)
+	}
+	self.owner.at = func(stage string) error {
+		if stage == "pending-written" {
+			return unix.EIO
+		}
+		return nil
+	}
+	if err := self.owner.Publish([]byte("next"), nil); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("faulted publication = %v", err)
+	}
+	retained := make([]byte, 4096)
+	n, err := unix.Fgetxattr(int(self.lock.Fd()), Attribute(testSpec.Kind, testSpec.Name), retained)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var checkpoint Checkpoint
+	if err := json.Unmarshal(retained[:n], &checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint.Pending == nil {
+		t.Fatal("no anchored pending after the fault")
+	}
+	pendingTemporary := checkpoint.Pending.Temporary
+	if err := os.Remove(filepath.Join(self.root, pendingTemporary)); err != nil {
+		t.Fatal(err)
+	}
+	prefix := self.owner.prefix()
+	if err := self.close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(self.volume.Context, 5*time.Second)
+	defer cancel()
+	if _, _, _, err := tryReconcileOwner(t, self.root, ctx); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("reconcile accepted a missing pending temporary: %v", err)
+	}
+	found := false
+	for _, name := range durableTemporaryNames(t, self.root) {
+		if strings.HasPrefix(name, prefix+"create-") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the evidence marker was cleared")
 	}
 }
 
