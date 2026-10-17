@@ -261,6 +261,10 @@ See [Docker Deployment](docs/Docker-Deployment.md) for Docker Compose, email/pas
 | `urnetwork choose_network <api_url> <connect_url>` | You run your own API/connect backend and want the provider to default to it |
 | `urnetwork choose_network --reset` | You want to clear a saved custom network and revert to the main network |
 | `urnetwork choose_network --show` | You want to see which network is in effect (the saved one or the main network); it warns when the saved URLs are unencrypted |
+| `urnetwork auth --operator=<domain>` | You want to write one listed operator's network token (auth code, user/password, or `--hotkey_seed_file`) |
+| `urnetwork provide --all-operators --auto-register --hotkey_seed_file=<path>` | You want one provider per listed operator, signing in with the hotkey for every operator that has no token yet |
+| `urnetwork operators` | You want the published operator list with each operator's credential state |
+| `urnetwork snclaim <args>` | You want the low-level settlement-vault tool (v1 submit/status/withdraw, v2 status/claim/check); `urnetwork snclaim --help` prints its usage |
 
 > [!TIP]
 > `~/proxies.txt` and `/home/user/proxies.txt` are both valid straight path formats across all tools.

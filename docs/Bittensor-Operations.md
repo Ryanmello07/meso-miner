@@ -105,12 +105,15 @@ services:
 
 ## 3. Hotkey Delegation (`provider wallet hotkey`)
 
-One coldkey signature pays the miner on every operator. `provider wallet hotkey` maps the hotkey to the coldkey with a global consent that both keys sign; the consent is kept as a chain of generations under `hotkey-wallet/` in the provider state directory, and the operator stores the chain and a delegation of the miner's network to the chain's head. The coldkey never signs per operator.
+One coldkey signature pays the miner on every operator. `provider wallet hotkey` maps the hotkey to the coldkey with a global consent that both keys sign; the consent is kept as a chain of generations under `hotkey-wallet/` in the provider state directory, and each operator stores the chain and a delegation of the miner's network to the chain's head. The coldkey never signs per operator.
 
-- `provider wallet hotkey challenge <coldkey_ss58> --hotkey_seed_file=<path>` builds the next consent statement and prints the exact message for an offline coldkey signature; the statement waits in `hotkey-wallet/pending.json`.
-- `provider wallet hotkey set <coldkey_ss58> --hotkey_seed_file=<path>` takes the coldkey signature with `--coldkey_seed_file`, or verifies `--message` and `--signature` against the pending statement; then it signs with the hotkey, stores the generation, and submits the chain and the delegation to the operator this provider resolves (its saved network config, otherwise the default platform URL). A failed submission is reported and the command exits 1; setting the same message and signature again resends it and renews the window. Run it from each provider you run, so every operator you serve stores the chain.
+`challenge`, `set` and `status` act on every authenticated operator in the operator list. Targets come from the list snapshot (`--operators-url`, otherwise the default list; the last good copy is cached as `operators.yml`), and each target reads its own token under `operators/<domain>/.urnetwork/jwt`. The `operators/` directory is never scanned, so an operator that left the list is not written.
+
+- `provider wallet hotkey challenge <coldkey_ss58> --hotkey_seed_file=<path>` builds the next consent statement from the operators it can reach and prints the exact message for an offline coldkey signature; the statement waits in `hotkey-wallet/pending.json`.
+- `provider wallet hotkey set <coldkey_ss58> --hotkey_seed_file=<path>` takes the coldkey signature with `--coldkey_seed_file`, or verifies `--message` and `--signature` against the pending statement; then it signs with the hotkey, stores the generation, and submits the chain and the delegation to every authenticated operator. One operator's failure is reported and never stops the others. The command exits non-zero when any operator failed; operators still awaiting auth are reported but do not count as failures. Setting the same message and signature again retries the operators that did not adopt the head and renews the window. `--operators-url` is carried into the set command it prints, so a non-default list is used both times.
 - A delegation starts two epochs after it is signed and is not retroactive. Sign early if an epoch matters.
-- `provider wallet hotkey status` prints the chain (each generation and the head), the pending statement while one waits, and the delegation the resolved operator holds: whether it adopts the head, the earning window, and any caveat (a window that ends before the operator's epoch; an operator-side signed network consent that outranks the delegation).
+- `provider wallet hotkey status` prints the chain (each generation and the head), the pending statement while one waits, the list it used (including `--operators-url`), each authenticated operator's delegation state and caveats, and each listed operator still awaiting auth. It exits 0 when only awaiting operators remain.
+- Legacy single network: when the provider state directory has no `operators/` directory at all (an install that never used the multi-operator surface), these commands keep the single-network behavior: they act on the network resolved from `--api_url`, the saved network config, or the default. If `operators/` exists but no listed operator has a token, they do not fall back; `challenge` and `set` tell you to authenticate an operator first, and `status` lists the awaiting operators and exits 0.
 
 The full reference, including the offline signing rules, the generation and epoch-window rules and the status output, is in [Bittensor hotkey delegation](Bittensor-Hotkey-Delegation.md).
 
@@ -173,6 +176,8 @@ provider snclaim withdraw --vault=v1 --coldkey=<coldkey> --contract=<v1 vault ad
 ```
 
 Without `--dry-run` the transaction is sent. A withdrawal the vault would revert fails the preflight with the decoded reason, and a coldkey with no credit is refused before anything is signed.
+
+A provider stopped during a claim-queue write no longer strands the queue. The queue marks a publication before it starts and writes the pending checkpoint only after its bytes are complete, so the next start either finishes the write or discards the uncommitted one; a file the marker does not name is still refused.
 
 If claims should not wait for hand runs, run a daemon alongside the provider: [Bittensor claim daemons](Bittensor-Claim-Daemons.md).
 
@@ -244,6 +249,10 @@ The operator surface runs one provider per operator in the operator list.
 - `provider operators` prints each listed operator with its credential state (`jwt present` or `awaiting auth`), and the list's source and digest.
 - `provider provide --all-operators` runs one provider per operator, each with its operator directory as home and its provider state under `.urnetwork` inside it. The network token the supervisor watches is `operators/<domain>/.urnetwork/jwt`; an operator without it is reported as `awaiting auth`, gets no child, and is rechecked every 5 minutes, so it starts as soon as its token is written.
 - The list is fetched from `--operators-url` (https, or http only for loopback; omitted, the built-in default list); the last good copy is kept as `operators.yml` in the provider state directory, and `--operators-refresh` sets the refetch cadence (a Go duration of at least 1m; default 1h). `--api_url` is refused with `--all-operators`.
+- `provider auth --operator=<domain>` writes one listed operator's network token from an auth code, `--user_auth` and `--password`, or `--hotkey_seed_file` (hotkey sign-in, creating the hotkey's network at the first sign-in). It asks before replacing an existing token unless `-f` is given, and the operator's api URL comes from the list.
+- `provide --all-operators --hotkey_seed_file=<path>` loads the hotkey before any child starts; a missing or unreadable seed stops startup and the file is never created or logged. With `--auto-register`, every listed operator without a token is signed in with that hotkey, and each child is started with `--allow-client-registration` so a new operator directory can create its provider client. Without `--auto-register` the hotkey is not used for sign-in.
+- `--allow-client-registration` applies only to operator children: a child whose state directory has no `.provider.key` is refused with `provider_key_requires_explicit_recovery` unless the flag is present. Plain `provide` and `auth-provide` keep the v33 behavior and create a missing key on first run.
+- `--max-memory` is split evenly across the operators that run, or will run once signed in; each child is started with its share. `--port` serves the supervisor status on that port, default 0 (off).
 
 The state layout, the trust model of the list and the operating notes are in [Multi-operator providers](Multi-Operator.md).
 

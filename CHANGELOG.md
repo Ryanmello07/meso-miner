@@ -33,6 +33,8 @@
 
 ### Fixed
 
+- **A stop during a claim-queue write no longer strands the queue**: the durable head marks a publication before it starts and writes the pending checkpoint only after the bytes are complete and synced, and a reconcile clears a crashed marker pair. A file no marker names is still refused, so unknown bytes are never admitted.
+- **`provider wallet hotkey` acts on every authenticated operator**: targets come from the operator list snapshot, one failure never stops the others, and the command exits non-zero keyed off failed operators, not awaiting ones. A pre-operator install with no `operators/` directory keeps the single-network behavior.
 - The client send path (`RemoteUserNatClient` and the multi-client) forwards packets the SMTP guard does not govern. It treated the guard's "not applicable" verdict as a refusal and dropped all ordinary client traffic, which the `-short` CI never saw because the end-to-end echo tests skip there. Provider nodes were not affected: they use the receive-side path.
 - The seed file is read through the descriptor that was checked, closing a check-then-read swap window.
 - The receive path releases its scratch references after a committed-prefix scan.
