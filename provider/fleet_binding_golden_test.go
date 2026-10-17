@@ -42,8 +42,8 @@ const (
 	fleetGoldenBindSelectorHex = "d10781fa"
 	fleetGoldenRevokeDigestHex = "9aa9fee9e190b0c0fd8423f92b74c05a245cc7081d64b2d4504968a3295dea35"
 	fleetGoldenRevokeDataHex   = "7df528561112131415161718191a1b1c1d1e1f2000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000700000000000000000000000000000000000000000000000000000000000005dc000000000000000000000000000000000000000000000000000000000000008000000000000000000000000000000000000000000000000000000000000000405395c384662446cf4e0f2d360c9f1f1917d0dfc955789624f18ec5e930ebb10e8e10aaa57c58459d6dc0212ebc77e83a533ef506f4a6f2a6f2f22fdb30141c08"
-	fleetGoldenCommitmentInfo  = "048395451092d4bfb5633b49c5fdde86b325c7bc32d64d61e1bcfb7be240181420ee"
-	fleetGoldenSetCommitment   = "12001900048395451092d4bfb5633b49c5fdde86b325c7bc32d64d61e1bcfb7be240181420ee"
+	fleetGoldenCommitmentInfo  = "04297572666c6565743195451092d4bfb5633b49c5fdde86b325c7bc32d64d61e1bcfb7be240181420ee"
+	fleetGoldenSetCommitment   = "1200190004297572666c6565743195451092d4bfb5633b49c5fdde86b325c7bc32d64d61e1bcfb7be240181420ee"
 	fleetGoldenRegisterCall    = "078619000a1c77edb48519069bbb154bf088c7f17678839de458e0679370ae989af3f55c6400000000000000"
 )
 
@@ -107,8 +107,8 @@ func fleetGoldenFixture(t *testing.T) (*protocol.FleetManifest, protocol.FleetBi
 
 // TestFleetBindingGoldenVectors pins the manifest, the binding digest and both
 // signatures, the bind calldata wire encoding, and the publish/register
-// artifacts (the commitment info that lands on Subtensor and the exact
-// commitments.set_commitment / SubtensorModule.register_limit calls).
+// artifacts (the tagged Raw40 commitment info that lands on Subtensor and the
+// exact commitments.set_commitment / SubtensorModule.register_limit calls).
 func TestFleetBindingGoldenVectors(t *testing.T) {
 	requireSeedFileCustody(t)
 	manifest, binding, clientSignature, hotkeySignature, clientID, clientPrivate := fleetGoldenFixture(t)

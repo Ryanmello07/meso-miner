@@ -21,7 +21,7 @@ require (
 	github.com/rivo/uniseg v0.4.7
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/pflag v1.0.9
-	github.com/urfoundation/sn v0.0.0-20261016114744-4ca8316e4f3f
+	github.com/urfoundation/sn v0.0.0-20261017010929-6608298ead6b
 	github.com/urnetwork/glog v1.2.10-0.20260227220536-1de77fab89bd
 	github.com/vedhavyas/go-subkey/v2 v2.0.0
 	github.com/wlynxg/anet v0.0.5
