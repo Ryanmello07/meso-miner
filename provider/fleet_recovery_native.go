@@ -225,6 +225,9 @@ func fleetRecoverableNative(ctx context.Context, opts docopt.Opts, manifest *pro
 		}
 		receipt = result.Submit.Receipt
 	} else {
+		if err := refuseFleetPublishFromValidatorRole(ctx, view, manifest.Netuid, manifest.Hotkey, start); err != nil {
+			return err
+		}
 		hash, _ := manifest.CommitmentHash()
 		call, err := view.NewSetFleetCommitmentCall(manifest.Netuid, hash)
 		if err != nil {
@@ -448,6 +451,17 @@ func fleetRecoveryResumeNativeRange(ctx context.Context, store *fleetRecoverySto
 	}
 	if !apply {
 		return fleetRecoveryUnresolved(record, errors.New("native replay requires --apply"))
+	}
+	if record.Intent.Action == "publish" {
+		// A replay is a fresh send of retained bytes: the role is rechecked
+		// at the finalized head, and a refusal leaves the record unresolved.
+		_, manifest, err := record.authority()
+		if err != nil {
+			return fleetRecoveryUnresolved(record, err)
+		}
+		if err := refuseFleetPublishFromValidatorRole(ctx, view, manifest.Netuid, record.NativeSigner, finalized); err != nil {
+			return fleetRecoveryUnresolved(record, err)
+		}
 	}
 	if err := authority.signingAdmission(ctx, chain, record.StartHash, purpose); err != nil {
 		return fleetRecoveryUnresolved(record, err)

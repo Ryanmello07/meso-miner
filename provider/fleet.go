@@ -317,8 +317,12 @@ func fleetPublish(ctx context.Context, opts docopt.Opts, manifest *protocol.Flee
 		fmt.Printf("fleet commitment finalized\n  endpoint: %s\n  netuid: %d\n  hotkey: 0x%x\n  commitment: 0x%x\n  extrinsic: %s\n  finalized_block: %d\n  finalized_hash: %s\n", endpoint, manifest.Netuid, manifest.Hotkey, hash, verified.ExtrinsicHash.Hex(), verified.FinalizedAt, verified.FinalizedHash.Hex())
 		return nil
 	}
-	if _, err := authenticateAndBindFleetRuntimeFinalizedContext(ctx, chain); err != nil {
+	finalized, err := authenticateAndBindFleetRuntimeFinalizedContext(ctx, chain)
+	if err != nil {
 		return fmt.Errorf("authenticate fleet runtime before publish: %w", err)
+	}
+	if err := refuseFleetPublishFromValidatorRole(ctx, chain, manifest.Netuid, manifest.Hotkey, finalized); err != nil {
+		return err
 	}
 	receipt, err := chain.SetFleetCommitment(ctx, hotkey, manifest.Netuid, hash)
 	if err != nil {

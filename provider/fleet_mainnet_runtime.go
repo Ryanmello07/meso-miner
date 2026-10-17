@@ -266,6 +266,9 @@ func (self *fleetMainnetRuntimeAuthority) publish(ctx context.Context, chain *cr
 	if err != nil {
 		return nil, err
 	}
+	if err := refuseFleetPublishFromValidatorRole(ctx, view, netuid, key.PublicKey(), prepared); err != nil {
+		return nil, err
+	}
 	call, err := view.NewSetFleetCommitmentCall(netuid, hash)
 	if err != nil {
 		return nil, err

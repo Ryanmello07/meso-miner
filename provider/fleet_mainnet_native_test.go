@@ -231,17 +231,24 @@ func TestFleetMainnetPublishCommandSignsAndVerifiesApprovedReceipt(t *testing.T)
 func TestFleetMainnetPublishCommandRejectsIncludedUpgradeWithoutResend(t *testing.T) {
 	fixture := newFleetMainnetTestFixture(t)
 	fixture.opts["--substrate"] = []string{fixture.nativeWebsocket(t, false)}
+	// Storage reads before signing (the validator-role guard) are allowed;
+	// only reads after the broadcast would decode under the new runtime.
+	readsAtSubmit := -1
 	fixture.stateLock.Lock()
 	fixture.hook = func(method string) {
 		if method == "author_submitAndWatchExtrinsic" {
 			fixture.version.SpecVersion++
+			readsAtSubmit = fixture.calls["state_getStorage"]
 		}
 	}
 	fixture.stateLock.Unlock()
 	if err := fleetPublish(fixture.durable.Context, fixture.opts, fixture.manifest); err == nil || !strings.Contains(err.Error(), "unreviewed identity") {
 		t.Fatalf("receipt upgrade: %v", err)
 	}
-	if fixture.count("author_submitAndWatchExtrinsic") != 1 || fixture.count("state_getStorage") != 0 {
+	fixture.stateLock.Lock()
+	submitted := readsAtSubmit
+	fixture.stateLock.Unlock()
+	if fixture.count("author_submitAndWatchExtrinsic") != 1 || submitted < 0 || fixture.count("state_getStorage") != submitted {
 		t.Fatal("receipt upgrade retried or decoded commitment under unapproved runtime")
 	}
 }
