@@ -31,6 +31,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -39,6 +40,7 @@ import (
 	"github.com/docopt/docopt-go"
 
 	"github.com/urfoundation/sn/crv4"
+	"github.com/urfoundation/sn/operatorlist"
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urfoundation/sn/ss58"
 
@@ -96,6 +98,59 @@ func hotkeyWalletTargetFromOpts(opts docopt.Opts) (hotkeyWalletTarget, error) {
 		return hotkeyWalletTarget{}, err
 	}
 	return hotkeyWalletSingleTarget(apiUrl, byJwt), nil
+}
+
+// Whether this state directory has operator state at all. The operators
+// directory is what --all-operators creates; a pre-operator install has only
+// the single-network files at the top and never has it. It is stat only: the
+// directory is not created here.
+func hotkeyWalletOperatorStatePresent(base string) bool {
+	info, err := os.Stat(filepath.Join(base, "operators"))
+	return err == nil && info.IsDir()
+}
+
+// Every authenticated operator of the list, each with its own jwt and api url,
+// and the domains of the listed operators that have no jwt yet. The list is
+// the only source: the operators directory is never scanned, so a delisted
+// operator is never written and an unlisted one is never guessed.
+func hotkeyWalletTargets(snapshot *operatorlist.Snapshot, base string) ([]hotkeyWalletTarget, []string) {
+	var targets []hotkeyWalletTarget
+	var awaiting []string
+	for _, operator := range snapshot.List.Operators {
+		byJwt, err := readOperatorJwt(operatorJwtPath(base, operator.Domain))
+		if err != nil {
+			awaiting = append(awaiting, operator.Domain)
+			continue
+		}
+		targets = append(targets, hotkeyWalletTarget{domain: operator.Domain, apiUrl: operator.ApiUrl, byJwt: byJwt})
+	}
+	return targets, awaiting
+}
+
+// The targets of one wallet hotkey command. A pre-operator install (no
+// operators directory) keeps its single network target, so a box that never
+// used --all-operators sees no change. Operator state means the list decides:
+// zero authenticated operators is then an error for the commands that write,
+// never a fallback to the legacy network.
+func hotkeyWalletTargetsFromOpts(ctx context.Context, opts docopt.Opts, base string) ([]hotkeyWalletTarget, []string, error) {
+	if !hotkeyWalletOperatorStatePresent(base) {
+		target, err := hotkeyWalletTargetFromOpts(opts)
+		if err != nil {
+			return nil, nil, err
+		}
+		return []hotkeyWalletTarget{target}, nil, nil
+	}
+	snapshot, err := loadOperatorList(ctx, opts, base)
+	if err != nil {
+		return nil, nil, err
+	}
+	targets, awaiting := hotkeyWalletTargets(snapshot, base)
+	return targets, awaiting, nil
+}
+
+// The refusal of a command that has no authenticated operator to act on.
+func hotkeyWalletNoOperatorError(awaiting []string) error {
+	return fmt.Errorf("no authenticated operator among the listed operators; authenticate one with provider auth --operator=<domain> (awaiting auth: %s)", strings.Join(awaiting, ", "))
 }
 
 // One request the way hotkeywallet calls an operator: the network jwt as
@@ -457,7 +512,7 @@ func hotkeyWalletSubmit(ctx context.Context, targets []hotkeyWalletTarget, await
 		fmt.Fprintf(out, "operator %s: %s\n", target.domain, outcome)
 	}
 	for _, domain := range awaiting {
-		fmt.Fprintf(out, "operator %s: skipped, awaiting auth\n", domain)
+		fmt.Fprintf(out, "operator %s: skipped, awaiting auth: provider auth --operator=%s\n", domain, domain)
 	}
 	return failed
 }
@@ -499,11 +554,13 @@ func hotkeyWalletChallenge(ctx context.Context, opts docopt.Opts, out io.Writer)
 	if err != nil {
 		return err
 	}
-	target, err := hotkeyWalletTargetFromOpts(opts)
+	targets, awaiting, err := hotkeyWalletTargetsFromOpts(ctx, opts, base)
 	if err != nil {
 		return err
 	}
-	targets := []hotkeyWalletTarget{target}
+	if len(targets) == 0 {
+		return hotkeyWalletNoOperatorError(awaiting)
+	}
 	store := hotkeyWalletStore(base)
 	statement, err := hotkeyWalletNextStatement(ctx, store, targets, hotkey, coldkey, coldkeySs58, epochs, out)
 	if err != nil {
@@ -524,7 +581,11 @@ func hotkeyWalletChallenge(ctx context.Context, opts docopt.Opts, out io.Writer)
 	fmt.Fprintf(out, "\n----- message -----\n%s\n----- end -----\n", message)
 	fmt.Fprintf(out, "message bytes (hex): 0x%s\n", hex.EncodeToString([]byte(message)))
 	fmt.Fprintf(out, "\nThen submit the 64-byte signature as hex:\n")
-	fmt.Fprintf(out, "  provider wallet hotkey set %s --hotkey_seed_file=%s --message='%s' --signature=0x<128 hex chars>\n", coldkeySs58, snWalletShellValue(seedPath), snEscapeMessage(message))
+	fmt.Fprintf(out, "  provider wallet hotkey set %s --hotkey_seed_file=%s --message='%s' --signature=0x<128 hex chars>", coldkeySs58, snWalletShellValue(seedPath), snEscapeMessage(message))
+	if operatorsUrl, _ := opts.String("--operators-url"); operatorsUrl != "" {
+		fmt.Fprintf(out, " --operators-url=%s", snWalletShellValue(operatorsUrl))
+	}
+	fmt.Fprintln(out)
 	return nil
 }
 
@@ -552,11 +613,13 @@ func hotkeyWalletSet(ctx context.Context, opts docopt.Opts, out io.Writer) error
 	if seedFile == "" && message == "" {
 		return errors.New("the coldkey's signature is required: --coldkey_seed_file=<path>, or --message and --signature for the statement provider wallet hotkey challenge printed")
 	}
-	target, err := hotkeyWalletTargetFromOpts(opts)
+	targets, awaiting, err := hotkeyWalletTargetsFromOpts(ctx, opts, base)
 	if err != nil {
 		return err
 	}
-	targets := []hotkeyWalletTarget{target}
+	if len(targets) == 0 {
+		return hotkeyWalletNoOperatorError(awaiting)
+	}
 	store := hotkeyWalletStore(base)
 	chain, err := store.Chain()
 	if err != nil {
@@ -670,8 +733,8 @@ func hotkeyWalletSet(ctx context.Context, opts docopt.Opts, out io.Writer) error
 	}
 	fmt.Fprintf(out, "hotkey wallet generation %d: coldkey %s, epochs %d through %d, head 0x%x\n", head.Generation, coldkeySs58, head.FromEpoch, head.ThroughEpoch, headHash)
 	replaceOther, _ := opts.Bool("--replace-other-hotkey")
-	if failed := hotkeyWalletSubmit(ctx, targets, nil, hotkey, chain, replaceOther, out); failed > 0 {
-		return fmt.Errorf("%d of %d authenticated operators do not adopt the head yet; set it again with the same --message and --signature", failed, len(targets))
+	if failed := hotkeyWalletSubmit(ctx, targets, awaiting, hotkey, chain, replaceOther, out); failed > 0 {
+		return fmt.Errorf("%d of %d authenticated operators do not adopt the head yet; set it again with the same --message and --signature, or keep provide --all-operators --hotkey_seed_file running, which retries every hour", failed, len(targets))
 	}
 	return nil
 }
@@ -723,11 +786,17 @@ func hotkeyWalletStatus(ctx context.Context, opts docopt.Opts, out io.Writer) er
 		coldkeySs58, _ := ss58.Encode(pending.Coldkey, ss58.BittensorPrefix)
 		fmt.Fprintf(out, "pending: generation %d for coldkey %s, epochs %d through %d, awaiting the coldkey's signature\n", pending.Generation, coldkeySs58, pending.FromEpoch, pending.ThroughEpoch)
 	}
-	target, err := hotkeyWalletTargetFromOpts(opts)
+	targets, awaiting, err := hotkeyWalletTargetsFromOpts(ctx, opts, base)
 	if err != nil {
 		return err
 	}
-	targets := []hotkeyWalletTarget{target}
+	if hotkeyWalletOperatorStatePresent(base) {
+		operatorsUrl, _ := opts.String("--operators-url")
+		if operatorsUrl == "" {
+			operatorsUrl = operatorlist.DefaultUrl
+		}
+		fmt.Fprintf(out, "operators: --operators-url=%s\n", snWalletShellValue(operatorsUrl))
+	}
 	for _, t := range targets {
 		network, entry, err := hotkeyWalletEntries(ctx, t)
 		switch {
@@ -748,6 +817,9 @@ func hotkeyWalletStatus(ctx context.Context, opts docopt.Opts, out io.Writer) er
 		default:
 			fmt.Fprintf(out, "operator %s: delegates to hotkey %s at generation %d, not the head\n", t.domain, entry.HotkeySs58, entry.ConsentGeneration)
 		}
+	}
+	for _, domain := range awaiting {
+		fmt.Fprintf(out, "operator %s: awaiting auth\n", domain)
 	}
 	return nil
 }
