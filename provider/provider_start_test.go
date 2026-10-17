@@ -7,6 +7,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -19,6 +20,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/docopt/docopt-go"
+
+	"github.com/urnetwork/connect"
 )
 
 const providerStartWindow = 2 * time.Second
@@ -84,7 +89,8 @@ func legacyStateDir(t *testing.T, version string, withKey bool) legacyState {
 	if err := os.WriteFile(filepath.Join(stateDir, "jwt"), []byte("legacy-network-jwt-"+version), 0600); err != nil {
 		t.Fatal(err)
 	}
-	clientJwts := `{"direct":{"by_client_jwt":"legacy-client-jwt","client_id":"0011223344556677","network_id":"8899aabbccddeeff","minted_at":"2026-01-01T00:00:00Z"}}`
+	mintedAt := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	clientJwts := fmt.Sprintf(`{"direct":{"by_client_jwt":"legacy-client-jwt","client_id":"0011223344556677","network_id":"8899aabbccddeeff","minted_at":"%s"},"203.0.113.9:8080":{"by_client_jwt":"legacy-proxy-client-jwt","client_id":"aabbccddeeff0011","network_id":"8899aabbccddeeff","minted_at":"%s"}}`, mintedAt, mintedAt)
 	if err := os.WriteFile(filepath.Join(stateDir, ".client_jwts.json"), []byte(clientJwts), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -188,6 +194,27 @@ func assertProviderKeysUnchanged(t *testing.T, before, after map[string]provider
 	}
 }
 
+// stateFilesSnapshot digests the named state files: the client key and the
+// client JWT store are the identity surface a start-up must not rewrite.
+func stateFilesSnapshot(t *testing.T, stateDir string, names ...string) map[string]providerKeyFile {
+	t.Helper()
+	found := map[string]providerKeyFile{}
+	for _, name := range names {
+		path := filepath.Join(stateDir, name)
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(raw)
+		found[path] = providerKeyFile{digest: hex.EncodeToString(sum[:]), mode: info.Mode().Perm()}
+	}
+	return found
+}
+
 func assertNoGateRefusal(t *testing.T, run providerRun) {
 	t.Helper()
 	if strings.Contains(run.output, "client registration requires recovery") {
@@ -205,6 +232,18 @@ func assertNoOperatorDirectory(t *testing.T, stateDir string) {
 	}
 }
 
+// assertNoNewProviderKeys fails when a start-up minted a second key anywhere
+// below the state directory; the only key is the one at the top.
+func assertNoNewProviderKeys(t *testing.T, stateDir string) {
+	t.Helper()
+	top := filepath.Join(stateDir, ".provider.key")
+	for path := range providerKeyFiles(t, stateDir) {
+		if path != top {
+			t.Fatalf("a new provider key appeared at %s", path)
+		}
+	}
+}
+
 // A provider upgraded onto a state directory from 30.9 or 32.10, and a fresh
 // install with no key, must start with no flags: no identity refusal, no
 // operator directory, and the identity file untouched.
@@ -213,14 +252,15 @@ func TestProviderStartsOnLegacyStateDirs(t *testing.T) {
 	for _, version := range []string{"30.9", "32.10"} {
 		t.Run(version, func(t *testing.T) {
 			fixture := legacyStateDir(t, version, true)
-			before := providerKeyFiles(t, fixture.stateDir)
+			before := stateFilesSnapshot(t, fixture.stateDir, ".provider.key", ".client_jwts.json")
 			run := runProviderChild(t, fixture.home, []string{
 				"provide",
 				"--api_url=" + hang.URL,
 				"--connect_url=ws://127.0.0.1:1",
 			}, providerStartWindow)
 			assertNoGateRefusal(t, run)
-			assertProviderKeysUnchanged(t, before, providerKeyFiles(t, fixture.stateDir))
+			assertProviderKeysUnchanged(t, before, stateFilesSnapshot(t, fixture.stateDir, ".provider.key", ".client_jwts.json"))
+			assertNoNewProviderKeys(t, fixture.stateDir)
 			assertNoOperatorDirectory(t, fixture.stateDir)
 		})
 	}
@@ -251,12 +291,13 @@ func TestProviderIdentityFileUnchanged(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			fixture := legacyStateDir(t, "32.10", true)
-			before := providerKeyFiles(t, fixture.stateDir)
+			before := stateFilesSnapshot(t, fixture.stateDir, ".provider.key", ".client_jwts.json")
 			run := runProviderChild(t, fixture.home, testCase.args, providerStartWindow)
 			if testCase.name != "auth_provide" {
 				assertNoGateRefusal(t, run)
 			}
-			assertProviderKeysUnchanged(t, before, providerKeyFiles(t, fixture.stateDir))
+			assertProviderKeysUnchanged(t, before, stateFilesSnapshot(t, fixture.stateDir, ".provider.key", ".client_jwts.json"))
+			assertNoNewProviderKeys(t, fixture.stateDir)
 			if testCase.name == "provide" {
 				assertNoOperatorDirectory(t, fixture.stateDir)
 			}
@@ -269,7 +310,7 @@ func TestProviderIdentityFileUnchanged(t *testing.T) {
 func TestAllOperatorsDoesNotReadTopLevelProviderKey(t *testing.T) {
 	list := listServer(t, "alpha.example", "https://api.alpha.example")
 	fixture := legacyStateDir(t, "32.10", true)
-	before := providerKeyFiles(t, fixture.stateDir)
+	before := stateFilesSnapshot(t, fixture.stateDir, ".provider.key", ".client_jwts.json")
 	if err := os.Chmod(fixture.keyPath, 0000); err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +330,7 @@ func TestAllOperatorsDoesNotReadTopLevelProviderKey(t *testing.T) {
 	if err := os.Chmod(fixture.keyPath, 0600); err != nil {
 		t.Fatal(err)
 	}
-	assertProviderKeysUnchanged(t, before, providerKeyFiles(t, fixture.stateDir))
+	assertProviderKeysUnchanged(t, before, stateFilesSnapshot(t, fixture.stateDir, ".provider.key", ".client_jwts.json"))
 }
 
 // Offline end to end: a fake operator list and an operator that rejects the
@@ -299,7 +340,7 @@ func TestOfflineAllOperatorsAutoRegisterRejects401(t *testing.T) {
 	rejected := rejectingServer(t)
 	list := listServer(t, "e2e.example", rejected.URL)
 	fixture := legacyStateDir(t, "32.10", true)
-	before := providerKeyFiles(t, fixture.stateDir)
+	before := stateFilesSnapshot(t, fixture.stateDir, ".provider.key", ".client_jwts.json")
 	seedPath := filepath.Join(fixture.home, "hotkey.seed")
 	if err := os.WriteFile(seedPath, []byte(strings.Repeat("12", 32)), 0600); err != nil {
 		t.Fatal(err)
@@ -316,6 +357,67 @@ func TestOfflineAllOperatorsAutoRegisterRejects401(t *testing.T) {
 			t.Fatalf("offline auto-register did not report %q: %s", want, run.output)
 		}
 	}
-	assertProviderKeysUnchanged(t, before, providerKeyFiles(t, fixture.stateDir))
+	assertProviderKeysUnchanged(t, before, stateFilesSnapshot(t, fixture.stateDir, ".provider.key", ".client_jwts.json"))
+	assertNoNewProviderKeys(t, fixture.stateDir)
 	assertNoOperatorDirectory(t, fixture.stateDir)
+}
+
+// The hot-restart path must reuse the stored client identity for a proxy: the
+// same client_id is returned with reused=true, and neither identity file is
+// rewritten.
+func TestHotRestartReusesStoredProxyClientIdentity(t *testing.T) {
+	fixture := legacyStateDir(t, "32.10", true)
+	proxyKey := "203.0.113.9:8080"
+	clientId := "00000000-0000-0000-0000-0000000000a1"
+	networkId := "8899aabbccddeeff"
+
+	accountJwt := createFakeJWTWithClaims(map[string]interface{}{
+		"client_id":  clientId,
+		"network_id": networkId,
+	})
+	if err := os.WriteFile(filepath.Join(fixture.stateDir, "jwt"), []byte(accountJwt), 0600); err != nil {
+		t.Fatal(err)
+	}
+	goodJwt := createFakeJWTWithClaims(map[string]interface{}{
+		"client_id": clientId,
+		"exp":       float64(time.Now().Add(time.Hour).Unix()),
+	})
+	store := newClientJWTStore(filepath.Join(fixture.stateDir, ".client_jwts.json"))
+	if err := store.Put(proxyKey, clientJWTEntry{
+		ByClientJWT: goodJwt,
+		ClientID:    clientId,
+		NetworkID:   networkId,
+		MintedAt:    time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	before := stateFilesSnapshot(t, fixture.stateDir, ".provider.key", ".client_jwts.json")
+
+	t.Setenv("HOME", fixture.home)
+	t.Setenv("URNETWORK_STATE_DIR", "")
+	t.Setenv("URNETWORK_HOT_RESTART", "1")
+	restoreStore := withGlobalStore(t, filepath.Join(fixture.stateDir, ".client_jwts.json"))
+	defer restoreStore()
+	originalRenew := renewClientJWTFn
+	renewClientJWTFn = func(context.Context, string, string, connect.Id, string, *connect.ClientStrategy) (string, error) {
+		t.Fatal("a valid stored identity must not be renewed")
+		return "", nil
+	}
+	defer func() { renewClientJWTFn = originalRenew }()
+
+	byJwt, id, reused, err := provideAuth(nil, nil, "", docopt.Opts{}, "node", proxyKey)
+	if err != nil {
+		t.Fatalf("provideAuth on the stored proxy identity: %v", err)
+	}
+	if !reused {
+		t.Fatal("hot restart did not reuse the stored proxy identity")
+	}
+	if id.String() != clientId {
+		t.Fatalf("client_id = %q, want %q", id.String(), clientId)
+	}
+	if byJwt != goodJwt {
+		t.Fatal("the reused client JWT is not the stored one")
+	}
+	assertProviderKeysUnchanged(t, before, stateFilesSnapshot(t, fixture.stateDir, ".provider.key", ".client_jwts.json"))
+	assertNoNewProviderKeys(t, fixture.stateDir)
 }
