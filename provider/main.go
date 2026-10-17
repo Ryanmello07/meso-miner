@@ -5298,11 +5298,13 @@ func provideAuth(ctx context.Context, clientStrategy *connect.ClientStrategy, ap
 	}
 
 	if authClientResult.Error != nil {
-		// A 401 here is the server's confirmed rejection of the network token
-		// this request carried. Type it so the rejection path can set the
-		// token aside and the supervisor can sign in again; every other error
-		// passes through unchanged.
-		returnErr = networkCredentialRejection(authClientResult.Error)
+		// Only an operator child of provide --all-operators re-types a 401:
+		// its supervisor sets the token aside and signs in again. A plain
+		// node keeps the original error text, which its scripts match on.
+		returnErr = authClientResult.Error
+		if operatorChild, _ := opts.Bool("--operator-child"); operatorChild {
+			returnErr = networkCredentialRejection(returnErr)
+		}
 		return
 	}
 	if authClientResult.Result == nil {

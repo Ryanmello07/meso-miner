@@ -80,7 +80,7 @@ func TestProvideAuthTurnsAReal401IntoAQuarantinedRejection(t *testing.T) {
 	}))
 	defer server.Close()
 
-	opts := parseOperatorsArgsForTest(t, []string{"provide", "--api_url=" + server.URL})
+	opts := parseOperatorsArgsForTest(t, []string{"provide", "--api_url=" + server.URL, "--operator-child"})
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 	defer cancel()
 	_, _, _, err := provideAuth(ctx, connect.NewClientStrategyWithDefaults(ctx), server.URL, opts, "synthetic-node", "direct")
@@ -88,7 +88,7 @@ func TestProvideAuthTurnsAReal401IntoAQuarantinedRejection(t *testing.T) {
 		t.Fatalf("401 from the operator = %v, rejected = %t", err, IsNetworkCredentialRejected(err))
 	}
 
-	quarantineOpts := parseOperatorsArgsForTest(t, []string{"provide", "--api_url=" + server.URL, "--quarantine-rejected-sign-in"})
+	quarantineOpts := parseOperatorsArgsForTest(t, []string{"provide", "--api_url=" + server.URL, "--quarantine-rejected-sign-in", "--operator-child"})
 	quarantine, ok, quarantineErr := quarantineRejectedOperatorSignIn(quarantineOpts, err)
 	if quarantineErr != nil || !ok {
 		t.Fatalf("quarantine: ok=%t err=%v", ok, quarantineErr)
@@ -102,6 +102,43 @@ func TestProvideAuthTurnsAReal401IntoAQuarantinedRejection(t *testing.T) {
 	latest, found, latestErr := LatestNetworkTokenQuarantine(jwtPath)
 	if latestErr != nil || !found || latest.Consecutive != 1 || latest.Path != quarantine.Path {
 		t.Fatalf("latest quarantine = %+v, %t, %v", latest, found, latestErr)
+	}
+}
+
+// A plain node keeps the original 401 text: no re-typing, no quarantine. Only
+// an operator child of --all-operators turns it into a rejection.
+func TestPlainProvideKeepsItsOriginal401Error(t *testing.T) {
+	home := operatorTestHome(t)
+	jwtPath := filepath.Join(home, ".urnetwork", "jwt")
+	if err := os.MkdirAll(filepath.Dir(jwtPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	token := createFakeJWT(time.Now().Add(24 * time.Hour).Unix())
+	if err := os.WriteFile(jwtPath, []byte(token), 0600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/network/auth-client" {
+			http.NotFound(writer, request)
+			return
+		}
+		writer.WriteHeader(http.StatusUnauthorized)
+		_, _ = writer.Write([]byte("the network JWT is required"))
+	}))
+	defer server.Close()
+
+	opts := parseOperatorsArgsForTest(t, []string{"provide", "--api_url=" + server.URL})
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	_, _, _, err := provideAuth(ctx, connect.NewClientStrategyWithDefaults(ctx), server.URL, opts, "synthetic-node", "direct")
+	if err == nil {
+		t.Fatal("a 401 from the API did not fail the auth")
+	}
+	if IsNetworkCredentialRejected(err) {
+		t.Fatalf("plain provide re-typed its 401: %v", err)
+	}
+	if !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "the network JWT is required") {
+		t.Fatalf("plain provide lost its original error text: %v", err)
 	}
 }
 
