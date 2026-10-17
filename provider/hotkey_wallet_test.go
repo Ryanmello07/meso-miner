@@ -66,16 +66,18 @@ func hotkeyWalletTestStateDir(t *testing.T) string {
 }
 
 type fakeOperatorServer struct {
-	server       *httptest.Server
-	byJwt        string
-	signer       *ecdsa.PrivateKey
-	epoch        uint64
-	return500    bool
-	mu           sync.Mutex
-	consents     map[[32]byte][]protocol.HotkeyWalletMappingConsent
-	delegations  []protocol.WalletMappingConsent
-	issued       map[string]bool
-	calls        map[string]int
+	server      *httptest.Server
+	byJwt       string
+	signer      *ecdsa.PrivateKey
+	epoch       uint64
+	return500   bool
+	mu          sync.Mutex
+	consents    map[[32]byte][]protocol.HotkeyWalletMappingConsent
+	delegations []protocol.WalletMappingConsent
+	issued      map[string]bool
+	calls       map[string]int
+	// every Authorization header this operator was sent, in order
+	authSeen     []string
 	extraWallets []map[string]any
 }
 
@@ -128,6 +130,7 @@ func (op *fakeOperatorServer) serveHTTP(w http.ResponseWriter, r *http.Request) 
 
 	// Verify Authorization header
 	authHeader := r.Header.Get("Authorization")
+	op.authSeen = append(op.authSeen, authHeader)
 	if authHeader != "Bearer "+op.byJwt {
 		http.Error(w, "Unauthorized: missing or invalid Bearer token", http.StatusUnauthorized)
 		return
