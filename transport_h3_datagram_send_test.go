@@ -6,6 +6,7 @@ package connect
 import (
 	"bytes"
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -40,9 +41,42 @@ type sendHarness struct {
 	sessions     chan h3TestSession
 	// conn and stream are the server side of the live connection, so a test can
 	// abort one direction and induce a stream write error deterministically while
-	// the connection itself stays up.
-	conn   *quic.Conn
-	stream *quic.Stream
+	// the connection itself stays up. The server callback publishes them from
+	// its own goroutine, so they are written under mu and a test waits on ready
+	// before it reads them; a bare assignment raced the test goroutine.
+	mu        sync.Mutex
+	ready     chan struct{}
+	readyOnce sync.Once
+	conn      *quic.Conn
+	stream    *quic.Stream
+}
+
+// setServerConn publishes the server side of the live connection and unblocks
+// every waiter on the first accepted connection.
+func (self *sendHarness) setServerConn(conn *quic.Conn, stream *quic.Stream) {
+	self.mu.Lock()
+	self.conn, self.stream = conn, stream
+	self.mu.Unlock()
+	self.readyOnce.Do(func() { close(self.ready) })
+}
+
+// waitReady blocks until the server accepted a connection, so a read of conn
+// or stream is ordered after the write that published it.
+func (self *sendHarness) waitReady(t *testing.T) {
+	t.Helper()
+	select {
+	case <-self.ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the H3 test server published no connection")
+	}
+}
+
+// serverStream is the server side of the accepted connection.
+func (self *sendHarness) serverStream(t *testing.T) *quic.Stream {
+	self.waitReady(t)
+	self.mu.Lock()
+	defer self.mu.Unlock()
+	return self.stream
 }
 
 // startSendHarness starts the server and the transport. serverReadsDatagrams is
@@ -56,14 +90,14 @@ func startSendHarness(t *testing.T, serverReadsDatagrams bool, h1Up bool) *sendH
 		fromStream:   make(chan []byte, 1024),
 		fromDatagram: make(chan []byte, 1024),
 		sendRoute:    make(chan chan []byte, 4),
+		ready:        make(chan struct{}),
 	}
 
 	server := startH3TestServer(t, ctx, true, func(ctx context.Context, conn *quic.Conn, stream *quic.Stream, framer *Framer, accepted bool) {
 		if !accepted {
 			return
 		}
-		harness.conn = conn
-		harness.stream = stream
+		harness.setServerConn(conn, stream)
 		// stream reader: everything non-empty the client wrote on the stream
 		go func() {
 			for {

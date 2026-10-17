@@ -61,7 +61,7 @@ func TestH3HybridStreamWriteErrorDoesNotStallTheGeneration(t *testing.T) {
 	// Before the ordering was fixed the drain waited on a channel that only the
 	// dispatcher closes after it sees the cancel that the same drain was holding
 	// up, so the generation stalled and never re-dialed.
-	harness.stream.CancelRead(0)
+	harness.serverStream(t).CancelRead(0)
 	select {
 	// large enough to take the reliable stream lane, which is the write that fails
 	case route <- MessagePoolCopy(bytes.Repeat([]byte("w"), 3000)):
