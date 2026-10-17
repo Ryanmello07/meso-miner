@@ -82,6 +82,7 @@ func (self *fleetMainnetTestFixture) nativeWebsocket(t *testing.T, register bool
 	if err != nil {
 		t.Fatal(err)
 	}
+	self.nativeEventsKey, self.nativeEvents = eventsKey.Hex(), codec.HexEncodeToString(raw)
 	commitmentKey, err := types.CreateStorageKey(metadata, "Commitments", "CommitmentOf", snchain.NetuidArg(25), self.manifest.Hotkey[:])
 	if err != nil {
 		t.Fatal(err)
@@ -166,6 +167,11 @@ func (self *fleetMainnetTestFixture) nativeWebsocket(t *testing.T, register bool
 						self.stateLock.Unlock()
 						t.Error("invalid synthetic commitment")
 						return
+					}
+					// The slot takes the CommitmentInfo the extrinsic carries:
+					// tagged Raw40 or a pre-tag one-field Sha256.
+					if info, ok := self.submittedCommitmentInfo(); ok {
+						record = append(record[:12:12], info...)
 					}
 					binary.LittleEndian.PutUint32(record[8:12], uint32(self.nativeReceiptNumber))
 					self.storage[commitmentKey.Hex()] = codec.HexEncodeToString(record)
@@ -327,4 +333,26 @@ func TestFleetMainnetRegisterRejectsUpgradeDuringNonceReadBeforeSigning(t *testi
 	if fixture.count("payment_queryInfo") != 0 {
 		t.Fatal("upgrade during nonce read reached signed-byte quotation")
 	}
+}
+
+// The CommitmentInfo inside the last submitted extrinsic for the manifest's
+// hash: a tagged fleet field, or a pre-tag one-field Sha256.
+func (self *fleetMainnetTestFixture) submittedCommitmentInfo() ([]byte, bool) {
+	raw, err := codec.HexDecodeString(self.nativeSigned)
+	if err != nil {
+		return nil, false
+	}
+	hash, err := self.manifest.CommitmentHash()
+	if err != nil {
+		return nil, false
+	}
+	tagged, err := crv4.EncodeFleetCommitmentInfo(hash)
+	if err == nil && bytes.Contains(raw, tagged) {
+		return tagged, true
+	}
+	legacy, err := crv4.EncodeSourceCommitmentInfo(hash)
+	if err == nil && bytes.Contains(raw, legacy) {
+		return legacy, true
+	}
+	return nil, false
 }

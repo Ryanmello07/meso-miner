@@ -239,6 +239,12 @@ func (self *fleetMainnetRuntimeAuthority) commitmentFinalized(ctx context.Contex
 
 // Receipt runtime authentication precedes all commitment storage decoding.
 func (self *fleetMainnetRuntimeAuthority) commitmentWrite(ctx context.Context, chain *crv4.Chain, netuid uint16, hotkey, expected [32]byte, receipt *crv4.FinalizedExtrinsic) (*crv4.FinalizedCommitment, error) {
+	return self.commitmentWriteFormat(ctx, chain, netuid, hotkey, expected, receipt, false)
+}
+
+// legacy reads the receipt block's slot as a pre-tag one-field Sha256 fleet
+// commitment; only closing an old publication record uses it.
+func (self *fleetMainnetRuntimeAuthority) commitmentWriteFormat(ctx context.Context, chain *crv4.Chain, netuid uint16, hotkey, expected [32]byte, receipt *crv4.FinalizedExtrinsic, legacy bool) (*crv4.FinalizedCommitment, error) {
 	if receipt == nil || receipt.BlockHash == (types.Hash{}) || receipt.BlockNumber == 0 {
 		return nil, errors.New("fleet finalized write receipt is incomplete")
 	}
@@ -247,7 +253,11 @@ func (self *fleetMainnetRuntimeAuthority) commitmentWrite(ctx context.Context, c
 		if err != nil {
 			return nil, err
 		}
-		observed, err := view.FleetCommitmentAtContext(ctx, netuid, hotkey, receipt.BlockHash)
+		read := view.FleetCommitmentAtContext
+		if legacy {
+			read = view.LegacyFleetCommitmentAtContext
+		}
+		observed, err := read(ctx, netuid, hotkey, receipt.BlockHash)
 		if err != nil {
 			return nil, err
 		}
