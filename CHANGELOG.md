@@ -13,6 +13,15 @@
 
 - **`provider wallet status`**: shows what the server holds for the network, with a consent (provider, network or hotkey scope, its epochs, whether it is in effect or starts in N epochs, and its receipt) apart from a login-proof wallet, which release settlement does not pay.
 - **`provider wallet sign <coldkey>`**: serves one local page (127.0.0.1 only, session token, 15 minute lifetime, visible countdowns, URnetwork dark style) where a browser wallet extension (Talisman, SubWallet or any Polkadot `signRaw` extension) signs the verified consent statement. The seed phrase never leaves the extension, the page cannot make the program store a different message, and the result and receipt are shown on the page. See `scripts/wallet-consent/README.md`.
+- **Docker auth onboarding (`AUTH=userpass|authcode`)**: container entrypoint accepts `AUTH=userpass|authcode` with `AUTHCODE` as an alias for `URNETWORK_AUTH_CODE`. Added local base64url decoding and JWT claim verification for `exp` and `nbf` (with 5-minute clock skew) before reusing stored volume tokens: expired or malformed tokens are deleted and re-authenticated when an auth code is available. Added startup warnings when `/root/.urnetwork` is unmounted or empty, and a payout wallet reminder for provider earnings.
+
+### Changed
+
+- **Docker onboarding documentation**: quick start rewritten around `AUTH=userpass|authcode` with named volume `urnetwork_data:/root/.urnetwork`. `BUILD=stable|jwt|nightly` is retained as a fully backward-compatible legacy selector.
+
+### Removed
+
+- **Retired vnStat and CGI stats from Docker image**: removed `vnstat`, `busybox-extras`, the stats CGI endpoint, and container port 8080. Provider containers run with zero listening ports by default. `ENABLE_VNSTAT` remains accepted as a compatibility no-op with a warning.
 
 ### Fixed
 

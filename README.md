@@ -154,7 +154,7 @@ rm ~/.local/bin/urnet-docker     # non-root install
 
 ### 🐋 Docker (Production-Ready)
 
-Recommended for real deployments — includes auto-tuning, in-memory logs, and persistent config with zero listening ports:
+Recommended for real deployments: includes auto-tuning, in-memory logs, and persistent config with zero listening ports:
 
 ```bash
 docker run -d \
@@ -164,31 +164,32 @@ docker run -d \
   --cap-add=NET_ADMIN \
   --cap-add=NET_RAW \
   --sysctl net.ipv4.ip_forward=1 \
-  -e BUILD=jwt \
+  -e AUTH=authcode \
+  -e AUTHCODE='YOUR_AUTH_CODE_HERE' \
   -e URNETWORK_PROFILE=auto \
   -e URNETWORK_RAMLOGS=1 \
   -e HOST_HOSTNAME=$(hostname) \
   -e PROXY_URL='https://example.com/your-proxy-list.txt' \
-  -v urnetwork_config:/root/.urnetwork \
+  -v urnetwork_data:/root/.urnetwork \
   -v /path/to/proxy.txt:/app/proxy.txt \
-  -e URNETWORK_AUTH_CODE='YOUR_AUTH_CODE_HERE' \
   ghcr.io/full-bars/urnetwork-3.23-fix:latest
 ```
 
 **Key env vars:**
-- `URNETWORK_PROFILE=auto` — Auto-tunes based on available RAM (balanced, lowmem, etc.)
-- `URNETWORK_RAMLOGS=1` — In-memory logging for fast diagnostics (view with `urnet-docker logs`)
-- `URNETWORK_AUTH_CODE` — Auth code is exchanged for your JWT token, obtained from https://ur.io (single-use on first run; saved to volume)
-- `PROXY_URL` — Optional live proxy list URL (comma-separated for multiple), additive with the mounted `proxy.txt`. See [Proxy URL Sources](docs/Proxy-URL-Sources.md).
-- `UR_API_URL` / `UR_CONNECT_URL` — Point at a custom API + connect backend instead of `bringyour.com`. Must be set together; saved to the `~/.urnetwork` volume so it survives restarts. See [Configuration Reference](docs/Configuration.md).
+- `AUTH=authcode` - Authentication mode: `authcode` (with `AUTHCODE`) or `userpass` (with `USER_AUTH` and `PASSWORD`).
+- `AUTHCODE` - One-time auth code from https://ur.io (single-use on first run; saved to volume).
+- `URNETWORK_PROFILE=auto` - Auto-tunes based on available RAM (balanced, lowmem, etc.).
+- `URNETWORK_RAMLOGS=1` - In-memory logging for fast diagnostics (view with `urnet-docker logs`).
+- `PROXY_URL` - Optional live proxy list URL (comma-separated for multiple), additive with the mounted `proxy.txt`. See [Proxy URL Sources](docs/Proxy-URL-Sources.md).
+- `UR_API_URL` / `UR_CONNECT_URL` - Point at a custom API + connect backend instead of `bringyour.com`. Must be set together; saved to the `~/.urnetwork` volume so it survives restarts. See [Configuration Reference](docs/Configuration.md).
 
 > [!TIP]
-> Providers do not require any listening ports. Outbound connections handle all traffic. If you wish to enable the optional vnstat web monitor, see [Running with vnstat](docs/Docker-Deployment.md#-optional-running-with-vnstat-bandwidth-monitor).
+> Providers do not require any listening ports. Outbound connections handle all traffic (vnStat has been retired; use Prometheus metrics via `URNETWORK_METRICS` for telemetry).
 
 See [Docker Deployment](docs/Docker-Deployment.md) for Docker Compose, email/password auth, Watchtower, multi-container, and advanced options.
 
 > [!NOTE]
-> **Docker Management** — Use `urnet-docker` directly on the host (no `docker exec` wrapping needed):
+> **Docker Management**: Use `urnet-docker` directly on the host (no `docker exec` wrapping needed):
 > - `urnet-docker status`
 > - `urnet-docker direct status` (or `urnet-docker direct off` for proxy-only mode)
 > - `urnet-docker usage` (or `urnet-docker usage graphs` for time-series history)

@@ -31,10 +31,12 @@ Quick jump:
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `BUILD` | `stable` | Set to `jwt` for auth code login, or `stable` for email/password auth. |
-| `USER_AUTH` | - | Your email. Required if `BUILD=stable`. Also used for **self-healing** in `BUILD=jwt` mode to refresh expired tokens. |
-| `PASSWORD` | - | Your password. Required if `BUILD=stable`. Also used for **self-healing** in `BUILD=jwt` mode to refresh expired tokens. |
-| `URNETWORK_AUTH_CODE` | - | First-run auth code for `BUILD=jwt`. Use this instead of passing the code as a trailing command argument. Ignored once a JWT exists in the volume. |
+| `AUTH` | - | Authentication mode for Docker: `authcode` (auth code from ur.io) or `userpass` (email/password). Preferred over `BUILD`. |
+| `AUTHCODE` | - | One-time authentication code for `AUTH=authcode`. Exchanged on first start and saved to `/root/.urnetwork/jwt`. Alias for `URNETWORK_AUTH_CODE`. |
+| `BUILD` | `stable` | Legacy Docker selector (`stable`, `jwt`, `nightly`). Deprecated for auth selection: use `AUTH=userpass\|authcode`. |
+| `USER_AUTH` | - | Your email. Required if `AUTH=userpass` (or `BUILD=stable`). Also used for **self-healing** in authcode mode to refresh expired tokens. |
+| `PASSWORD` | - | Your password. Required if `AUTH=userpass` (or `BUILD=stable`). Also used for **self-healing** in authcode mode to refresh expired tokens. |
+| `URNETWORK_AUTH_CODE` | - | Legacy alias for `AUTHCODE`. Single-use auth code for first run. Ignored once a JWT exists in the volume. |
 | `URNETWORK_WALLET_ALLOW_ODD_INTERVAL` | - | Set to `1` to allow an explicit consent interval that would leave epochs unpaid: a from-epoch far ahead of the current epoch, or a window that does not cover the full 65,536-epoch span. Without it, `provider wallet challenge` and `provider wallet set` refuse with the reason. See [Wallet consent](Bittensor-Operations.md). |
 | `UR_API_URL` | `https://api.bringyour.com` | Custom API URL, for operators running their own backend. Must be set together with `UR_CONNECT_URL`. Applied once at startup via `provider choose_network` and persisted to `~/.urnetwork/network.json`, so it survives restarts if that directory is on a volume, same as the JWT. |
 | `UR_CONNECT_URL` | `wss://connect.bringyour.com` | Custom connect (WebSocket signaling) URL, for operators running their own backend. Must be set together with `UR_API_URL`. See `UR_API_URL`. |
@@ -82,7 +84,7 @@ Quick jump:
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `ENABLE_VNSTAT` | `true` | Enables the traffic monitor on port 8080. |
+| `ENABLE_VNSTAT` | - | Retired. vnStat and port 8080 HTTP server have been removed. Accepted for backward compatibility (starts no server and logs a warning). |
 | `ENABLE_IP_CHECKER` | `false` | Diagnostic only. Prints your full public IP to container logs on startup via an external script. Distinct from dashboard identity reporting, which sends only a redacted IP. |
 | `/metrics` endpoint | `off` | Prometheus `/metrics` is off until it is turned on. Run `urnet-tools metrics on` to start the listener; it binds the first free port in `9100`-`9103`, normally `9100`. No `URNETWORK_METRICS` environment variable is required: the setting is persisted and re-applied at startup. The default bind is loopback, plus this machine's Tailscale address on bare metal and every interface inside a container, never a public one. Scrape `http://<host>:9100/metrics` from Prometheus or any compatible collector. If `9100` is already taken, the provider takes the next free port up to `9103`, so read the address from `urnet-tools metrics status` instead of assuming `9100`. Turn it off again with `urnet-tools metrics off`. `URNETWORK_METRICS` sets a listen address rather than a switch, so a value of `0` is an invalid address that fails to bind instead of a way to disable the endpoint. |
 | `URNETWORK_PUBLIC_IP` | `<auto-detected>` | Override the public IP shown in the dashboard identity label. Display only; does not change the actual egress IP. Auto-detected via `ip.me` on native/systemd installs; auto-set by Docker startup scripts. Create `~/.urnetwork/disable_ip_autodetect` or run `urnet-tools ip-detect off` to prevent autodetection. See [Node-Identity.md](Node-Identity.md). |
