@@ -1009,6 +1009,15 @@ type UdpBufferSettings struct {
 	Mtu                 int
 	ReadBufferByteCount int
 	SequenceBufferSize  int
+	// SocketReadShardCount replaces one blocking socket-reader goroutine per
+	// udp flow with this many OS-readiness workers inside each address-family
+	// buffer. The local user nat already owns one udp buffer per dispatch
+	// shard, so this is the readiness fan-out within one dispatch shard, and
+	// each shard also owns one bounded delivery worker. Zero, the default,
+	// retains the portable per-flow reader: generic callers and platforms
+	// without a readiness backend keep the established implementation until
+	// their cohorts are measured.
+	SocketReadShardCount int
 	// the number of open sockets per user
 	// uses an lru cleanup where new sockets over the limit close old sockets
 	UserLimit     int
@@ -1268,6 +1277,12 @@ type UdpSequence struct {
 	// bw, when set, is credited with the bytes of the socket this sequence dials.
 	bw *ProxyBandwidth
 
+	// socketReadPoller, when set, owns this flow's socket reads: the flow is
+	// registered rather than started with a blocking reader goroutine.
+	socketReadPoller    *udpSocketReadPoller
+	socketReadPollShard int
+	socketReadPollFd    int
+
 	sendMutex sync.Mutex
 	sendItems chan *UdpSendItem
 
@@ -1295,6 +1310,7 @@ func NewUdpSequence(ctx context.Context, receiveCallback ReceivePacketFunction,
 		sendItems:         make(chan *UdpSendItem, udpBufferSettings.SequenceBufferSize),
 		udpBufferSettings: udpBufferSettings,
 		idleCondition:     NewIdleCondition(),
+		socketReadPollFd:  -1,
 		StreamState: StreamState{
 			source:          source,
 			provideMode:     provideMode,
@@ -1360,6 +1376,14 @@ func (self *UdpSequence) send(sendItem *UdpSendItem, timeout time.Duration) (boo
 	}
 }
 
+// receivePacket delivers one drained datagram to the buffer's receive callback
+// and returns its pooled owner. It is called by the flow's reader goroutine and
+// by a readiness shard's delivery worker, and is the same delivery either way.
+func (self *UdpSequence) receivePacket(packet []byte) {
+	self.receiveCallback(self.source, self.provideMode, self.IpPath(), packet)
+	MessagePoolReturn(packet)
+}
+
 func (self *UdpSequence) Run() {
 	type writePayload struct {
 		sendIter uint64
@@ -1409,11 +1433,6 @@ func (self *UdpSequence) Run() {
 			}
 		}
 	}()
-
-	receive := func(packet []byte) {
-		self.receiveCallback(self.source, self.provideMode, self.IpPath(), packet)
-		MessagePoolReturn(packet)
-	}
 
 	self.log.V(2).Infof("[init]udp connect\n")
 	dialStart := time.Now()
@@ -1540,7 +1559,7 @@ func (self *UdpSequence) Run() {
 					if !ok {
 						return
 					}
-					receive(packet)
+					self.receivePacket(packet)
 				}
 			}
 		}()
@@ -1553,7 +1572,7 @@ func (self *UdpSequence) Run() {
 				if !ok {
 					return
 				}
-				receive(packet)
+				self.receivePacket(packet)
 			}
 		}
 	}, self.cancel)
