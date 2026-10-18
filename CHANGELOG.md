@@ -12,7 +12,7 @@ _Unreleased: the v33.1 batch. Not tagged, released, or deployed._
 
 ### Changed
 
-- **The Docker start scripts share `provider_common.sh`**: `start_stable.sh`, `start_jwt.sh` and `start_nightly.sh` become thin wrappers that select the mode and binary flavor, and the shared bootstrap, login and supervision logic lives in one file. `BUILD` and `AUTH` precedence, the `AUTHCODE` and `URNETWORK_AUTH_CODE` aliases, `USER_AUTH` and `PASSWORD`, `TURBO`, `PELICAN` and the exit 75 and 78 loops keep their existing behavior. The v33 operator variables still map through `provider_env.sh`, and with every one unset the container runs exactly `provide`.
+- **The Docker start scripts share `provider_common.sh`**: `start_stable.sh`, `start_jwt.sh` and `start_nightly.sh` become thin wrappers that select the mode and binary flavor, and the shared bootstrap, login and supervision logic lives in one file. `BUILD`, `AUTH`, credentials, `TURBO` and `PELICAN` are byte-compatible on the offline equivalence matrix, and the exit 75 and 78 loops keep their existing behavior. The v33 operator variables still map through `provider_env.sh`, and with every one unset the container runs exactly `provide`.
 - **The updater pages the release listing and skips releases it cannot install**: `urnet-tools update` and the Docker update paths walk `GET /releases` newest first, one hundred per page up to ten pages, and select the first release that is not a draft, not flagged as a pre-release, not named like a pre-release (`rc`, `alpha`, `beta`, `pre`, `preview`, `nightly`, `snapshot` or `dev` as a tag component), and publishes `urnetwork-provider-<tag>.tar.gz` with a sha256 digest. An explicit `--tag` remains an operator override and is not filtered this way.
 
 ### Fixed
