@@ -28,7 +28,7 @@ JWT_FILE="$HOME/.urnetwork/jwt"
 ENABLE_VNSTAT="${ENABLE_VNSTAT:-}"
 ENABLE_IP_CHECKER="${ENABLE_IP_CHECKER:-false}"
 IP_CHECKER_URL="https://raw.githubusercontent.com/techroy23/IP-Checker/refs/heads/main/app.sh"
-API_URL="https://api.github.com/repos/full-bars/urnetwork-3.23-fix/releases/latest"
+API_ROOT="https://api.github.com/repos/full-bars/urnetwork-3.23-fix"
 VERSION_FILE="$APP_DIR/version.txt"
 UPDATE_TIME="12:00"
 
@@ -187,10 +187,27 @@ func_check_update() {
     # tarball first and skipped on version match afterwards — dead bytes, no
     # verification, silent discard on corruption.) The arch-aware filter keeps
     # darwin/windows assets out of the version probe.
+    # Resolve the newest INSTALLABLE stable release once: the selection pages
+    # past releases without a provider tarball and never treats a release as
+    # stable when GitHub flags it prerelease or its tag is named like one.
+    # One fetch serves both the version compare and the asset/digest pick.
     RESP_VERSION_FILE="$UPDATE_TMP/version.json"
-    HTTP_CODE="$(curl -sfL -w '%{http_code}' -o "$RESP_VERSION_FILE" "$API_URL" 2>/dev/null)" || HTTP_CODE="000"
-    VERSION_JSON="$(cat "$RESP_VERSION_FILE" 2>/dev/null)" || VERSION_JSON=""
-    if [ "$HTTP_CODE" != "000" ] && [ -n "$VERSION_JSON" ]; then
+    RELEASE_JSON="$(upd_fetch_stable_release_json "$API_ROOT" 2>"$UPDATE_TMP/select.err")" || RELEASE_JSON=""
+    if [ -z "$RELEASE_JSON" ]; then
+        log "[ERROR] No stable release with a verified provider tarball found." >&2
+        if [ -s "$UPDATE_TMP/select.err" ]; then
+            while IFS= read -r SELECT_ERR_LINE; do
+                log "[ERROR] $SELECT_ERR_LINE" >&2
+            done < "$UPDATE_TMP/select.err"
+        fi
+        log "[INFO] Update skipped; existing provider left untouched."
+        rm -rf "$UPDATE_TMP"
+        return 0
+    fi
+    printf '%s\n' "$RELEASE_JSON" > "$RESP_VERSION_FILE"
+    HTTP_CODE=200
+    VERSION_JSON="$RELEASE_JSON"
+    if [ -n "$VERSION_JSON" ]; then
         LATEST_VERSION_CHECK="$(printf '%s\n' "$VERSION_JSON" \
           | grep -oE '"browser_download_url": *"https://[^"]+"' \
           | sed -E 's/.*"([^"]+)"$/\1/' \
@@ -211,8 +228,7 @@ func_check_update() {
         log "[INFO] Latest provider version: ${LATEST_VERSION_CHECK:-unknown}"
     fi
 
-    HTTP_CODE="$(curl -sfL -w '%{http_code}' -o "$RESP_FILE" "$API_URL" 2>/dev/null)" || HTTP_CODE="000"
-    RELEASE_JSON="$(cat "$RESP_FILE" 2>/dev/null)" || RELEASE_JSON=""
+    printf '%s\n' "$RELEASE_JSON" > "$RESP_FILE"
     # Pick the asset by NAME from the release JSON itself (jq with a grep
     # fallback for degenerate responses) and take its URL from the same
     # object. The asset name must never be derived from the URL: the digest
