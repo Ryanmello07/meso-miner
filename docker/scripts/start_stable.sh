@@ -30,6 +30,14 @@ elif [ -f "/app/jwt_verify.sh" ]; then
   . "/app/jwt_verify.sh"
 fi
 
+# Sourcing the v33 operator flag mapping (ALL_OPERATORS, AUTO_REGISTER,
+# HOTKEY_SEED_FILE, ALLOW_CLIENT_REGISTRATION, MAX_MEMORY, PROVIDER_ARGS).
+if [ -f "$SCRIPT_DIR/provider_env.sh" ]; then
+  . "$SCRIPT_DIR/provider_env.sh"
+elif [ -f "/app/provider_env.sh" ]; then
+  . "/app/provider_env.sh"
+fi
+
 # === Logging Helper ===
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') >>> UrNetwork >>> $*"
@@ -218,8 +226,16 @@ func_start_provider(){
         PROVIDER_BIN="$APP_DIR/urnetwork_${A_SYS_ARCH}_stable"
 		BIN_VER="$($PROVIDER_BIN --version)"
 		log "[INFO] Running UrNetwork build v${BIN_VER}"
+        # v33 operator flags from the environment (see provider_env.sh).
+        # With none of the variables set this is empty and the command line
+        # stays exactly `provide`.
+        if ! PROVIDER_ENV_ARGS="$(provider_env_flags "$HOME/.urnetwork")"; then
+            log "[ERROR] Invalid provider environment; fix the setting logged above and restart"
+            exit 1
+        fi
         # Capture the real exit code (set -e safe; avoids the `|| true` that pinned code to 0)
-        if "$PROVIDER_BIN" provide; then code=0; else code=$?; fi
+        # shellcheck disable=SC2086  # PROVIDER_ENV_ARGS is a deliberately split flag list
+        if "$PROVIDER_BIN" provide $PROVIDER_ENV_ARGS; then code=0; else code=$?; fi
         if [ "$code" -eq 0 ]; then
             if [ -f "$HOME/.urnetwork/update-pending" ]; then
                 rm -f "$HOME/.urnetwork/update-pending"
@@ -265,9 +281,15 @@ func_start_provider(){
         failures=$((failures+1))
         log "[WARN] UrNetwork crashed (#$failures; code=$code)"
         if [ "$failures" -ge 3 ]; then
-            log "[ERROR] Too many crashes; clearing JWT and reauthenticating"
-            rm -f "$JWT_FILE" || true
-            func_do_login
+            if provider_env_all_operators; then
+                # The supervisor owns per-operator tokens; there is no head
+                # JWT to clear or USER_AUTH/PASSWORD login to run here.
+                log "[WARN] Too many crashes in --all-operators mode; restarting the supervisor"
+            else
+                log "[ERROR] Too many crashes; clearing JWT and reauthenticating"
+                rm -f "$JWT_FILE" || true
+                func_do_login
+            fi
             failures=0
         fi
         log "[INFO] Waiting 60s before retry"
@@ -281,14 +303,21 @@ func_bootstrap() {
 	func_get_architecture
 	func_choose_network
 	func_check_dir
-	func_check_credentials
+    if provider_env_all_operators; then
+        # provide --all-operators signs each operator in on its own
+        # (--auto-register or a pre-provisioned token), so the single
+        # USER_AUTH/PASSWORD login does not apply.
+        log "[INFO] ALL_OPERATORS is set; skipping the USER_AUTH/PASSWORD login"
+    else
+        func_check_credentials
+        func_do_login
+    fi
     func_check_proxy
     func_report_identity
     func_ip_checker
     func_start_vnstat
     # Pass host's actual hostname (if provided) so provider reports correctly on dashboard
     export HOST_HOSTNAME="${HOST_HOSTNAME:-}"
-    func_do_login
     func_start_provider
 }
 

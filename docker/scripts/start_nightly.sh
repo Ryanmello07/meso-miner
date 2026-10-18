@@ -21,6 +21,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=update_verify.sh
 . "$SCRIPT_DIR/update_verify.sh"
 
+# Sourcing the v33 operator flag mapping (ALL_OPERATORS, AUTO_REGISTER,
+# HOTKEY_SEED_FILE, ALLOW_CLIENT_REGISTRATION, MAX_MEMORY, PROVIDER_ARGS).
+# shellcheck source=provider_env.sh
+. "$SCRIPT_DIR/provider_env.sh"
+
 # === Configuration Variables ===
 export TZ="America/Tijuana"
 APP_DIR="/app"
@@ -433,8 +438,16 @@ func_start_provider(){
         PROVIDER_BIN="$APP_DIR/urnetwork_${A_SYS_ARCH}_nightly"
 		BIN_VER="$($PROVIDER_BIN --version)"
 		log "[INFO] Running UrNetwork build v${BIN_VER}"
+        # v33 operator flags from the environment (see provider_env.sh).
+        # With none of the variables set this is empty and the command line
+        # stays exactly `provide`.
+        if ! PROVIDER_ENV_ARGS="$(provider_env_flags "$HOME/.urnetwork")"; then
+            log "[ERROR] Invalid provider environment; fix the setting logged above and restart"
+            exit 1
+        fi
         # Capture the real exit code (set -e safe; bare `provide` would abort the loop on crash)
-        if "$PROVIDER_BIN" provide; then code=0; else code=$?; fi
+        # shellcheck disable=SC2086  # PROVIDER_ENV_ARGS is a deliberately split flag list
+        if "$PROVIDER_BIN" provide $PROVIDER_ENV_ARGS; then code=0; else code=$?; fi
         if [ "$code" -eq 0 ]; then
             if [ -f "$HOME/.urnetwork/update-pending" ]; then
                 rm -f "$HOME/.urnetwork/update-pending"
@@ -480,9 +493,15 @@ func_start_provider(){
         failures=$((failures+1))
         log "[WARN] UrNetwork crashed (#$failures; code=$code)"
         if [ "$failures" -ge 3 ]; then
-            log "[ERROR] Too many crashes; clearing JWT and reauthenticating"
-            rm -f "$JWT_FILE" || true
-            func_check_credentials
+            if provider_env_all_operators; then
+                # The supervisor owns per-operator tokens; there is no head
+                # JWT to clear or USER_AUTH/PASSWORD login to run here.
+                log "[WARN] Too many crashes in --all-operators mode; restarting the supervisor"
+            else
+                log "[ERROR] Too many crashes; clearing JWT and reauthenticating"
+                rm -f "$JWT_FILE" || true
+                func_check_credentials
+            fi
             failures=0
         fi
         log "[INFO] Waiting 60s before retry"
@@ -495,7 +514,14 @@ func_bootstrap() {
     # sh /app/urnetwork_ipinfo.sh
 	func_get_architecture
 	func_check_dir
-	func_check_credentials
+    if provider_env_all_operators; then
+        # provide --all-operators signs each operator in on its own
+        # (--auto-register or a pre-provisioned token), so the single
+        # USER_AUTH/PASSWORD login does not apply.
+        log "[INFO] ALL_OPERATORS is set; skipping the USER_AUTH/PASSWORD login"
+    else
+        func_check_credentials
+    fi
 	func_check_proxy
     func_report_identity
     func_ip_checker
@@ -515,7 +541,9 @@ func_bootstrap() {
             func_check_update
             if ! ps aux | grep -q "[u]rnetwork_${A_SYS_ARCH}_"; then
                 log "UrNetwork not running; launching now"
-                func_do_login
+                if ! provider_env_all_operators; then
+                    func_do_login
+                fi
                 func_start_provider
             else
                 log "UrNetwork already running; skipping restart"
@@ -527,7 +555,9 @@ func_bootstrap() {
     ) &
     WATCHER_PID=$!
     log "Time‐watcher PID is $WATCHER_PID"
-    func_do_login
+    if ! provider_env_all_operators; then
+        func_do_login
+    fi
     func_start_provider
 }
 
