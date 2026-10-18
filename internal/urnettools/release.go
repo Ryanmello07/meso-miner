@@ -49,6 +49,11 @@ type releaseJSON struct {
 	Assets  []releaseAsset `json:"assets"`
 }
 
+// repoAPIBase is the GitHub repository API root for this fork. It is a
+// variable so tests can point every release lookup at a local fake server;
+// production code never changes it.
+var repoAPIBase = "https://api.github.com/repos/full-bars/urnetwork-3.23-fix"
+
 // githubAuthHeader returns an Authorization header value when GITHUB_TOKEN
 // is set; otherwise ("", ""). Used to raise the unauthenticated rate limit
 // from 60 to 5000 requests/hour so auto-update timers on a fleet don't hit 403.
@@ -62,7 +67,7 @@ func githubAuthHeader() (string, string) {
 // fetchLatestRelease queries the fork's GitHub releases/latest endpoint and
 // returns the tag + tarball sha256 digest for the provider asset.
 func fetchLatestRelease() (*releaseInfo, error) {
-	const api = "https://api.github.com/repos/full-bars/urnetwork-3.23-fix/releases/latest"
+	api := repoAPIBase + "/releases/latest"
 	client := &http.Client{Timeout: 30 * time.Second}
 	req, err := http.NewRequest("GET", api, nil)
 	if err != nil {
@@ -127,7 +132,7 @@ func fetchReleaseByTag(tag string) (*releaseInfo, error) {
 	if err := validateTag(tag); err != nil {
 		return nil, err
 	}
-	api := fmt.Sprintf("https://api.github.com/repos/full-bars/urnetwork-3.23-fix/releases/tags/%s", url.PathEscape(tag))
+	api := fmt.Sprintf("%s/releases/tags/%s", repoAPIBase, url.PathEscape(tag))
 	client := &http.Client{Timeout: 30 * time.Second}
 	req, err := http.NewRequest("GET", api, nil)
 	if err != nil {
