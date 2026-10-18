@@ -22,6 +22,14 @@ elif [ -f "/app/jwt_verify.sh" ]; then
   . "/app/jwt_verify.sh"
 fi
 
+# Sourcing the v33 operator flag mapping (ALL_OPERATORS, AUTO_REGISTER,
+# HOTKEY_SEED_FILE, ALLOW_CLIENT_REGISTRATION, MAX_MEMORY, PROVIDER_ARGS).
+if [ -f "$SCRIPT_DIR/provider_env.sh" ]; then
+  . "$SCRIPT_DIR/provider_env.sh"
+elif [ -f "/app/provider_env.sh" ]; then
+  . "/app/provider_env.sh"
+fi
+
 # Accept AUTHCODE as an alias for URNETWORK_AUTH_CODE
 if [ -z "${URNETWORK_AUTH_CODE:-}" ] && [ -n "${AUTHCODE:-}" ]; then
   export URNETWORK_AUTH_CODE="$AUTHCODE"
@@ -189,10 +197,18 @@ func_start_provider(){
     reauth_attempts=0
     while :; do
         log "[INFO] Starting UrNetwork (attempt #$((failures+1)))"
+        # v33 operator flags from the environment (see provider_env.sh).
+        # With none of the variables set this is empty and the command line
+        # stays exactly `provide`.
+        if ! PROVIDER_ENV_ARGS="$(provider_env_flags "$HOME/.urnetwork")"; then
+            log "[ERROR] Invalid provider environment; fix the setting logged above and restart"
+            exit 1
+        fi
         # Capture the real exit code. Reading $? after the `if ... fi` gave
         # the compound's status, 0 whenever provide failed: every crash logged
         # code=0 and the code 78 re-auth branch below could never run.
-        if "$PROVIDER_BIN" provide; then code=0; else code=$?; fi
+        # shellcheck disable=SC2086  # PROVIDER_ENV_ARGS is a deliberately split flag list
+        if "$PROVIDER_BIN" provide $PROVIDER_ENV_ARGS; then code=0; else code=$?; fi
         if [ "$code" -eq 0 ]; then
             if [ -f "$HOME/.urnetwork/update-pending" ]; then
                 rm -f "$HOME/.urnetwork/update-pending"

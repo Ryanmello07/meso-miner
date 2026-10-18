@@ -9,7 +9,8 @@ The published operator list says where each URNetwork operator serves its API an
 ```text
 provider operators [--operators-url=<url>] [-v...]
 provider provide --all-operators [--operators-url=<url>] [--operators-refresh=<duration>]
-    [--api_url=<api_url>]
+    [--auto-register --hotkey_seed_file=<file> | --hotkey_seed_file=<file>]
+    [--port=<port>] [--max-memory=<mem>] [--allow-client-registration]
     [-v...]
 ```
 
@@ -38,6 +39,33 @@ The last good copy is kept as `operators.yml` in the provider state directory, s
 The list is size-bounded: 1 to 64 KiB, 1 to 256 operators, one strict YAML document with the `urnetwork-operators-v1` schema. Its digest is printed so two boxes can tell which list they follow.
 
 Every operator's own API URL comes from the list. The list only says where each operator serves its endpoints; it grants no weight, payout or registration authority.
+
+## In Docker
+
+The container entrypoint maps environment variables onto the flags above, so no custom command line is needed. With none of them set, the container runs the same `provide` as before.
+
+| Environment variable | Effect |
+|---|---|
+| `ALL_OPERATORS=1` | Adds `--all-operators` and skips the single `USER_AUTH`/`PASSWORD` login. |
+| `AUTO_REGISTER=1` | Adds `--auto-register`; needs `HOTKEY_SEED_FILE`. |
+| `HOTKEY_SEED_FILE=/path` | Adds `--hotkey_seed_file=/path`. Mount the seed read-only. |
+| `ALLOW_CLIENT_REGISTRATION=auto\|Y\|N` | `Y` adds `--allow-client-registration`; `N` does not; `auto` adds it only when `/root/.urnetwork` has neither `.provider.key` nor an `operators/` directory. |
+| `MAX_MEMORY=2gib` | Adds `--max-memory=2gib`; the supervisor splits it across the operator children. |
+| `PROVIDER_ARGS="--operators-url=... --operators-refresh=30m"` | Appends those arguments to `provide`, split on whitespace. |
+
+```bash
+docker run -d \
+  --name=urnetwork-multi \
+  -e ALL_OPERATORS=1 \
+  -e AUTO_REGISTER=1 \
+  -e HOTKEY_SEED_FILE=/run/secrets/hotkey.seed \
+  -e ALLOW_CLIENT_REGISTRATION=auto \
+  -v urnetwork_multi:/root/.urnetwork \
+  -v /etc/urnetwork/hotkey.seed:/run/secrets/hotkey.seed:ro \
+  ghcr.io/full-bars/urnetwork-3.23-fix:latest
+```
+
+`auto` is meant for the first start on a fresh volume. Once `operators/` exists, an operator added later needs `ALLOW_CLIENT_REGISTRATION=Y` to let its child create a new client identity. See [Docker Deployment](Docker-Deployment.md#-multi-operator-flags) for the full variable table.
 
 ## State layout
 

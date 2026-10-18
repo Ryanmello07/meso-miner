@@ -519,6 +519,51 @@ See [Monitoring](Monitoring.md) for the full setup, the metric list and the aler
 | `URNETWORK_PROFILE` | Optional | Hardware profile (`auto`, `lowmem`, `eco`, `turbo-v4`, `turbo-v8`). |
 | `TURBO` | Optional | Shorthand for turbo mode (`v4` or `v8`). |
 | `URNETWORK_METRICS` | Optional | Prometheus listen address (e.g. `:9100`). |
+| `ALL_OPERATORS` | Optional | Set to `1` to run `provide --all-operators`: one child provider per operator in the published list. The single `USER_AUTH`/`PASSWORD` login is skipped because each operator signs in on its own. See [Multi-Operator](Multi-Operator.md). |
+| `AUTO_REGISTER` | Optional | With `ALL_OPERATORS=1`: add `--auto-register`, signing in to each operator with the hotkey. Requires `HOTKEY_SEED_FILE`. |
+| `HOTKEY_SEED_FILE` | Optional | With `ALL_OPERATORS=1`: path to the 32-byte hotkey seed used by `--auto-register`. Mount the file read-only. |
+| `ALLOW_CLIENT_REGISTRATION` | Optional | `auto`, `Y` or `N`. `Y` always adds `--allow-client-registration`; `N` never does; `auto` adds it only when `/root/.urnetwork` has neither `.provider.key` nor an `operators/` directory (a fresh identity). |
+| `MAX_MEMORY` | Optional | Passed as `--max-memory=<mem>`, for example `2gib`. With `ALL_OPERATORS=1` the supervisor splits it across the operator children. |
+| `PROVIDER_ARGS` | Optional | Extra `provide` arguments appended verbatim and split on whitespace, for v33 flags without a dedicated variable (for example `--operators-url=... --operators-refresh=30m`). |
+
+### 🧩 Multi-Operator Flags
+
+The v33 operator flags can be set from the container environment. `docker/scripts/provider_env.sh` translates them into `provider provide` arguments; with none of the variables set the command line is exactly `provide`, so existing containers are unchanged.
+
+| Environment variable | Flag added to `provider provide` |
+|---|---|
+| `ALL_OPERATORS=1` | `--all-operators` |
+| `AUTO_REGISTER=1` | `--auto-register` (only with `ALL_OPERATORS=1`; needs `HOTKEY_SEED_FILE`) |
+| `HOTKEY_SEED_FILE=/path` | `--hotkey_seed_file=/path` (only with `ALL_OPERATORS=1`) |
+| `ALLOW_CLIENT_REGISTRATION=Y` | `--allow-client-registration` |
+| `ALLOW_CLIENT_REGISTRATION=N` | nothing |
+| `ALLOW_CLIENT_REGISTRATION=auto` | `--allow-client-registration` only when the state directory has no `.provider.key` and no `operators/` directory |
+| `MAX_MEMORY=2gib` | `--max-memory=2gib` |
+| `PROVIDER_ARGS="--operators-url=..."` | the arguments, split on whitespace, appended last |
+
+`1`, `true`, `yes` and `on` are accepted for the two boolean variables, case-insensitively; `0`, `false`, `no` and `off` turn them off. `AUTO_REGISTER` and `HOTKEY_SEED_FILE` are refused when `ALL_OPERATORS` is off, because those flags exist only in the `provide --all-operators` usage. `PROVIDER_ARGS` applies to `provide` only and is split on whitespace, so an individual argument that contains spaces cannot be passed this way.
+
+Example:
+
+```bash
+docker run -d \
+  --name=urnetwork-multi \
+  --pull=always \
+  --restart=unless-stopped \
+  --cap-add=NET_ADMIN \
+  --cap-add=NET_RAW \
+  --sysctl net.ipv4.ip_forward=1 \
+  -e ALL_OPERATORS=1 \
+  -e AUTO_REGISTER=1 \
+  -e HOTKEY_SEED_FILE=/run/secrets/hotkey.seed \
+  -e ALLOW_CLIENT_REGISTRATION=auto \
+  -e MAX_MEMORY=4gib \
+  -v urnetwork_multi:/root/.urnetwork \
+  -v /etc/urnetwork/hotkey.seed:/run/secrets/hotkey.seed:ro \
+  ghcr.io/full-bars/urnetwork-3.23-fix:latest
+```
+
+The first run with a fresh volume adds `--allow-client-registration` because `ALLOW_CLIENT_REGISTRATION=auto` sees no `.provider.key` and no `operators/` directory. Later runs do not add it. To add a new operator to an existing `operators/` tree, set `ALLOW_CLIENT_REGISTRATION=Y`.
 
 ## 🏛️ Legacy Variables
 
