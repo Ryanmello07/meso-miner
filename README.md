@@ -16,6 +16,7 @@ A high-performance, high-visibility fork of the **UrNetwork Connect** provider, 
 | **Run a Bittensor SN25 provider** | [Bittensor Operations](docs/Bittensor-Operations.md) |
 | **Start here — pick your skill level** | [🐣 Beginner](docs/guides/beginner.md) · [🧭 Intermediate](docs/guides/intermediate.md) · [🚀 Advanced](docs/guides/advanced.md) |
 | Install on a Linux host as a user-level service | [Installation Guide](docs/Installation.md) |
+| Install on FreeBSD as an rc.d service | [FreeBSD Guide](docs/FreeBSD.md) |
 | Run one Docker container | [Docker Deployment](docs/Docker-Deployment.md) |
 | Run multiple containers on one host | [Multi-Container Scaling](docs/Multi-Container-Scaling.md) |
 | Choose profiles, turbo mode, or host tuning | [Performance Tuning](docs/High-Volume-Performance-Tuning.md) |
@@ -49,6 +50,14 @@ This build is the Bittensor mainnet release. Everything a provider needs to take
 ```sh
 curl -fSsL https://dl.fullbars.xyz/install.sh | sh
 ```
+
+**🐡 FreeBSD (rc.d)**
+
+```sh
+curl -fSsL https://raw.githubusercontent.com/full-bars/urnetwork-3.23-fix/refs/heads/main/scripts/Provider_Install_FreeBSD.sh | sudo sh -s -- install
+```
+
+The FreeBSD installer downloads the provider and installs an `rc.d` service. See [docs/FreeBSD.md](docs/FreeBSD.md).
 
 **🍎 macOS (launchd)**
 
@@ -106,7 +115,7 @@ Windows Defender may flag this one-liner. See the note below.
 After installation, authenticate and start providing:
 
 ```bash
-# Linux / macOS: one Go binary on every platform
+# Linux / macOS / FreeBSD: one Go binary on every platform
 urnetwork auth
 urnet-tools proxy add ~/proxies.txt
 urnet-tools proxy refresh
@@ -132,6 +141,10 @@ curl -fSsL https://dl.fullbars.xyz/uninstall.sh | sh
 **🍎 macOS**
 
 Manual — see [docs/Installation.md](docs/Installation.md).
+
+**🐡 FreeBSD**
+
+Manual — see [FreeBSD Guide](docs/FreeBSD.md#uninstall).
 
 **🪟 Windows (PowerShell)**
 
@@ -288,7 +301,7 @@ dashboard. See [Monitoring](docs/Monitoring.md).
 
 ## 💡 Recommended Defaults
 
-- Use the **Linux installer** for a host-managed systemd service
+- Use the **Linux installer** (systemd) or the **FreeBSD installer** (rc.d) for a host-managed service
 - Use **Docker** if you prefer containers — both are fully documented
 - Leave profile on **`auto`** unless you have a specific reason to override
 - Mount `/root/.urnetwork` as a persistent volume in Docker deployments
@@ -328,8 +341,8 @@ dashboard. See [Monitoring](docs/Monitoring.md).
 
 - **Base engine:** UrNetwork v3.23
 - **Language:** Go 1.27, built on Alpine
-- **Platforms:** Linux (systemd, and Alpine/OpenRC with a native boot-start service), macOS and Windows. Alpine setup: [docs/OpenRC.md](docs/OpenRC.md)
-- **Images:** Multi-arch `linux/amd64` + `linux/arm64`, `darwin/amd64` + `darwin/arm64` via GitHub Actions → GHCR
+- **Platforms:** Linux (systemd, and Alpine/OpenRC with a native boot-start service), FreeBSD (amd64 and arm64), macOS and Windows. FreeBSD setup: [docs/FreeBSD.md](docs/FreeBSD.md). Alpine setup: [docs/OpenRC.md](docs/OpenRC.md)
+- **Images:** Multi-arch `linux/amd64` + `linux/arm64` via GitHub Actions → GHCR. Each release also attaches `darwin/amd64` + `darwin/arm64`, `windows/amd64` + `windows/arm64` and `freebsd/amd64` + `freebsd/arm64` binaries.
 - **Bridge-friendly:** runs on standard Docker bridge networks, no `--network host` required
 
 ---
