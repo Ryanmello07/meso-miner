@@ -376,3 +376,33 @@ func TestFetchReleaseByTagStillAllowsExplicitPreRelease(t *testing.T) {
 		t.Fatalf("fetchReleaseByTag selected %q, want %q", info.Tag, tag)
 	}
 }
+
+// TestIsPreReleaseTag pins the tag-name predicate against the shapes this
+// repo actually publishes.
+func TestIsPreReleaseTag(t *testing.T) {
+	cases := []struct {
+		tag  string
+		want bool
+	}{
+		{"v3.23.0-fix.32.10", false},
+		{"v3.23.0-fix.33.0", false},
+		{"v3.23.0-fix.33.0+build7", false},
+		{"v3.23.0-fix.33.0-rc1", true},
+		{"v3.23.0-fix.33.0-rc.5", true},
+		{"v3.23.0-fix.33.0-RC5", true},
+		{"v3.23.0-fix.33.0-beta2", true},
+		{"v3.23.0-fix.33.0-alpha", true},
+		{"v3.23.0-fix.33.0-preview3", true},
+		{"v3.23.0-fix.33.0-nightly", true},
+		{"v3.23.0-fix.33.0-dev", true},
+		{"v3.23.0-fix.33.0-snapshot", true},
+		// A stable tag that merely CONTAINS a pre-release word must not match.
+		{"v3.23.0-fix.device.4", false},
+		{"v3.23.0-fix.preflight.2", false},
+	}
+	for _, tc := range cases {
+		if got := isPreReleaseTag(tc.tag); got != tc.want {
+			t.Errorf("isPreReleaseTag(%q) = %v, want %v", tc.tag, got, tc.want)
+		}
+	}
+}

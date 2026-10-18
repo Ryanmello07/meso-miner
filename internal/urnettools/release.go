@@ -45,14 +45,53 @@ type releaseAsset struct {
 
 // releaseJSON is the subset of the GitHub release JSON we need.
 type releaseJSON struct {
-	TagName string         `json:"tag_name"`
-	Assets  []releaseAsset `json:"assets"`
+	TagName    string         `json:"tag_name"`
+	Draft      bool           `json:"draft"`
+	Prerelease bool           `json:"prerelease"`
+	Assets     []releaseAsset `json:"assets"`
 }
 
 // repoAPIBase is the GitHub repository API root for this fork. It is a
 // variable so tests can point every release lookup at a local fake server;
 // production code never changes it.
 var repoAPIBase = "https://api.github.com/repos/full-bars/urnetwork-3.23-fix"
+
+const (
+	// releasePageSize is the page size used when listing releases. 100 is
+	// GitHub's maximum, so one page covers a normal release history.
+	releasePageSize = 100
+	// maxReleasePages bounds the listing walk. It only matters when the
+	// repo has no eligible stable release at all (an error path); a normal
+	// update resolves on page 1 in a single request.
+	maxReleasePages = 10
+)
+
+// preReleaseTagRE matches a pre-release channel marker as a tag component:
+// "-rc1", ".beta2", "-nightly", "_preview3". Matching is on component
+// boundaries so a stable tag that merely contains the letters (for example
+// "v3.23.0-fix.device.4") is not mistaken for a pre-release.
+var preReleaseTagRE = regexp.MustCompile(`(?i)(^|[-._])(rc|alpha|beta|pre|preview|nightly|snapshot|dev)[0-9]*($|[-._])`)
+
+// isPreReleaseTag reports whether a release tag names a pre-release channel.
+// GitHub's release API already flags rc/beta releases created by the release
+// workflow, but a release published by hand can carry an rc tag with the
+// prerelease flag unset; the tag is then the only signal left, and an
+// auto-updater must not treat it as stable.
+func isPreReleaseTag(tag string) bool {
+	return preReleaseTagRE.MatchString(tag)
+}
+
+// providerTarballName is the release asset name of the multi-arch provider
+// tarball for a tag.
+func providerTarballName(tag string) string {
+	return "urnetwork-provider-" + tag + ".tar.gz"
+}
+
+// providerTarballURL is the GitHub download URL of that tarball.
+func providerTarballURL(tag string) string {
+	return fmt.Sprintf("https://github.com/full-bars/urnetwork-3.23-fix/releases/download/%s/%s",
+		url.PathEscape(tag), providerTarballName(tag))
+}
 
 // githubAuthHeader returns an Authorization header value when GITHUB_TOKEN
 // is set; otherwise ("", ""). Used to raise the unauthenticated rate limit
@@ -64,51 +103,108 @@ func githubAuthHeader() (string, string) {
 	return "", ""
 }
 
-// fetchLatestRelease queries the fork's GitHub releases/latest endpoint and
-// returns the tag + tarball sha256 digest for the provider asset.
+// releaseFromJSON builds the update target for one release object.
+func releaseFromJSON(rj releaseJSON) *releaseInfo {
+	return &releaseInfo{
+		Tag:            rj.TagName,
+		ProviderDigest: digestForAsset(rj.Assets, providerTarballName(rj.TagName)),
+		URL:            providerTarballURL(rj.TagName),
+		Assets:         rj.Assets,
+	}
+}
+
+// skipReason explains why a release cannot serve the stable channel, or ""
+// when it is a valid stable candidate.
+func skipReason(rj releaseJSON) string {
+	switch {
+	case rj.TagName == "":
+		return "missing tag_name"
+	case rj.Draft:
+		return "draft"
+	case rj.Prerelease:
+		return "marked pre-release"
+	case isPreReleaseTag(rj.TagName):
+		return "pre-release tag"
+	case digestForAsset(rj.Assets, providerTarballName(rj.TagName)) == "":
+		return "no " + providerTarballName(rj.TagName) + " with a sha256 digest"
+	}
+	return ""
+}
+
+// fetchLatestRelease resolves the stable update target: the newest release
+// that is neither a draft nor a pre-release and that publishes the
+// urnetwork-provider-<tag>.tar.gz asset with a sha256 digest.
+//
+// It walks the releases listing instead of trusting releases/latest. GitHub
+// defines "latest" as the newest non-draft, non-prerelease release whether or
+// not its assets are usable, so a docs-only or tool-only release published
+// after a good one used to make every updater fail on that tag until an even
+// newer release appeared. Paging past unusable releases keeps the fleet on
+// the newest installable stable release instead.
 func fetchLatestRelease() (*releaseInfo, error) {
-	api := repoAPIBase + "/releases/latest"
 	client := &http.Client{Timeout: 30 * time.Second}
+	var skipped []string
+	scanned := 0
+	for page := 1; page <= maxReleasePages; page++ {
+		releases, err := fetchReleasePage(client, page)
+		if err != nil {
+			return nil, fmt.Errorf("fetch latest release: %w", err)
+		}
+		for _, rj := range releases {
+			scanned++
+			if reason := skipReason(rj); reason != "" {
+				if len(skipped) < 5 {
+					skipped = append(skipped, fmt.Sprintf("%s (%s)", rj.TagName, reason))
+				}
+				continue
+			}
+			return releaseFromJSON(rj), nil
+		}
+		if len(releases) < releasePageSize {
+			break
+		}
+	}
+	detail := ""
+	if len(skipped) > 0 {
+		detail = "; skipped " + strings.Join(skipped, ", ")
+		if scanned > len(skipped) {
+			detail += fmt.Sprintf(" and %d more", scanned-len(skipped))
+		}
+	}
+	if scanned == 0 {
+		return nil, fmt.Errorf("no stable release with a verified provider tarball found: the release listing is empty")
+	}
+	return nil, fmt.Errorf("no stable release with a verified provider tarball found in the newest %d releases%s", scanned, detail)
+}
+
+// fetchReleasePage lists one page of releases, newest first. GitHub returns
+// drafts only to authenticated repo owners; they are filtered by the caller
+// either way.
+func fetchReleasePage(client *http.Client, page int) ([]releaseJSON, error) {
+	api := fmt.Sprintf("%s/releases?per_page=%d&page=%d", repoAPIBase, releasePageSize, page)
 	req, err := http.NewRequest("GET", api, nil)
 	if err != nil {
-		return nil, fmt.Errorf("fetch release: %w", err)
+		return nil, fmt.Errorf("fetch releases page %d: %w", page, err)
 	}
 	if k, v := githubAuthHeader(); k != "" {
 		req.Header.Set(k, v)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch latest release: %w", err)
+		return nil, fmt.Errorf("fetch releases page %d: %w", page, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == 429 {
-		return nil, fmt.Errorf("fetch latest release: rate-limited (status %d); set GITHUB_TOKEN for 5000 req/h quota", resp.StatusCode)
+		return nil, fmt.Errorf("fetch releases page %d: rate-limited (status %d); set GITHUB_TOKEN for 5000 req/h quota", page, resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch latest release: status %d", resp.StatusCode)
+		return nil, fmt.Errorf("fetch releases page %d: status %d", page, resp.StatusCode)
 	}
-	var rj releaseJSON
-	if err := json.NewDecoder(resp.Body).Decode(&rj); err != nil {
-		return nil, fmt.Errorf("decode release: %w", err)
+	var releases []releaseJSON
+	if err := json.NewDecoder(resp.Body).Decode(&releases); err != nil {
+		return nil, fmt.Errorf("decode releases page %d: %w", page, err)
 	}
-	if rj.TagName == "" {
-		return nil, fmt.Errorf("release response missing tag_name")
-	}
-	info := &releaseInfo{
-		Tag:    rj.TagName,
-		URL:    fmt.Sprintf("https://github.com/full-bars/urnetwork-3.23-fix/releases/download/%s/urnetwork-provider-%s.tar.gz", rj.TagName, rj.TagName),
-		Assets: rj.Assets,
-	}
-	// The release API digest field is "sha256:<hex>"; strip the prefix and
-	// match the exact asset name. A missing asset or missing digest is an
-	// ERROR, not a silent skip — an unverified download would be executed
-	// as the provider user.
-	wantName := "urnetwork-provider-" + rj.TagName + ".tar.gz"
-	info.ProviderDigest = digestForAsset(rj.Assets, wantName)
-	if info.ProviderDigest == "" {
-		return nil, fmt.Errorf("release %s: asset %s has no sha256 digest; refusing unverified download", rj.TagName, wantName)
-	}
-	return info, nil
+	return releases, nil
 }
 
 // digestForAsset finds the sha256 digest (hex, "sha256:" prefix stripped)
@@ -127,6 +223,10 @@ func digestForAsset(assets []releaseAsset, wantName string) string {
 // returns the tarball sha256 digest for the provider asset. Used when the
 // user passes --tag without --digest so the update is always verified
 // against the release API's recorded digest.
+//
+// An explicit tag is an operator override (canary, rollback): it is NOT
+// filtered for pre-release names or flags here. Only automatic stable
+// selection refuses pre-releases.
 func fetchReleaseByTag(tag string) (*releaseInfo, error) {
 	// M3 fix: validate tag format and escape for URL to prevent path traversal.
 	if err := validateTag(tag); err != nil {
@@ -156,15 +256,14 @@ func fetchReleaseByTag(tag string) (*releaseInfo, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&rj); err != nil {
 		return nil, fmt.Errorf("decode release %s: %w", tag, err)
 	}
-	info := &releaseInfo{
-		Tag:    tag,
-		URL:    fmt.Sprintf("https://github.com/full-bars/urnetwork-3.23-fix/releases/download/%s/urnetwork-provider-%s.tar.gz", tag, tag),
-		Assets: rj.Assets,
-	}
-	wantName := "urnetwork-provider-" + tag + ".tar.gz"
-	info.ProviderDigest = digestForAsset(rj.Assets, wantName)
+	info := releaseFromJSON(rj)
+	// The tag endpoint echoes the requested tag; trust the path, not a
+	// response field, so a malformed body cannot redirect the download URL.
+	info.Tag = tag
+	info.URL = providerTarballURL(tag)
+	info.ProviderDigest = digestForAsset(rj.Assets, providerTarballName(tag))
 	if info.ProviderDigest == "" {
-		return nil, fmt.Errorf("release %s: asset %s has no sha256 digest; refusing unverified download", tag, wantName)
+		return nil, fmt.Errorf("release %s: asset %s has no sha256 digest; refusing unverified download", tag, providerTarballName(tag))
 	}
 	return info, nil
 }
@@ -182,7 +281,7 @@ var (
 	latestReleaseMu  sync.Mutex
 )
 
-// latestRelease returns the latest release, using the short cache.
+// latestRelease returns the latest stable release, using the short cache.
 func latestRelease() (*releaseInfo, error) {
 	latestReleaseMu.Lock()
 	defer latestReleaseMu.Unlock()
