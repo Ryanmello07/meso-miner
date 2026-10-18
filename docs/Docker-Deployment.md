@@ -567,6 +567,32 @@ docker run -d \
 
 The first run with a fresh volume adds `--allow-client-registration` because `ALLOW_CLIENT_REGISTRATION=auto` sees no `.provider.key` and no `operators/` directory. Later runs do not add it. To add a new operator to an existing `operators/` tree, set `ALLOW_CLIENT_REGISTRATION=Y`.
 
+## 🧩 Shared Entrypoint Layout
+
+**v33.1, unreleased.** The batch consolidates the three Docker start scripts into one shared implementation. It is a script layout change only: no environment variable, image port, binary name or startup command changes.
+
+| File | Role |
+| :--- | :--- |
+| `docker/scripts/entrypoint.sh` | The image entrypoint. Resolves `BUILD` and `AUTH`, validates the selected auth mode, checks or removes a stale stored JWT, and execs one wrapper. |
+| `docker/scripts/start_stable.sh` | Thin wrapper. Sets `PROVIDER_MODE=stable` and `PROVIDER_FLAVOR=stable`, sources `provider_common.sh`, calls `main`. |
+| `docker/scripts/start_jwt.sh` | Thin wrapper for the auth-code path. Keeps the `AUTHCODE` to `URNETWORK_AUTH_CODE` alias, sets `PROVIDER_MODE=jwt`, sources `provider_common.sh`, calls `main`. |
+| `docker/scripts/start_nightly.sh` | Thin wrapper for the nightly flavor. Sets `PROVIDER_MODE=nightly` and `PROVIDER_FLAVOR=nightly`, sources `provider_common.sh`, calls `main`. |
+| `docker/scripts/provider_common.sh` | The shared bootstrap: directory and architecture checks, proxy setup, custom network selection, identity reporting, the IP checker, the vnStat retirement warning, and the login and supervision paths. |
+| `docker/scripts/provider_env.sh` | The v33 operator environment mapper. Its output is appended to `provide` exactly as before. |
+| `docker/scripts/jwt_verify.sh` | Local JWT `exp` and `nbf` validation, sourced before a stored token is reused. |
+| `docker/scripts/update_verify.sh` | Release selection and digest verification, sourced by the nightly path and `urnet-tools`. |
+
+### Compatibility
+
+- `BUILD` and `AUTH` keep their precedence. An explicit `BUILD` wins and logs the conflict warning when `AUTH` disagrees; `AUTH=userpass` maps to `stable`, `AUTH=authcode` maps to `jwt`, and with neither set the entrypoint chooses `jwt` when an auth code or positional argument is present, otherwise `stable`.
+- `AUTHCODE` and `URNETWORK_AUTH_CODE` remain interchangeable aliases.
+- `USER_AUTH` and `PASSWORD` are still required for `AUTH=userpass` or the stable login path, and are still used for self-healing in auth-code mode.
+- `TURBO`, `URNETWORK_PROFILE`, `PELICAN`, `ENABLE_VNSTAT` and the other documented variables keep their existing handling.
+- `ALL_OPERATORS`, `AUTO_REGISTER`, `HOTKEY_SEED_FILE`, `ALLOW_CLIENT_REGISTRATION`, `MAX_MEMORY` and `PROVIDER_ARGS` still map through `provider_env.sh`; with all of them unset the command line is exactly `provide`.
+- The exit 75 planned-restart loop and the exit 78 auth loop keep their existing behavior.
+
+The consolidation was checked with the Docker script suites and an old-versus-new offline equivalence matrix covering `BUILD` and `AUTH` conflicts, credentials, the auth-code alias, a positional JWT, `TURBO`, `PELICAN` and both restart loops. Live Pelican and arm64 execution were not part of that check.
+
 ## 🏛️ Legacy Variables
 
 The following variables are preserved for full backward compatibility:
