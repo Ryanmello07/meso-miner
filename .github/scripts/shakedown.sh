@@ -411,6 +411,44 @@ restart_provider() {
   timeout 180 runuser -u urnet -- env XDG_RUNTIME_DIR=/run/user/$(id -u urnet) systemctl --user restart urnetwork.service >&2
 }
 
+# stop_provider: stop the unit and wait for the provider process to exit, so
+# nothing can write state or emit client_id lines after this returns. Used by
+# the client-identity checks that take a journal mark around a restart: a
+# plain `systemctl restart` races them two ways. (1) The still-running old
+# process can flush its in-memory client-JWT store back to disk after the
+# caller's `rm -f .client_jwts.json`: with the file missing, flushBatchLocked
+# falls back to the process's in-memory map and rewrites the whole store
+# (client_jwt_store.go), so one flush resurrects the cache the check believes
+# it cleared. (2) Its own "client_id ... (reused)" lines emitted before the
+# SIGTERM lands are past the mark and count as post-restart samples, carrying
+# pre-clear ids into the cleared-cache window. Both fired on the rc5 run (2
+# of 12 sampled ids carried over). Bounded like restart_provider: a unit that
+# refuses to stop must not kill the job; the caller's assertions then report
+# it.
+stop_provider() {
+  timeout 180 runuser -u urnet -- env XDG_RUNTIME_DIR=/run/user/$(id -u urnet) systemctl --user stop urnetwork.service >&2
+  local end=$(( $(date +%s) + 60 ))
+  while pgrep -u urnet -f 'urnetwork provide' >/dev/null 2>&1; do
+    if [ "$(date +%s)" -ge "$end" ]; then
+      echo "WARN: urnetwork provide still running 60s after stop; the next mark may include its lines" >&2
+      break
+    fi
+    sleep 1
+  done
+}
+
+# start_provider: start the unit and return the pre-start marks in
+# restart_provider's "<ramlog_mark> <journal_mark>" DATA form. Paired with
+# stop_provider for the client-identity checks: the mark is taken only after
+# the old process has exited, so neither its store writes nor its log lines
+# can land inside the post-restart sample window.
+start_provider() {
+  local m
+  m=$(ramlog_mark_snapshot)
+  echo "$m $(journal_line_count)"
+  timeout 180 runuser -u urnet -- env XDG_RUNTIME_DIR=/run/user/$(id -u urnet) systemctl --user start urnetwork.service >&2
+}
+
 echo "SHAKEDOWN START $(date -u +%FT%TZ)" > "$REPORT"
 gate_selftest
 # MUST-FIX 10: EXPECTED_VERSION comes from the workflow (GITHUB_REF_NAME for
@@ -764,8 +802,12 @@ N_BEFORE=$(wc -l < "$CIDS_BEFORE")
 [ "$N_BEFORE" -gt 0 ] && ok "provider client_ids present ($N_BEFORE distinct)" || bad "provider client_id missing"
 
 # 1) hot-restart must REUSE identities: ids logged after the restart come back
-#    marked (reused) and overlap the pre-restart set.
-__RP_OUT=$(restart_provider); RAMLOG_MARK=${__RP_OUT%% *}; MARK=${__RP_OUT##* }
+#    marked (reused) and overlap the pre-restart set. stop/start, not a plain
+#    restart: the mark must sit on a quiescent boundary (see stop_provider),
+#    otherwise lines the old process emits during the stop window can satisfy
+#    this check by themselves (it would then pass with reuse broken).
+stop_provider
+__RP_OUT=$(start_provider); RAMLOG_MARK=${__RP_OUT%% *}; MARK=${__RP_OUT##* }
 wait_client_id "$MARK" 120 >/dev/null
 # wait_client_id returns on the FIRST id; settle so several proxies have
 # re-authed and the set comparison has more than one sample to work with.
@@ -781,9 +823,14 @@ else
 fi
 
 # 2) Clear the persisted client-JWT cache, restart -> ids must mint NEW, and
-#    none may carry over from the previous set.
+#    none may carry over from the previous set. Stop FIRST: while the old
+#    process is live it can flush its in-memory store back to disk after the
+#    rm (a missing file makes flushBatchLocked rewrite the whole map), and
+#    its tail client_id lines land past the mark as if post-restart. That
+#    race is the rc5 false fail (2 of 12 sampled ids carried over).
+stop_provider
 rm -f /home/urnet/.urnetwork/.client_jwts.json
-__RP_OUT=$(restart_provider); RAMLOG_MARK=${__RP_OUT%% *}; MARK=${__RP_OUT##* }
+__RP_OUT=$(start_provider); RAMLOG_MARK=${__RP_OUT%% *}; MARK=${__RP_OUT##* }
 wait_client_id "$MARK" 120 >/dev/null
 sleep 20
 cids_since "$MARK" > "$CIDS_FRESH"
@@ -861,9 +908,11 @@ L_CIDS_OFF=$(mktemp); L_CIDS_ON=$(mktemp)
 L_SNAP_OFF=$(mktemp); L_SNAP_ON=$(mktemp)
 
 # 1) Toggle OFF + cleared cache: every identity must be freshly minted, and
-#    nothing may be reused.
+#    nothing may be reused. Stop/clear/start, the same quiescent order as H
+#    step 2: the clear must not race the running process (see stop_provider).
+stop_provider
 rm -f /home/urnet/.urnetwork/.client_jwts.json
-__RP_OUT=$(restart_provider); RAMLOG_MARK=${__RP_OUT%% *}; MARK=${__RP_OUT##* }
+__RP_OUT=$(start_provider); RAMLOG_MARK=${__RP_OUT%% *}; MARK=${__RP_OUT##* }
 wait_client_id "$MARK" 120 >/dev/null
 # wait_client_id returns on the FIRST id; settle so several proxies have
 # re-authed and the marker counts have more than one sample.
@@ -882,10 +931,13 @@ fi
 # 2) Restore the default (remove override) so the rest of the run reuses
 #    identity. The OFF pass above repopulated the store — persistence is
 #    unconditional, only the read path is gated (main.go) — so a restart with
-#    the toggle back ON must reuse those very ids.
+#    the toggle back ON must reuse those very ids. Stop before touching the
+#    override: the new process must be the only one writing the store or the
+#    log during the sampled window (see stop_provider).
+stop_provider
 rm -f "$OVERRIDE_DIR/override.conf"
 runuser -u urnet -- env XDG_RUNTIME_DIR=/run/user/$(id -u urnet) systemctl --user daemon-reload
-__RP_OUT=$(restart_provider); RAMLOG_MARK=${__RP_OUT%% *}; MARK=${__RP_OUT##* }
+__RP_OUT=$(start_provider); RAMLOG_MARK=${__RP_OUT%% *}; MARK=${__RP_OUT##* }
 wait_client_id "$MARK" 120 >/dev/null
 sleep 20
 markers_snapshot "$MARK" > "$L_SNAP_ON"
