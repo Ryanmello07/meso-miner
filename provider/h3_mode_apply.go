@@ -32,6 +32,12 @@ func h3DefaultModeName() string {
 // policy.
 func applyH3Mode(setting h3Setting) (previous h3Setting, relaunch bool) {
 	connect.SetH3Enabled(setting.Mode == h3ModeOn)
+	if setting.Mode != h3ModeAuto {
+		// Leaving auto forgets the episode, so a later re-entry starts at
+		// direct-only and widens from there rather than resuming an old count.
+		h3AutoController.reset()
+		h3AutoTarget.Store(0)
+	}
 	prev := h3AppliedSetting.Swap(&setting)
 	rerankH3(setting)
 	if prev == nil {

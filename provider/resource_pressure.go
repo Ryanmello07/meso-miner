@@ -1040,6 +1040,10 @@ func runPressureMonitor(ctx context.Context, selfHealEnabled bool) {
 			prevObserved.smoothedNoCPU = obsActs.publishNoCPU
 			setObservedPressure(obsSmoothed)
 			setObservedPressureNoCPU(obsActs.publishNoCPU)
+			// `h3 auto` sizes the H3 fallback set from memory pressure and is
+			// independent of self-heal, so it must see the observed sample in
+			// this branch too. It is a no-op unless the h3 key is auto.
+			noteH3AutoPressure(obsActs.comps)
 			// The GC governor is independent of self-heal: keep giving it the
 			// full host+heap view so a tightened level can release.
 			if gcAdaptiveEnabled() {
@@ -1066,6 +1070,9 @@ func runPressureMonitor(ctx context.Context, selfHealEnabled bool) {
 		setObservedPressure(smoothed)
 		setObservedPressureNoCPU(acts.publishNoCPU)
 		comps := acts.comps
+		// `h3 auto` sizing rides this sweep, with self-heal on or off. No-op
+		// unless the h3 control key is auto.
+		noteH3AutoPressure(comps)
 
 		// Consolidated GC governor: merge heap + host-RAM, tighter wins.
 		prevGOGC := gcState.currentGOGC

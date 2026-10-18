@@ -17,6 +17,8 @@ import (
 //	                  score, then by decayed earnings, then by key for a stable
 //	                  order. The direct identity never consumes one of the N.
 //	all               every proxy
+//	auto              the N the memory controller currently allows (see
+//	                  h3_auto.go): from none up to h3AutoMaxProxies
 //
 // A set of N is sticky. Once chosen it keeps its members while they remain
 // candidates, and only vacancies are filled from the ranking, so grades drifting
@@ -31,6 +33,7 @@ const h3RelaunchInterval = 300 * time.Millisecond
 
 type h3Ranking struct {
 	cap  int
+	auto bool
 	keys map[string]bool
 }
 
@@ -55,6 +58,9 @@ func h3ProxyEligible(setting h3Setting, key string) bool {
 	case h3ModeTop:
 		ranking := h3RankingValue.Load()
 		return ranking != nil && ranking.cap == setting.Cap && ranking.keys[key]
+	case h3ModeAuto:
+		ranking := h3RankingValue.Load()
+		return ranking != nil && ranking.auto && ranking.keys[key]
 	}
 	return false
 }
@@ -135,12 +141,18 @@ func noteH3Candidates(candidates []*connect.ProxySettings, setting h3Setting) (c
 	return rerankH3(setting)
 }
 
-// rerankH3 recomputes the ranked set for a count setting from the last noted
-// candidates.
+// rerankH3 recomputes the ranked set for a count or auto setting from the last
+// noted candidates.
 func rerankH3(setting h3Setting) (changed bool) {
-	if setting.Mode != h3ModeTop {
-		// the ranking only exists under a count; leaving it drops the members
+	auto := setting.Mode == h3ModeAuto
+	if setting.Mode != h3ModeTop && !auto {
+		// the ranking only exists under a count or auto; leaving it drops the
+		// members
 		return h3RankingValue.Swap(nil) != nil
+	}
+	n := setting.Cap
+	if auto {
+		n = int(h3AutoTarget.Load())
 	}
 	h3CandidatesMutex.Lock()
 	candidates := h3Candidates
@@ -148,14 +160,17 @@ func rerankH3(setting h3Setting) (changed bool) {
 	state, _ := readProxyState()
 	previous := h3RankingValue.Load()
 	var previousKeys map[string]bool
-	if previous != nil && previous.cap == setting.Cap {
+	if previous != nil && ((auto && previous.auto) || (!auto && previous.cap == n)) {
+		// Auto keeps its members across target steps, so a widening step only
+		// launches the new proxies; a count keeps them only while it is the
+		// same count.
 		previousKeys = previous.keys
 	}
-	keys := rankH3Proxies(setting.Cap, previousKeys, candidates, state)
-	if previous != nil && previous.cap == setting.Cap && sameKeySet(previous.keys, keys) {
+	keys := rankH3Proxies(n, previousKeys, candidates, state)
+	if previous != nil && previous.auto == auto && sameKeySet(previous.keys, keys) && (auto || previous.cap == n) {
 		return false
 	}
-	h3RankingValue.Store(&h3Ranking{cap: setting.Cap, keys: keys})
+	h3RankingValue.Store(&h3Ranking{cap: n, auto: auto, keys: keys})
 	return true
 }
 
