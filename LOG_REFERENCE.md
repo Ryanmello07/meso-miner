@@ -978,7 +978,7 @@ Goroutine and heap profiles taken on the way into a stall (see [Configuration](d
 
 | Message | Meaning |
 |---|---|
-| `<trigger>: N goroutines, heap at P% of its limit; profiles in <dir>` | The build-up showed, and `summary.txt`, `goroutines.txt`, `heap.pb.gz` and `meta.txt` were written to `<dir>`. Open `summary.txt` first: the stack with the most goroutines is what piled up. |
+| `<trigger>: N goroutines, heap at P% of its limit; profiles in <dir>` | The build-up showed, and the profiles were written to `<dir>`. Open `summary.txt` first: the stack with the most goroutines is what piled up. A `heap-over-limit` capture is the exception: it skips `goroutines.txt` and `summary.txt`, because the goroutine profile allocates a record per goroutine and stops the world, and a box already past its heap limit cannot afford that. It writes `heap.pb.gz` and `meta.txt` only, and `meta.txt` carries `goroutine_profile=skipped` to say so. |
 | `capture for <trigger> failed` | The profiles could not be written (disk full, read-only state directory). The provider carries on. |
 
 ---
@@ -995,7 +995,7 @@ A provider keeps one client login per proxy in `~/.urnetwork/.client_jwts.json` 
 | `[hot-restart] <key>: network_id mismatch ... minting fresh` | The saved login belongs to a different network (for example after switching accounts), so it is not reused. |
 | `[jwt-store] corrupt ..., starting fresh` | The store file could not be read. A snapshot of the unreadable bytes is taken first (the `snapshot saved` line), then every proxy mints fresh. |
 | `[jwt-store] snapshot saved` / `snapshot ... failed` / `failed to prune old backup` | Pre-restart copies of the store. Failures are warnings only and do not stop the provider. At most 10 snapshots are kept. |
-| `[jwt-store] reused client identity ... never authenticated ... evicted` | A reused login was refused transport authentication repeatedly without ever succeeding. Eviction is off unless `URNETWORK_EVICT_REVOKED_IDENTITIES=1`; when it is on, the login is removed so the next attempt mints a fresh one. |
+| `[jwt-store] reused client identity ... never authenticated ... evicted` | A reused login drew 5 refusals that count — `ProxyAuthRejectionCount` reaches 5, so only transport-authentication refusals, not timeouts — without ever coming up, which is how a revoked identity looks. Eviction is off unless `URNETWORK_EVICT_REVOKED_IDENTITIES=1`, and it never runs while the backend is degraded: a timeout or an overloaded gateway says nothing about the identity. When it is on, the login is removed so the next attempt mints a fresh one. |
 | `[jwt-store] identity ... renewed successfully — revocation watcher standing down` | The eviction watch ended because the login renewed fine: no eviction. |
 | `[jwt-store] failed to evict possibly-revoked identity` | The eviction itself failed (disk error). The login stays and is retried. |
 | `[jwt-renew] ... cannot read account JWT` | A renewal could not run because the account token in `~/.urnetwork/jwt` is unreadable. Run `provider auth` again. |
