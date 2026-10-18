@@ -246,7 +246,12 @@ func initSHMLoggerWithHandover() {
 	initSHMLogger()
 }
 
-func RunStartupAudit() (slowDisk bool, lowSpace bool) {
+// RunStartupAudit prints the host-limit checks. benchmarkDisk asks for the
+// disk write benchmark too; pass true only when the result is acted on (the
+// auto profile), because the benchmark touches the disk. It is skipped
+// regardless when RAM logs are already on or the profile is lowmem/eco, and it
+// only ever writes inside the provider's state dir.
+func RunStartupAudit(benchmarkDisk bool) (slowDisk bool, lowSpace bool) {
 	if os.Getenv("URNETWORK_SKIP_AUDIT") == "1" {
 		tlog("[audit] System audit skipped (URNETWORK_SKIP_AUDIT=1)\n")
 		return false, false
@@ -255,10 +260,13 @@ func RunStartupAudit() (slowDisk bool, lowSpace bool) {
 	profile := os.Getenv("URNETWORK_PROFILE")
 	ramlogs := os.Getenv("URNETWORK_RAMLOGS")
 
-	// If RAM logs are already ON (manually or via profile), skip disk benchmark
-	skipDisk := (ramlogs == "1" || profile == "lowmem" || profile == "eco")
+	skipDisk := !benchmarkDisk || ramlogs == "1" || profile == "lowmem" || profile == "eco"
 
-	return connect.RunSystemAudit(skipDisk)
+	dir, ok := proxyHealthDir()
+	if !ok {
+		dir = "" // no state dir: no disk test, never fall back to the working dir
+	}
+	return connect.RunSystemAudit(dir, skipDisk)
 }
 
 func applyLowmodeSettings(clientSettings *connect.ClientSettings, localUserNatSettings *connect.LocalUserNatSettings) {
@@ -855,7 +863,7 @@ func main() {
 	finishAudit := bannerPhase("System audit")
 	if profile == "auto" && isLongRunningSubcommand() {
 		manualRamLogs := (ramlogs == "1")
-		slowDisk, _ := RunStartupAudit()
+		slowDisk, _ := RunStartupAudit(true)
 		if slowDisk && !manualRamLogs {
 			finishAudit("slow disk → auto RAM logs", "⚠")
 			autoRamLogTriggered = true
@@ -867,7 +875,7 @@ func main() {
 			finishAudit(detail)
 		}
 	} else if isLongRunningSubcommand() {
-		RunStartupAudit()
+		RunStartupAudit(false)
 		finishAudit("manual profile")
 	} else {
 		finishAudit("not long-running")
