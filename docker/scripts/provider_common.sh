@@ -199,26 +199,26 @@ func_login_retry_loop() {
     while true; do
         log "[INFO] Sleeping 15s before obtaining new JWT..."
         sleep 15
-        
+
         log "[INFO] Attempting authentication..."
-        
+
         # Capture auth command output for parsing
         AUTH_OUTPUT=$("$PROVIDER_BIN" auth --user_auth="$USER_AUTH" --password="$PASSWORD" -f 2>&1) || true
         AUTH_EXIT_CODE=$?
         PANIC_LINE=$(echo "$AUTH_OUTPUT" | grep -E '^panic:' || true)
-        
+
         if [ "${DEBUG:-false}" = "true" ]; then
             echo "DEBUG: USER_AUTH=$USER_AUTH"
             echo "DEBUG: PASSWORD=$PASSWORD"
             echo "DEBUG: AUTH_EXIT_CODE=$AUTH_EXIT_CODE"
             echo "DEBUG: AUTH_OUTPUT=$AUTH_OUTPUT"
         fi
-        
+
         # Check for success message in output
         if echo "$AUTH_OUTPUT" | grep -q "Jwt written to"; then
             log "[INFO] Authentication successful - JWT written"
             sleep 5
-            
+
             # Verify JWT file exists as backup check
             if [ -s "$JWT_FILE" ]; then
                 log "[INFO] JWT file verified at $JWT_FILE"
@@ -614,7 +614,7 @@ func_start_provider_jwt(){
 
     if [ -s "$JWT_FILE" ]; then
         log "[INFO] Existing session found at $JWT_FILE - skipping auth"
-    
+
     # Priority 2: Authentication via Environment Variable (Safe for dash-prefixed tokens)
     elif [ -n "$URNETWORK_AUTH_CODE" ]; then
         log "[INFO] Starting UrNetwork with provided auth code (environment)..."
@@ -843,4 +843,3 @@ func_bootstrap() {
 main() {
     func_bootstrap "$@"
 }
-
