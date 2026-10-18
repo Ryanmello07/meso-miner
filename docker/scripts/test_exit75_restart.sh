@@ -89,6 +89,7 @@ STUB_EOF
         echo "pgrep() { return 1; }"
         echo "func_do_login() { echo 'LOG: func_do_login called' >> '$test_dir/out.log'; }"
         echo "func_check_credentials() { echo 'LOG: func_check_credentials called' >> '$test_dir/out.log'; }"
+        echo ". '$REPO/docker/scripts/provider_env.sh'"
         extract_func "$REPO/docker/scripts/$script_file" func_start_provider
         echo "func_start_provider"
     } > "$runner"
