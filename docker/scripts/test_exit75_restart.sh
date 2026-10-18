@@ -75,11 +75,29 @@ STUB_EOF
     cp "$test_dir/app/urnetwork_amd64_stable" "$test_dir/app/urnetwork_amd64_nightly"
 
     local runner="$test_dir/runner.sh"
+    local src_file fn_name flavor
+    if [ "$script_file" = "pelican_panel.sh" ]; then
+        src_file="$REPO/docker/scripts/pelican_panel.sh"
+        fn_name="func_start_provider"
+        flavor="stable"
+    else
+        # The start_* scripts are thin wrappers; the lifecycle loop now lives
+        # in provider_common.sh under a per-mode function name.
+        src_file="$REPO/docker/scripts/provider_common.sh"
+        flavor="stable"
+        case "$script_file" in
+            start_stable.sh)  fn_name="func_start_provider_stable" ;;
+            start_nightly.sh) fn_name="func_start_provider_nightly"; flavor="nightly" ;;
+            start_jwt.sh)     fn_name="func_start_provider_jwt" ;;
+            *) echo "unknown script $script_file" >&2; return 1 ;;
+        esac
+    fi
     {
         echo "set -u"
         echo "export TEST_DIR='$test_dir'"
         echo "APP_DIR='$test_dir/app'"
         echo "A_SYS_ARCH='amd64'"
+        echo "PROVIDER_FLAVOR='$flavor'"
         echo "HOME='$test_dir/home'"
         echo "JWT_FILE='$jwt_file'"
         echo "USER_AUTH=''"
@@ -89,8 +107,8 @@ STUB_EOF
         echo "pgrep() { return 1; }"
         echo "func_do_login() { echo 'LOG: func_do_login called' >> '$test_dir/out.log'; }"
         echo "func_check_credentials() { echo 'LOG: func_check_credentials called' >> '$test_dir/out.log'; }"
-        extract_func "$REPO/docker/scripts/$script_file" func_start_provider
-        echo "func_start_provider"
+        extract_func "$src_file" "$fn_name"
+        echo "$fn_name"
     } > "$runner"
 
     timeout 5 bash "$runner" >/dev/null 2>&1 || true
