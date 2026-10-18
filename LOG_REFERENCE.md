@@ -305,7 +305,7 @@ Monitors backend connectivity. It is designed to be conservative to avoid false 
 
 ## 🛡️ Backend Outage Protection (`[govern]`, `[t]flap`, `[proxy][outage]`)
 
-On by default (`URNETWORK_GOVERN`, see [Configuration](docs/Configuration.md#backend-outage-protection)). Every line starting with `[govern]` is also in the important log.
+Observes by default on this line (`URNETWORK_GOVERN=shadow`); set `enforce` to act, `off` to disable (see [Configuration](docs/Configuration.md#backend-outage-protection)). Every line starting with `[govern]` is also in the important log.
 
 ```
 [govern] ok window=60s attempts=732 (12.2/s) connected=673 died_young=9 good=97% baseline=91% threshold=20% socks=9 tls=0 upgrade=0 timeout_platform=9 timeout_silent=3 other=0 refused=0 dials/attempt=3.3 KB/attempt=4.8 failed_KB=71 would_hold=0 mode=enforce rate=200.0/s waiting=0
@@ -978,13 +978,24 @@ Goroutine and heap profiles taken on the way into a stall (see [Configuration](d
 
 | Message | Meaning |
 |---|---|
+| `<trigger>: N goroutines, heap at P% of its limit; profiles in <dir>` | The build-up showed, and the profiles were written to `<dir>`. Open `summary.txt` first: the stack with the most goroutines is what piled up. A `heap-over-limit` capture is the exception: it skips `goroutines.txt` and `summary.txt`, because the goroutine profile allocates a record per goroutine and stops the world, and a box already past its heap limit cannot afford that. It writes `heap.pb.gz` and `meta.txt` only, and `meta.txt` carries `goroutine_profile=skipped` to say so. |
+| `capture for <trigger> failed` | The profiles could not be written (disk full, read-only state directory). The provider carries on. |
+
+---
+
+## 🔑 Stored Identities (`[hot-restart]`, `[jwt-store]`, `[jwt-renew]`, `[proxy][identity]`)
+
+A provider keeps one client login per proxy in `~/.urnetwork/.client_jwts.json` so a restart reuses the same client id instead of minting a new one and losing that identity's history. These lines say what happened to those logins.
+
+| Message | Meaning |
+|---|---|
 | `[hot-restart] loaded N stored identities` | Once at start. `carrying forward` is how many will be reused. Entries for proxies that have not reconnected in 30 days are pruned and counted. |
 | `[hot-restart] no stored client identities found` | An empty store: every proxy mints a fresh identity on its first sign-in. Expected on a first start, a warning after a restart. |
 | `[hot-restart] <key>: stored client JWT expired, renewed identity <id>` | The saved login had aged out and was renewed under the same client id. The identity and its history survive. |
 | `[hot-restart] <key>: network_id mismatch ... minting fresh` | The saved login belongs to a different network (for example after switching accounts), so it is not reused. |
 | `[jwt-store] corrupt ..., starting fresh` | The store file could not be read. A snapshot of the unreadable bytes is taken first (the `snapshot saved` line), then every proxy mints fresh. |
 | `[jwt-store] snapshot saved` / `snapshot ... failed` / `failed to prune old backup` | Pre-restart copies of the store. Failures are warnings only and do not stop the provider. At most 10 snapshots are kept. |
-| `[jwt-store] reused client identity ... never authenticated ... evicted` | A reused login failed transport authentication repeatedly without ever succeeding, which is how a revoked identity looks. It is removed so the next attempt mints a fresh one. |
+| `[jwt-store] reused client identity ... never authenticated ... evicted` | A reused login drew 5 refusals that count — `ProxyAuthRejectionCount` reaches 5, so only transport-authentication refusals, not timeouts — without ever coming up, which is how a revoked identity looks. Eviction is off unless `URNETWORK_EVICT_REVOKED_IDENTITIES=1`, and it never runs while the backend is degraded: a timeout or an overloaded gateway says nothing about the identity. When it is on, the login is removed so the next attempt mints a fresh one. |
 | `[jwt-store] identity ... renewed successfully — revocation watcher standing down` | The eviction watch ended because the login renewed fine: no eviction. |
 | `[jwt-store] failed to evict possibly-revoked identity` | The eviction itself failed (disk error). The login stays and is retried. |
 | `[jwt-renew] ... cannot read account JWT` | A renewal could not run because the account token in `~/.urnetwork/jwt` is unreadable. Run `provider auth` again. |
@@ -1035,8 +1046,6 @@ The happy path of a hot swap is shown in [HotSwap](docs/HotSwap.md#what-you-will
 | `Canary did not exit within 5s; terminating canary` | The pre-flight canary stuck around and was killed. Informational unless pre-flight also failed. |
 | `Running under systemd without Type=notify` | The unit does not accept a MainPID update, so systemd keeps the old PID. Use the shipped unit (`Type=notify`). |
 | `[hotswap-heal] ...` | The updater repaired a fixable problem on its own: a missing execute bit, a file with wrong permissions, a pre-flight check of the API host that failed over IPv6 and succeeded over IPv4 (it tries up to 3 times), or a transient `ETXTBSY` while the new binary was still being written (up to 3 attempts, 150 ms longer each time). |
-
----
 
 ---
 
@@ -1139,5 +1148,3 @@ These explain a proxy that is not signing in. Per-attempt `[t]auth error` lines 
 | `client_limit_hold.json is not valid JSON, replacing it` | The saved holds were unreadable and are replaced. At worst one more kick per client. |
 
 An older platform never sends the close, so these lines never appear against it. `URNETWORK_PROVIDE_INTENT=0` stops the provider declaring an intent; a kick is still held.
-| `<trigger>: N goroutines, heap at P% of its limit; profiles in <dir>` | The build-up showed, and `summary.txt`, `goroutines.txt`, `heap.pb.gz` and `meta.txt` were written to `<dir>`. Open `summary.txt` first: the stack with the most goroutines is what piled up. |
-| `capture for <trigger> failed` | The profiles could not be written (disk full, read-only state directory). The provider carries on. |

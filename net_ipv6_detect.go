@@ -16,22 +16,79 @@ var hostHasGlobalIpv6 = cachedGlobalIpv6
 const ipv6DetectTtl = 10 * time.Minute
 
 var ipv6Detect struct {
-	mu      sync.Mutex
+	mu sync.Mutex
+	// at is when has was measured and checked whether a measurement exists
 	at      time.Time
 	has     bool
 	checked bool
+	// probe is non-nil while a probe is in flight, so exactly one runs at a time
+	probe chan struct{}
 }
 
+// cachedGlobalIpv6 returns whether this host can really reach the internet over
+// IPv6. The first caller probes and the rest wait for its answer, so the value is
+// never guessed from a zero. Past ipv6DetectTtl callers get the cached answer and
+// one background probe replaces it: the probe can take two seconds and this is
+// called from the name resolution path, so it must never hold the lock across it
+// or make a resolution wait for it.
 func cachedGlobalIpv6() bool {
-	ipv6Detect.mu.Lock()
-	defer ipv6Detect.mu.Unlock()
-	if ipv6Detect.checked && time.Since(ipv6Detect.at) < ipv6DetectTtl {
-		return ipv6Detect.has
+	for {
+		ipv6Detect.mu.Lock()
+		switch {
+		case !ipv6Detect.checked:
+			// the first answer must be real: one prober, the rest wait for it
+			if probe := ipv6Detect.probe; probe != nil {
+				ipv6Detect.mu.Unlock()
+				<-probe
+				continue
+			}
+			probe := make(chan struct{})
+			ipv6Detect.probe = probe
+			ipv6Detect.mu.Unlock()
+			has := detectGlobalIpv6()
+			ipv6Detect.mu.Lock()
+			storeGlobalIpv6Locked(has)
+			ipv6Detect.probe = nil
+			ipv6Detect.mu.Unlock()
+			close(probe)
+			return has
+		case time.Since(ipv6Detect.at) < ipv6DetectTtl:
+			has := ipv6Detect.has
+			ipv6Detect.mu.Unlock()
+			return has
+		case ipv6Detect.probe == nil:
+			// stale: answer from the cache now, refresh behind the caller
+			ipv6Detect.probe = make(chan struct{})
+			has := ipv6Detect.has
+			ipv6Detect.mu.Unlock()
+			go refreshGlobalIpv6()
+			return has
+		default:
+			// a refresh is already in flight: keep answering from the cache
+			has := ipv6Detect.has
+			ipv6Detect.mu.Unlock()
+			return has
+		}
 	}
-	ipv6Detect.has = detectGlobalIpv6()
+}
+
+// storeGlobalIpv6Locked records a probe result. Caller holds ipv6Detect.mu.
+func storeGlobalIpv6Locked(has bool) {
+	ipv6Detect.has = has
 	ipv6Detect.at = time.Now()
 	ipv6Detect.checked = true
-	return ipv6Detect.has
+}
+
+func refreshGlobalIpv6() {
+	has := detectGlobalIpv6()
+	ipv6Detect.mu.Lock()
+	storeGlobalIpv6Locked(has)
+	probe := ipv6Detect.probe
+	ipv6Detect.probe = nil
+	ipv6Detect.mu.Unlock()
+	if probe != nil {
+		close(probe)
+	}
 }
 
 // dnsProbeQuery is a minimal query for the root NS records.

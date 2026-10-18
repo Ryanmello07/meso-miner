@@ -120,6 +120,26 @@ func TestAttemptCap_ReleasesWhenAttemptsSucceed(t *testing.T) {
 	}
 }
 
+// The cap holds the attempt rate down itself, so once it is on a minute with few
+// attempts but the same failures is still a storm. Judging it by volume would
+// release the very cap that produced the low volume, and the node would flap.
+func TestAttemptCap_StaysOnAtTheAttemptRateItImposes(t *testing.T) {
+	h, lines := newCapHarness(4000)
+	h.capMinute(connectSocksFail, 1800, 200)
+	h.capMinute(connectSocksFail, 1800, 200)
+	if h.budget.currentCap() == 0 {
+		t.Fatal("setup: cap should be on")
+	}
+	// a tenth of the pool retrying once a minute, all of it failing: far below
+	// the 2000 attempts the pool share needs to engage the cap
+	for i := 0; i < 3; i++ {
+		h.capMinute(connectSocksFail, 400, 0)
+	}
+	if h.budget.currentCap() == 0 {
+		t.Fatalf("the cap must hold while attempts keep failing: %q", *lines)
+	}
+}
+
 func TestAttemptCap_NeverAppliesInsideTheStartupGrace(t *testing.T) {
 	h, _ := newCapHarness(4000)
 	h.gov.started = *h.now

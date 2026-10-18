@@ -294,7 +294,7 @@ What it does while the backend is failing:
 - **One dial round.** A failed platform dial gives up after one pass over the dialers instead of retrying them until the 15 s deadline.
 - **Byte breaker.** If failed attempts burn more than 256 KiB/s (about 22 GB/day) the budget is cut whatever the verdict says.
 - **Flap guard.** A session that dies in under 60 s makes that proxy wait (5 s doubling to 60 s, jittered) before it reconnects.
-- **Identities are protected.** A saved client identity is evicted only after 5 explicit refusals (HTTP 401 or 403) from a healthy backend, never on timeouts and never during an outage. The degraded-proxy reaper also holds off while an outage is under way and for 30 minutes after.
+- **Identities are protected.** Automatic eviction of a saved client identity is off unless `URNETWORK_EVICT_REVOKED_IDENTITIES=1`. With it on, an identity is evicted only after 5 explicit refusals (HTTP 401 or 403) from a healthy backend, never on timeouts and never during an outage. The degraded-proxy reaper also holds off while an outage is under way and for 30 minutes after.
 - **Restart during an outage.** A throttled budget keeps a marker file at `~/.urnetwork/govern_outage`. A restart that finds one under 10 minutes old starts at the floor and ramps on evidence; a healthy restart or hot swap pays nothing.
 
 What to look at:
