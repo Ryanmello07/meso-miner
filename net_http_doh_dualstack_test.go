@@ -88,28 +88,47 @@ func TestDetectGlobalIpv6DoesNotPanicOrBlock(t *testing.T) {
 	_ = detectGlobalIpv6() // result depends on the host; it must return promptly
 }
 
-// Without working IPv6 the v6 resolvers must never be offered, in any mode.
+// On an IPv4-only host the probe governs the dual-stack default only. An explicit
+// IPv6 request keeps the configured v6 resolvers, so a udp6/tcp6 dial is handed a
+// resolver of the family it asked for instead of an unreachable v4 one.
 func TestDnsResolverAddrsOmitIpv6WithoutHostIpv6(t *testing.T) {
+	hasV6 := func(addrs []string) bool {
+		for _, addr := range addrs {
+			if ip := net.ParseIP(addr); ip != nil && ip.To4() == nil {
+				return true
+			}
+		}
+		return false
+	}
+
+	withHostIpv6(t, false)
 	settings := DefaultDohSettings()
+	// the default remote list carries no v6 resolver, so give it one to preserve
+	settings.DnsResolverSettings.RemoteDnsIpv6 = []string{"2606:4700:4700::1111"}
+
 	for _, remote := range []bool{false, true} {
-		withHostIpv6(t, false)
-		for _, network := range []string{"", "udp", "udp6", "tcp6"} {
-			for _, addr := range dnsResolverAddrs(settings, remote, network) {
-				if ip := net.ParseIP(addr); ip != nil && ip.To4() == nil {
-					t.Fatalf("remote=%v network=%q offered the IPv6 resolver %s on an IPv4-only host", remote, network, addr)
-				}
+		// the dual-stack default: without working IPv6 the v6 resolvers only time out
+		for _, network := range []string{"", "udp", "tcp"} {
+			if hasV6(dnsResolverAddrs(settings, remote, network)) {
+				t.Fatalf("remote=%v network=%q offered the IPv6 resolver on an IPv4-only host", remote, network)
+			}
+		}
+		for _, network := range []string{"udp6", "tcp6"} {
+			if !hasV6(dnsResolverAddrs(settings, remote, network)) {
+				t.Fatalf("remote=%v network=%q dropped the configured IPv6 resolver on an IPv4-only host", remote, network)
 			}
 		}
 	}
+
+	// IpVersion 6 is the same explicit request, made in configuration
+	settings.IpVersion = 6
+	if !hasV6(dnsResolverAddrs(settings, false, "udp")) {
+		t.Fatal("an explicitly configured IpVersion 6 must be honoured on an IPv4-only host")
+	}
+
 	withHostIpv6(t, true)
 	settings = DefaultDohSettings() // IpVersion 0 on a dual-stack host
-	found := false
-	for _, addr := range dnsResolverAddrs(settings, false, "") {
-		if ip := net.ParseIP(addr); ip != nil && ip.To4() == nil {
-			found = true
-		}
-	}
-	if !found {
+	if !hasV6(dnsResolverAddrs(settings, false, "")) {
 		t.Fatal("a dual-stack host must be offered IPv6 resolvers")
 	}
 }
