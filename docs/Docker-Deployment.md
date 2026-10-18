@@ -543,6 +543,8 @@ The v33 operator flags can be set from the container environment. `docker/script
 
 `1`, `true`, `yes` and `on` are accepted for the two boolean variables, case-insensitively; `0`, `false`, `no` and `off` turn them off. `AUTO_REGISTER` and `HOTKEY_SEED_FILE` are refused when `ALL_OPERATORS` is off, because those flags exist only in the `provide --all-operators` usage. `PROVIDER_ARGS` applies to `provide` only and is split on whitespace, so an individual argument that contains spaces cannot be passed this way.
 
+Leave `AUTH` unset with `ALL_OPERATORS=1`. `AUTH=userpass` still makes the entrypoint require `USER_AUTH` and `PASSWORD`, and those are not used by the operator supervisor, which signs in per operator.
+
 Example:
 
 ```bash
