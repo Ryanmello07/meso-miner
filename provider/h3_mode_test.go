@@ -12,6 +12,7 @@ func TestParseH3Mode(t *testing.T) {
 		"off": {Mode: h3ModeOff}, "0": {Mode: h3ModeOff},
 		"on": {Mode: h3ModeOn}, " On ": {Mode: h3ModeOn},
 		"all": {Mode: h3ModeAll}, "16": {Mode: h3ModeTop, Cap: 16}, " 64 ": {Mode: h3ModeTop, Cap: 64},
+		"auto": {Mode: h3ModeAuto}, "AUTO": {Mode: h3ModeAuto}, " Auto ": {Mode: h3ModeAuto},
 	} {
 		got, err := parseH3Mode(value)
 		if err != nil || got != want {
@@ -23,7 +24,7 @@ func TestParseH3Mode(t *testing.T) {
 			t.Fatalf("parseH3Mode(%q) must be rejected", bad)
 		}
 	}
-	for _, value := range []string{"off", "direct", "on", "all", "16"} {
+	for _, value := range []string{"off", "direct", "on", "all", "auto", "16"} {
 		got, _ := parseH3Mode(value)
 		if got.String() != value {
 			t.Fatalf("%q does not round trip, got %q", value, got.String())
@@ -54,7 +55,7 @@ func TestDirectIdentityDefaultsToAutomaticFallbacks(t *testing.T) {
 }
 
 func TestH3ModePreferencesPerMode(t *testing.T) {
-	for _, mode := range []h3Mode{h3ModeOff, h3ModeDirect, h3ModeOn, h3ModeTop, h3ModeAll} {
+	for _, mode := range []h3Mode{h3ModeOff, h3ModeDirect, h3ModeOn, h3ModeTop, h3ModeAll, h3ModeAuto} {
 		got := h3ModePreferences(h3Setting{Mode: mode, Cap: 4}, false, false)
 		if len(got) != 1 || got[connect.TransportModeH1] != 1 {
 			t.Fatalf("mode %v: an ineligible proxy must be H1 only, got %v", mode, got)
@@ -77,6 +78,8 @@ func TestH3ModePreferencesPerMode(t *testing.T) {
 		{"top direct", h3Setting{Mode: h3ModeTop, Cap: 2}, true, false},
 		{"top proxy", h3Setting{Mode: h3ModeTop, Cap: 2}, false, true},
 		{"all proxy", h3Setting{Mode: h3ModeAll}, false, true},
+		{"auto direct", h3Setting{Mode: h3ModeAuto}, true, false},
+		{"auto proxy", h3Setting{Mode: h3ModeAuto}, false, true},
 	} {
 		got := h3ModePreferences(c.setting, c.direct, c.proxy)
 		for mode, priority := range want {
@@ -116,7 +119,7 @@ func TestResolveH3Mode(t *testing.T) {
 	for _, c := range []struct {
 		value string
 		want  h3Mode
-	}{{"off", h3ModeOff}, {"direct", h3ModeDirect}, {"on", h3ModeOn}, {"all", h3ModeAll}, {"8", h3ModeTop}} {
+	}{{"off", h3ModeOff}, {"direct", h3ModeDirect}, {"on", h3ModeOn}, {"all", h3ModeAll}, {"auto", h3ModeAuto}, {"8", h3ModeTop}} {
 		if err := state.set("h3", c.value); err != nil {
 			t.Fatal(err)
 		}
