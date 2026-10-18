@@ -81,7 +81,8 @@ urnetwork-3.23-fix/
 │   ├── proxy_spread_sampler.go   # Content-keyed spread sampler for the stage-1 table probe
 │   ├── proxy_direct_grade.go     # Read-only direct-path health grade (~/.urnetwork/direct_grade.json)
 │   ├── family_transport.go       # Dual-stack platform transport group for the direct identity (ip_version)
-│   ├── h3_mode.go                # The `h3` control key: off, direct, on, a proxy count, or all
+│   ├── h3_mode.go                # The `h3` control key: off, direct, on, auto, a proxy count, or all
+│   ├── h3_auto.go                # Memory-sized count for `h3 auto` (capacity, pressure tiers, EWMA)
 │   ├── h3_mode_apply.go          # Applies a changed `h3` setting and relaunches the proxies it adds
 │   ├── h3_proxy_set.go           # Which proxied identities get the fallback transports
 │   ├── h3_packet_conn.go         # UDP packet conn factory for H3 (SOCKS5 relay for proxied identities)

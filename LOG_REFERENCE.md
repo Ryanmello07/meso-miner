@@ -331,15 +331,17 @@ Only a box that runs H3 logs these, and only for the direct identity. H3 is off 
 
 ### Widening or narrowing the `h3` key relaunches proxies
 
-The `h3` setting names a transport set, not only on or off: `off`, `direct`, `on`, a proxy count, or `all`. Widening or narrowing it changes which proxies may carry H3, so the affected proxies are relaunched.
+The `h3` setting names a transport set, not only on or off: `off`, `direct`, `on`, `auto`, a proxy count, or `all`. Widening or narrowing it changes which proxies may carry H3, so the affected proxies are relaunched.
 
 ```
 [h3] on: relaunching 3 proxies whose transport set changed
 [h3] on: 2 proxies have clients, retrying in 1m0s
+[h3] auto: 16 -> 20 proxies get the fallback transports (memory pressure 0.12, capacity 64)
 ```
 
-- `[h3] <setting>: relaunching N proxies whose transport set changed` is logged when the setting changes and N running proxies need a restart to pick it up. The setting is named as written, so `on`, `all` and a count are distinguishable.
+- `[h3] <setting>: relaunching N proxies whose transport set changed` is logged when the setting changes and N running proxies need a restart to pick it up. The setting is named as written, so `on`, `all`, `auto` and a count are distinguishable.
 - `[h3] <setting>: N proxies have clients, retrying in 1m0s` means N of them were carrying client traffic at that moment and were left alone rather than cut off. The relaunch is retried a minute later, so a busy proxy is moved only once it is quiet. Both lines are expected during a setting change and neither is an error. A proxy that never goes quiet keeps its clients and stays on its current transport set.
+- `[h3] auto: N -> M proxies get the fallback transports (memory pressure X, capacity C)` is the auto controller moving its target. The first number is the previous target, the second the new one; `capacity` is what the effective memory limit allows (0 to 64). It logs at most once per 30 s pressure sample and only when the ranked set actually changes, so a pool smaller than the target does not produce a line per step. A rising target while `memory pressure` is low is normal; a drop to 16 or 0 means the memory tiers fired.
 
 ### What H3 adds to the `[health]` line
 

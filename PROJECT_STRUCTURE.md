@@ -38,7 +38,8 @@ urnetwork-3.23-fix/
 │   ├── baseline.go                   # Local behaviour recorder (~/.urnetwork/baseline.jsonl) for upgrade comparison
 │   ├── h3_direct.go                  # H3 settings and eligibility for the direct identity
 │   ├── family_transport.go           # Dual-stack platform transport group for the direct identity (ip_version)
-│   ├── h3_mode.go                    # The `h3` control key: off, direct, on, a proxy count, or all
+│   ├── h3_mode.go                    # The `h3` control key: off, direct, on, auto, a proxy count, or all
+│   ├── h3_auto.go                    # Memory-sized count for `h3 auto` (capacity, pressure tiers, EWMA)
 │   ├── h3_mode_apply.go              # Applies a changed `h3` setting and relaunches the proxies it adds
 │   ├── h3_proxy_set.go               # Which proxied identities get the fallback transports
 │   ├── h3_packet_conn.go             # UDP packet conn factory for H3 (SOCKS5 relay for proxied identities)
