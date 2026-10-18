@@ -36,8 +36,8 @@ var publishCancelBoundaries = []string{
 // Boundaries after the next bytes are complete and the checkpoint names them
 // finish on reconcile; earlier ones abandon the uncommitted publication.
 var publishCancelCompletes = map[string]bool{
-	"pending-written":           true,
-	"pending-synced":            true,
+	"temporary-written":         true,
+	"temporary-synced":          true,
 	"snapshot-renamed":          true,
 	"snapshot-directory-synced": true,
 	"predecessor-removed":       true,

@@ -513,7 +513,59 @@ func (self *Owner) checkTemporaryCensus(allowReconcile bool) (resultErr error) {
 			continue
 		}
 		if pendingNames {
-			// finishPending validates the exact bytes; keep both.
+			complete, err := self.matches(temporary, self.checkpoint.Pending.Next)
+			if err != nil {
+				return err
+			}
+			if !complete {
+				// An exchange rename leaves the next bytes at the name and the
+				// previous committed bytes at the temporary; that is complete.
+				if renamed, err := self.matches(self.spec.Name, self.checkpoint.Pending.Next); err != nil {
+					return err
+				} else if renamed {
+					if committed, err := self.matches(temporary, self.checkpoint.Committed); err != nil {
+						return err
+					} else if committed {
+						complete = true
+					}
+				}
+			}
+			if complete {
+				// The prepared bytes reached stable storage: finishPending keeps
+				// the exact signed record.
+				continue
+			}
+			stat, present, err := self.stat(temporary, false)
+			if err != nil {
+				return err
+			}
+			if !present || stat.Size != 0 {
+				// Bytes were written but not completely: that is custody loss or
+				// tampering, never a publication that never started. Refuse.
+				return errors.Join(ErrUncertain, errors.New("incomplete pending snapshot is retained"))
+			}
+			if !allowReconcile {
+				return errors.Join(ErrUncertain, errors.New("incomplete pending snapshot is retained"))
+			}
+			// The anchored publication never wrote a byte, so no prepared record
+			// exists. Abandon it; the committed generation is authoritative.
+			if err := unix.Unlinkat(int(self.directory.File().Fd()), temporary, 0); err != nil {
+				return errors.Join(ErrUncertain, observation(err, false))
+			}
+			if err := self.directory.File().Sync(); err != nil {
+				return errors.Join(ErrUncertain, observation(err, false))
+			}
+			if err := self.abandonPending(); err != nil {
+				return err
+			}
+			delete(temporaries, temporary)
+			if err := unix.Unlinkat(int(self.directory.File().Fd()), marker, 0); err != nil {
+				return errors.Join(ErrUncertain, observation(err, false))
+			}
+			if err := self.directory.File().Sync(); err != nil {
+				return errors.Join(ErrUncertain, observation(err, false))
+			}
+			removed = true
 			continue
 		}
 		if !allowReconcile {
@@ -545,6 +597,17 @@ func (self *Owner) checkTemporaryCensus(allowReconcile bool) (resultErr error) {
 		}
 	}
 	return nil
+}
+
+// abandonPending clears an anchored publication whose bytes never completed.
+// Only Reconcile calls it, and the committed snapshot is unchanged.
+func (self *Owner) abandonPending() error {
+	if self.checkpoint.Pending == nil {
+		return nil
+	}
+	next := self.checkpoint
+	next.Pending = nil
+	return self.writeCheckpoint(next, "abandon")
 }
 
 // writeCreateMarker names the temporary before it exists, so a process killed
@@ -802,6 +865,19 @@ func (self *Owner) PublishWithHooks(raw []byte, hooks PublicationHooks) (resultE
 	if err := self.boundary("temporary-created"); err != nil {
 		return err
 	}
+	// The pending checkpoint is anchored before the bytes, so a prepared record
+	// whose bytes reached stable storage is never discarded by a later barrier.
+	// Reconcile abandons an anchored publication whose bytes never completed.
+	stat, _, err := self.stat(temporary, true)
+	if err != nil {
+		return err
+	}
+	next := Member{Present: true, Inode: stat.Ino, Size: int64(len(raw)), Sha256: digest(raw)}
+	pending := self.checkpoint
+	pending.Pending = &Pending{Temporary: temporary, Next: next}
+	if err := self.writeCheckpoint(pending, "pending"); err != nil {
+		return err
+	}
 	if err := self.admit(true); err != nil {
 		return err
 	}
@@ -825,18 +901,6 @@ func (self *Owner) PublishWithHooks(raw []byte, hooks PublicationHooks) (resultE
 		if err := hooks.AfterFileSync(); err != nil {
 			return err
 		}
-	}
-	// The checkpoint is written only after the next bytes are complete and
-	// synced, so a cancel or kill can never anchor an incomplete member.
-	stat, _, err := self.stat(temporary, true)
-	if err != nil {
-		return err
-	}
-	next := Member{Present: true, Inode: stat.Ino, Size: int64(len(raw)), Sha256: digest(raw)}
-	pending := self.checkpoint
-	pending.Pending = &Pending{Temporary: temporary, Next: next}
-	if err := self.writeCheckpoint(pending, "pending"); err != nil {
-		return err
 	}
 	if _, err := self.sameNamed(file, temporary, nil); err != nil {
 		return err

@@ -339,9 +339,9 @@ func TestSnapshotHeadLostAcknowledgementRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := next
-			if stage == "temporary-created" || stage == "temporary-written" || stage == "temporary-synced" {
-				// The create marker makes the pre-anchor pair recoverable; the
-				// committed generation is unchanged.
+			if stage == "temporary-created" || stage == "pending-synced" {
+				// An anchored publication whose bytes never completed is
+				// abandoned; the committed generation is unchanged.
 				want = []byte("original")
 			}
 			if raw, present, err := self.owner.Read(); err != nil || !present || !bytes.Equal(raw, want) {
@@ -425,8 +425,14 @@ func TestSnapshotHeadAcknowledgmentReadFailureRetainsOriginalWrite(t *testing.T)
 				if err != nil {
 					t.Fatal("complete next bytes did not recover", err)
 				}
-				if raw, present, err := self.owner.Read(); err != nil || !present || !bytes.Equal(raw, next) {
-					t.Fatal("recovered acknowledgment changed original next payload", err, present, string(raw))
+				wantValue := next
+				if stage == "pending-synced" {
+					// The anchored publication never wrote its bytes, so recovery
+					// abandons it and keeps the committed generation.
+					wantValue = original
+				}
+				if raw, present, err := self.owner.Read(); err != nil || !present || !bytes.Equal(raw, wantValue) {
+					t.Fatal("recovered acknowledgment changed retained payload", err, present, string(raw))
 				}
 			}()
 		}
@@ -465,7 +471,7 @@ func TestSnapshotHeadRecoveryRejectsUnknownBytes(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			self := newFixture(t)
 			self.owner.at = func(stage string) error {
-				if stage == "pending-synced" {
+				if stage == "temporary-synced" {
 					return unix.EIO
 				}
 				return nil
@@ -649,11 +655,11 @@ func TestSnapshotHeadJoinedCrashRecovery(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			want := "prior-acknowledged"
-			switch stage {
-			case "snapshot-renamed", "snapshot-directory-synced", "predecessor-removed":
-				// The next bytes were complete and anchored before the crash.
-				want = "child-original-signed-next"
+			want := "child-original-signed-next"
+			if stage == "temporary-created" {
+				// The anchored publication never wrote its bytes, so the
+				// committed generation stays prior-acknowledged.
+				want = "prior-acknowledged"
 			}
 			if raw, present, err := self.owner.Read(); err != nil || !present || string(raw) != want {
 				t.Fatal("crash bytes changed", string(raw), err)
