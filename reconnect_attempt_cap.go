@@ -82,18 +82,20 @@ func attemptCapRateFor(proxies int) float64 {
 	return max(float64(proxies)/attemptCapProxiesPerToken, budgetFloorRate)
 }
 
-// stormMinute reports whether a minute's attempts were almost all failures AND
-// came from a large share of the pool. Canceled attempts are never recorded, so
-// every recorded attempt that is not a connect counts as a failure, whatever its
-// class.
-func stormMinute(s govSnapshot, proxies int) (bool, float64) {
+// stormMinute reports whether a minute's attempts were almost all failures. The
+// pool share decides whether to ENGAGE the cap and only that: while the cap is on
+// it is the cap holding the attempt rate down, so a quiet minute is not evidence
+// that the storm passed and judging it by volume would release the cap that
+// produced the quiet. Canceled attempts are never recorded, so every recorded
+// attempt that is not a connect counts as a failure, whatever its class.
+func stormMinute(s govSnapshot, proxies int, capped bool) (bool, float64) {
 	if s.Attempts < attemptCapMinAttempts {
 		return false, 0
 	}
-	if float64(s.Attempts) < attemptCapPoolShare*float64(proxies) {
-		return false, float64(s.Attempts-s.OK) / float64(s.Attempts)
-	}
 	failShare := float64(s.Attempts-s.OK) / float64(s.Attempts)
+	if !capped && float64(s.Attempts) < attemptCapPoolShare*float64(proxies) {
+		return false, failShare
+	}
 	return attemptCapFailShare < failShare, failShare
 }
 
@@ -132,7 +134,7 @@ func (self *reconnectBudget) updateCapLocked(recent, minute govSnapshot, proxies
 	if c.lastMinute != m {
 		consecutive := c.lastMinute == m-1
 		c.lastMinute = m
-		storm, failShare := stormMinute(minute, proxies)
+		storm, failShare := stormMinute(minute, proxies, 0 < c.rate)
 		switch {
 		case !storm:
 			c.storm = 0

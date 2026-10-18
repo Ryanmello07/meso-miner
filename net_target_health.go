@@ -145,7 +145,13 @@ func rememberGoodLocked(host, ip string, now time.Time) {
 	g := addrHealth.good[host]
 	if g == nil {
 		if len(addrHealth.good) >= addrHealthMax {
-			return
+			// make room before refusing: without this the table fills with hosts
+			// nobody resolves any more and every new hostname is locked out for
+			// good, which silently retires the sibling evidence below.
+			pruneGoodLocked(now)
+			if len(addrHealth.good) >= addrHealthMax {
+				return
+			}
 		}
 		g = map[string]time.Time{}
 		addrHealth.good[host] = g
@@ -162,21 +168,42 @@ func rememberGoodLocked(host, ip string, now time.Time) {
 	}
 }
 
+// pruneGoodLocked drops remembered addresses that have aged out of addrGoodFor,
+// and the hosts left holding none, so the table cannot fill with hosts that no
+// longer matter and lock out the one being remembered now.
+func pruneGoodLocked(now time.Time) {
+	for host, g := range addrHealth.good {
+		for ip, t := range g {
+			if addrGoodFor < now.Sub(t) {
+				delete(g, ip)
+			}
+		}
+		if len(g) == 0 {
+			delete(addrHealth.good, host)
+		}
+	}
+}
+
 // knownGood returns addresses of host that answered within addrGoodFor and are
 // not currently marked bad.
 func knownGood(host string, now time.Time) []string {
 	addrHealth.mu.Lock()
 	defer addrHealth.mu.Unlock()
 	var out []string
-	for ip, t := range addrHealth.good[host] {
+	g := addrHealth.good[host]
+	for ip, t := range g {
 		if addrGoodFor < now.Sub(t) {
-			delete(addrHealth.good[host], ip)
+			delete(g, ip)
 			continue
 		}
 		if st := addrHealth.m[addrKey(host, ip)]; st != nil && now.Before(st.badUntil) {
 			continue
 		}
 		out = append(out, ip)
+	}
+	if len(g) == 0 {
+		// a host with nothing left to remember must not keep a slot at addrHealthMax
+		delete(addrHealth.good, host)
 	}
 	sort.Strings(out)
 	return out
