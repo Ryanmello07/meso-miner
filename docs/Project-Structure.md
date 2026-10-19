@@ -157,6 +157,7 @@ urnetwork-3.23-fix/
 ├── docs/                         # Operational documentation
 │   ├── Configuration.md
 │   ├── Docker-Deployment.md
+│   ├── H3-Auto.md
 │   ├── Installation.md
 │   ├── High-Volume-Performance-Tuning.md
 │   ├── Multi-Container-Scaling.md

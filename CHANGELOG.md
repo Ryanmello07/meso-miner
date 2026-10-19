@@ -2,9 +2,26 @@
 
 ## [Unreleased]
 
+_Unreleased: the v33.1 batch. Not tagged, released, or deployed._
+
 ### Added
 
-- **`h3 auto`: the H3 fallback set sizes itself to memory**: a new value for the `h3` control key. The direct identity keeps the `direct` behavior, and the fallback transports go to a number of proxies chosen from memory pressure, from none up to 64. The set widens 4 proxies per 30 s sample while memory is calm, holds in a hysteresis band, and sheds to 16 or to direct-only as pressure rises. Capacity comes from the effective memory limit (one proxy per 64 MiB, none below 2 GiB), not from host free RAM. It is off by default: without the key nothing changes. `urnet-tools set h3 auto`.
+- **`h3 auto` sizes the fallback transports from memory, off by default**: a new value for the `h3` control key (`urnet-tools set h3 auto`). It applies to the fallback set for proxied identities; the direct identity keeps the `direct` policy and the beside-H1 auxiliary that `on` means is never enabled. Capacity is one proxy slot per 64 MiB of the effective memory limit, zero below a 2 GiB limit, capped at 64. The target grows 4 proxies per 30 s pressure sample below 0.30 smoothed memory pressure, holds from 0.30 to 0.50, sheds to 16 at 0.50, and drops to direct-only at 0.75. With the key unset the controller returns before reading a sensor and behavior is unchanged. See `docs/H3-Auto.md`.
+- **Network JWT renewal at `POST /auth/network-refresh`**: the hourly renewal tries the one-call route first. A 404, 405, 501 or a non-transient 4xx refusal falls back to the existing code-create and code-login flow. A 408, 425, 429, a 5xx or a transport error stays an error and leaves the current token in place. A response carrying a client JWT is rejected, and both success paths verify the new token against `/transfer/stats` before writing it.
+- **Ad and tracker Blocker data with a new pepper, no caller**: the `connect` package gains the upstream Blocker subsystem and a generated table of 163,972 host records (about 0.94 MiB of read-only data) hashed with a new 32-byte pepper. `NewBlockerWithDefaults` starts disabled and nothing in the provider constructs or consults a Blocker, so runtime classification is unchanged. The CFAA table is unchanged from v33.
+
+### Changed
+
+- **The Docker start scripts share `provider_common.sh`**: `start_stable.sh`, `start_jwt.sh` and `start_nightly.sh` become thin wrappers that select the mode and binary flavor, and the shared bootstrap, login and supervision logic lives in one file. `BUILD`, `AUTH`, credentials, `TURBO` and `PELICAN` are byte-compatible on the offline equivalence matrix, and the exit 75 and 78 loops keep their existing behavior. The v33 operator variables still map through `provider_env.sh`, and with every one unset the container runs exactly `provide`.
+- **The updater pages the release listing and skips releases it cannot install**: `urnet-tools update` and the Docker update paths walk `GET /releases` newest first, one hundred per page up to ten pages, and select the first release that is not a draft, not flagged as a pre-release, not named like a pre-release (`rc`, `alpha`, `beta`, `pre`, `preview`, `nightly`, `snapshot` or `dev` as a tag component), and publishes `urnetwork-provider-<tag>.tar.gz` with a sha256 digest. An explicit `--tag` remains an operator override and is not filtered this way.
+
+### Fixed
+
+- **sn durable-head publication (sn fork only)**: the sn fork keeps prepared bytes across a cancelled publication, anchors the pending checkpoint before the bytes, and abandons only a zero-byte pending temporary in `Reconcile`. The create marker is transient head metadata during restore and rebind, never a signed member. This fix is on the sn fork's `fix/durablehead-cancel-window` branch and is not part of this repository's provider binaries.
+
+### Design only
+
+- **Stage B `--adopt-legacy-provider-key`**: design note only. There is no flag, no gate and no change to `provide` or `auth-provide` in this batch. Plain `provide` and `auth-provide` keep their current identity behavior.
 
 ## [v3.23.0-fix.33.0]
 
