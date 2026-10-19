@@ -1,5 +1,25 @@
 package connect
 
+// net_http_doh_dualstack_test.go — the DoH resolver's address-family policy
+// and its round-robin server choice.
+//
+// Ported from connect v0.0.0-20261017075543-c8d8cdf536a8
+// (net_http_doh_dualstack_test.go), adapted to this tree's DohServer type (a
+// url plus the query format it speaks, not a bare url string).
+//
+// The test this replaces, TestDnsResolverAddrsOmitIpv6WithoutHostIpv6, pinned
+// the older `if !hostHasGlobalIpv6() { ipv6 = nil }` filter: a v6 resolver was
+// never offered on a host whose one-shot v6 probe failed. That filter is gone
+// (see dnsResolverAddrs): the family a lookup needs is decided per query by the
+// record type (dnsLookupNetwork), and a family the path lacks costs one
+// attempt out of an operator-interleaved list rather than suppressing the other
+// family for the life of the process.
+//
+// The PIN's launch-wave grouping (dohServerSiblings/dohLaunchWaves) is NOT
+// ported: this tree's fan-out is the stagger in dohQueryWithClientResult, which
+// has no per-operator wave concept. The operator pairing it consumes is ported
+// (familySiblings), so a later port can build on it.
+
 import (
 	"net"
 	"net/url"
@@ -88,13 +108,15 @@ func TestDetectGlobalIpv6DoesNotPanicOrBlock(t *testing.T) {
 	_ = detectGlobalIpv6() // result depends on the host; it must return promptly
 }
 
-// On an IPv4-only host the probe governs the dual-stack default only. An explicit
-// IPv6 request keeps the configured v6 resolvers, so a udp6/tcp6 dial is handed a
-// resolver of the family it asked for instead of an unreachable v4 one.
-func TestDnsResolverAddrsOmitIpv6WithoutHostIpv6(t *testing.T) {
-	hasV6 := func(addrs []string) bool {
+// The host probe no longer filters resolver families. It answered a question
+// about the host from a one-shot dial that does not re-run across a network
+// switch, and it could only ever suppress v6, so a host that gained v6 stayed on
+// v4 resolvers for the life of the process. Both families are offered now, and
+// the family a lookup needs is decided per query by record type.
+func TestDnsResolverAddrsKeepBothFamiliesOnAnIpv4OnlyHost(t *testing.T) {
+	family := func(addrs []string, v6 bool) bool {
 		for _, addr := range addrs {
-			if ip := net.ParseIP(addr); ip != nil && ip.To4() == nil {
+			if ip := net.ParseIP(addr); ip != nil && (ip.To4() == nil) == v6 {
 				return true
 			}
 		}
@@ -103,32 +125,43 @@ func TestDnsResolverAddrsOmitIpv6WithoutHostIpv6(t *testing.T) {
 
 	withHostIpv6(t, false)
 	settings := DefaultDohSettings()
-	// the default remote list carries no v6 resolver, so give it one to preserve
-	settings.DnsResolverSettings.RemoteDnsIpv6 = []string{"2606:4700:4700::1111"}
+	settings.DnsResolverSettings = DefaultDnsResolverSettings()
+	settings.IpVersion = 0 // the dual-stack default, which the probe no longer narrows
+	// the plain-dns remote lists are not part of the shipped defaults; give them
+	// one known operator pair so both surfaces carry both families
+	settings.DnsResolverSettings.RemoteDnsIpv4 = []string{"9.9.9.9"}
+	settings.DnsResolverSettings.RemoteDnsIpv6 = []string{"2620:fe::fe"}
 
 	for _, remote := range []bool{false, true} {
-		// the dual-stack default: without working IPv6 the v6 resolvers only time out
 		for _, network := range []string{"", "udp", "tcp"} {
-			if hasV6(dnsResolverAddrs(settings, remote, network)) {
-				t.Fatalf("remote=%v network=%q offered the IPv6 resolver on an IPv4-only host", remote, network)
+			if !family(dnsResolverAddrs(settings, remote, network), true) {
+				t.Fatalf("remote=%v network=%q dropped the v6 resolver on an IPv4-only host", remote, network)
+			}
+			if !family(dnsResolverAddrs(settings, remote, network), false) {
+				t.Fatalf("remote=%v network=%q dropped the v4 resolver", remote, network)
 			}
 		}
-		for _, network := range []string{"udp6", "tcp6"} {
-			if !hasV6(dnsResolverAddrs(settings, remote, network)) {
-				t.Fatalf("remote=%v network=%q dropped the configured IPv6 resolver on an IPv4-only host", remote, network)
+		for _, network := range []string{"udp6", "tcp6", "ip6"} {
+			if !family(dnsResolverAddrs(settings, remote, network), true) {
+				t.Fatalf("remote=%v network=%q dropped the configured v6 resolver", remote, network)
+			}
+		}
+		for _, network := range []string{"udp4", "tcp4", "ip4"} {
+			if family(dnsResolverAddrs(settings, remote, network), true) {
+				t.Fatalf("remote=%v network=%q carried a v6 resolver into a v4-only lookup", remote, network)
 			}
 		}
 	}
 
 	// IpVersion 6 is the same explicit request, made in configuration
 	settings.IpVersion = 6
-	if !hasV6(dnsResolverAddrs(settings, false, "udp")) {
+	if !family(dnsResolverAddrs(settings, false, "udp"), true) {
 		t.Fatal("an explicitly configured IpVersion 6 must be honoured on an IPv4-only host")
 	}
 
 	withHostIpv6(t, true)
 	settings = DefaultDohSettings() // IpVersion 0 on a dual-stack host
-	if !hasV6(dnsResolverAddrs(settings, false, "")) {
+	if !family(dnsResolverAddrs(settings, false, ""), true) {
 		t.Fatal("a dual-stack host must be offered IPv6 resolvers")
 	}
 }
