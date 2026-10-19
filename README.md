@@ -25,6 +25,7 @@ A high-performance, high-visibility fork of the **UrNetwork Connect** provider, 
 | Track traffic usage (billable vs control overhead) | [Docker Deployment](docs/Docker-Deployment.md) · [CLI Reference](docs/urnet-tools-go.md) |
 | Load a proxy file into the provider (per-OS) | [Adding Proxies](docs/Adding-Proxies.md) |
 | Feed the provider a live proxy list URL | [Proxy URL Sources](docs/Proxy-URL-Sources.md) |
+| Understand IPv4/IPv6 support and what changes per proxy | [Dual-Stack](docs/Dual-Stack.md) |
 | Import into a Pelican game-server panel | [Pelican Panel](docs/Docker-Deployment.md#-pelican-panel) · [Egg README](pelican/README.md) |
 
 ---
