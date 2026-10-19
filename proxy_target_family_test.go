@@ -10,6 +10,7 @@ package connect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -394,3 +395,33 @@ func awaitSocks5Request(t *testing.T, seen <-chan socks5Connect) socks5Connect {
 		return socks5Connect{}
 	}
 }
+
+// A proxied dial failure is wrapped so the family ledger can ignore it, and the
+// wrapper must not change how the error classifies: code that asserts the
+// concrete error to net.Error has to keep seeing timeouts as timeouts.
+func TestProxyDialErrorPreservesNetErrorClassification(t *testing.T) {
+	timedOut := &net.OpError{Op: "dial", Net: "tcp", Err: proxyDialTimeoutError{}}
+	wrapped := &proxyDialError{index: 2, err: timedOut}
+	if !wrapped.Timeout() {
+		t.Fatal("a timed-out proxied dial must still read as a timeout")
+	}
+	var netErr net.Error
+	if !errors.As(wrapped, &netErr) || !netErr.Timeout() {
+		t.Fatal("errors.As must find net.Error through the proxy marker")
+	}
+	if wrapped.Error() != timedOut.Error() {
+		t.Fatalf("message changed: %q != %q", wrapped.Error(), timedOut.Error())
+	}
+
+	refused := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+	if (&proxyDialError{err: refused}).Timeout() {
+		t.Fatal("a refused proxied dial is not a timeout")
+	}
+}
+
+// proxyDialTimeoutError is a net.Error that reports a timeout and nothing else.
+type proxyDialTimeoutError struct{}
+
+func (proxyDialTimeoutError) Error() string   { return "i/o timeout" }
+func (proxyDialTimeoutError) Timeout() bool   { return true }
+func (proxyDialTimeoutError) Temporary() bool { return true }

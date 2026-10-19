@@ -3,6 +3,7 @@ package connect
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -565,6 +566,23 @@ type proxyDialError struct {
 func (self *proxyDialError) Error() string { return self.err.Error() }
 
 func (self *proxyDialError) Unwrap() error { return self.err }
+
+// Timeout and Temporary forward the wrapped error's classification. They are
+// here because a caller that type-asserts the concrete error to net.Error
+// (rather than using errors.As) must still see a timed-out proxied dial as a
+// timeout; without them the marker would silently change retry and backoff
+// decisions on the proxied paths. A wrapped error that is not a net.Error
+// reports false from both, which is the same answer net.Error gives a
+// non-timeout failure.
+func (self *proxyDialError) Timeout() bool {
+	var netErr net.Error
+	return errors.As(self.err, &netErr) && netErr.Timeout()
+}
+
+func (self *proxyDialError) Temporary() bool {
+	var netErr net.Error
+	return errors.As(self.err, &netErr) && netErr.Temporary()
+}
 
 // proxyIndex is the ProxySettings.Index of the proxy the dial went through, for
 // a log line.
