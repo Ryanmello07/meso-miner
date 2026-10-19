@@ -3,14 +3,14 @@
 This document tracks all modifications made to the upstream URNetwork v3.23 codebase in this fork. Use this as a reference when rebasing to newer upstream versions.
 
 **Fork Based On**: urnetwork/connect v3.23  
-**Repository**: github.com/full-bars/meso-miner  
+**Repository**: github.com/urfoundation/meso-miner  
 **Current Version**: v2026.9.22-1052862940-meso
 
 ---
 
 ## Inherited from urnetwork-3.23-fix (carried by the parity port)
 
-Sections 1 through 165 are inherited history from `full-bars/urnetwork-3.23-fix`, carried over by the parity port. They are recorded here for rebase reference and are not meso-miner changes. The meso-miner parity work begins at section 166.
+Sections 1 through 165 are inherited history from `urfoundation/meso-miner`, carried over by the parity port. They are recorded here for rebase reference and are not meso-miner changes. The meso-miner parity work begins at section 166.
 
 ---
 
@@ -105,7 +105,7 @@ InitialContractTransferByteCount: 16 KiB → 2 MiB (fork default)
   - `BUILD`: selects startup script
   - `USER_AUTH`, `PASSWORD`: credential-based auth
   - `ENABLE_VNSTAT`, `ENABLE_IP_CHECKER`: optional monitoring
-- **Multi-arch Push**: Builds and pushes `ghcr.io/full-bars/urnetwork-3.23-fix:latest` for both amd64 and arm64
+- **Multi-arch Push**: Builds and pushes `ghcr.io/urfoundation/meso-miner:latest` for both amd64 and arm64
 
 **How to Identify in New Upstream**:
 - Check if upstream provides `Dockerfile` (unlikely — 3.23 may not have it)
@@ -2105,7 +2105,7 @@ Zero added latency (still wakes on the next real notification) and structurally 
 
 **Purpose**:
 - `urnet-tools restart` always printed "cold restart required" regardless of actual hot-restart status — deduped the `hotRestartEnabled()` check into a shared cross-platform helper so the message reflects reality. The GitHub-rate-limit-resilient worker-download fallback (previously Linux-only) was also ported to macOS (`Provider_Install_Mac.sh`) and Windows (`urnet-tools.ps1`). Also fixed: a persisted `--tag` config silently overriding an explicitly-passed `--tag` flag on `hub update` (should be the reverse), and `hub update` on Docker resolving the *provider* image instead of the `-hub` image.
-- `urnet-tools hub install`/`hub update` on macOS and Windows now deploy the hub via Docker (`docker pull`/`run` against `ghcr.io/full-bars/urnetwork-3.23-fix-hub`) since neither platform has a native hub binary. Linux gets this as an opt-in `--docker` flag (native systemd remains the Linux default). All platforms share the same `urnetwork-hub` container name and `urnetwork-hubdata` volume.
+- `urnet-tools hub install`/`hub update` on macOS and Windows now deploy the hub via Docker (`docker pull`/`run` against `ghcr.io/urfoundation/meso-miner-hub`) since neither platform has a native hub binary. Linux gets this as an opt-in `--docker` flag (native systemd remains the Linux default). All platforms share the same `urnetwork-hub` container name and `urnetwork-hubdata` volume.
 
 **Files Changed**: `hub/onboard.go`, `scripts/Provider_Install_Linux.sh`, `scripts/Provider_Install_Mac.sh`, `scripts/Provider_Install_Win32.ps1`, `scripts/urnet-tools.ps1`, `docker/scripts/urnet-tools.sh`, `docs/Hub-Setup.md`
 
@@ -2993,7 +2993,7 @@ Deliberately NOT resetting `everUp`/`downSince` in `RegisterProxy` — that woul
 **Files Modified**: `.github/workflows/build.yml`, `docker/scripts/start_nightly.sh`, `docker/scripts/urnet-tools.sh`, `docker/scripts/test_pelican_smoke.sh`, `docker/scripts/test_pelican_gates.sh` (new), `pelican/README.md` (new), `pelican/egg-urnetwork-323fix.json` (new).
 
 **Change**:
-- **`pelican/egg-urnetwork-323fix.json`** — PLCN_v3 egg pointing at `ghcr.io/full-bars/urnetwork-3.23-fix:latest`. `BUILD` (stable/nightly/jwt) is user-editable; `USER_AUTH` user-editable; `PASSWORD` and `AUTHCODE` admin-only. `PELICAN=yes`, `ENABLE_VNSTAT=false`, and `ENABLE_IP_CHECKER=false` are hidden and non-editable in the egg — the image ships with the audit-preferred defaults pinned.
+- **`pelican/egg-urnetwork-323fix.json`** — PLCN_v3 egg pointing at `ghcr.io/urfoundation/meso-miner:latest`. `BUILD` (stable/nightly/jwt) is user-editable; `USER_AUTH` user-editable; `PASSWORD` and `AUTHCODE` admin-only. `PELICAN=yes`, `ENABLE_VNSTAT=false`, and `ENABLE_IP_CHECKER=false` are hidden and non-editable in the egg — the image ships with the audit-preferred defaults pinned.
 - **Runtime self-update disabled under `PELICAN=yes`**: `start_nightly.sh` short-circuits the update check (both the bootstrap and the daily watcher), and `urnet-tools update` exits 1 with a refusal message. Under a panel the published image is the single source of truth; a runtime fetch would silently swap the audited fork binary for whatever the release API serves mid-flight. Non-Pelican Docker deployments keep the #477 behavior unchanged.
 - **`docker/scripts/test_pelican_smoke.sh`** — boot smoke driving `pelican_panel.sh` against a fake provider binary. Empty credentials fail fast; jwt mode routes to `auth-provide` with the code; stable mode routes through the auth loop to `provide`.
 - **`docker/scripts/test_pelican_gates.sh`** — 15 behavioral gate tests (mutation-checked). `func_check_update` extracted from `start_nightly.sh` and exercised with stubbed `log/curl/wwt`: `PELICAN=yes` exits 0 with the disabled notice and zero network calls; `PELICAN` unset proceeds past the gate. `do_update` extracted from `urnet-tools.sh`: `PELICAN=yes` exits 1 with the refusal message and never reaches arch detection; unset proceeds. State-dir tests verify `proxy-health.sh` / `proxy-traffic.sh` resolve under `$HOME` and honor `URNETWORK_PROXY_HEALTH_DIR`. Egg-JSON invariants check non-empty rules arrays, known validator tokens, and unique env_variable/sort values.
@@ -3023,8 +3023,8 @@ Deliberately NOT resetting `everUp`/`downSince` in `RegisterProxy` — that woul
 **Files Modified**: `docker/scripts/start_nightly.sh`, `docker/scripts/start_update.sh`.
 
 **Change**:
-- `start_nightly.sh` updated to fetch from `full-bars/urnetwork-3.23-fix` releases instead of `urnetwork/build`.
-- `start_update.sh` updated to fetch from `full-bars/urnetwork-3.23-fix` instead of `urnetwork/connect` and `urnetwork/build`.
+- `start_nightly.sh` updated to fetch from `urfoundation/meso-miner` releases instead of `urnetwork/build`.
+- `start_update.sh` updated to fetch from `urfoundation/meso-miner` instead of `urnetwork/connect` and `urnetwork/build`.
 - Added digest verification: downloaded binaries are checked against expected SHA256 before swap.
 - Added `urnet-tools.sh` symlink fallback to `/app` for Pelican egg compatibility.
 
@@ -3453,7 +3453,7 @@ Deliberately NOT resetting `everUp`/`downSince` in `RegisterProxy` — that woul
 
 ## Meso-miner parity work (sections 166 onward)
 
-Sections 166 through 170 are meso-miner changes, not inherited from `full-bars/urnetwork-3.23-fix`.
+Sections 166 through 170 are meso-miner changes, not inherited from `urfoundation/meso-miner`.
 
 ## 166. Message-Pool Dial-Failure Buffer Fix (PR #126)
 
@@ -3571,7 +3571,7 @@ Brings meso-miner level with the 3.23-fix provider line for the fixes merged the
 - **The marker, cache, GOGC, baseline and trim fixes** (PR #145, #158): the OOM start marker is written in every mode and carries a random `start_id` so a HotSwap parent cannot overwrite its candidate's marker; a no-op update self-heals a missing `Type=` on the systemd unit; an unparseable `proxy_url.json` is moved aside to `proxy_url.json.corrupt` instead of skipping every merge cycle, and `proxy remove` on a file proxy applies again; the GC governor adopts the current GOGC while it is not tightening and never overrides an explicit `URNETWORK_BASELINE_GOGC`; the baseline start row records the version being replaced and the state reason; the URL launch line goes through the reload's deferred writer; and the trim applied line is written durably only when the cap changes or proxies are shed.
 - **The pool summary under-reported a slow steady leak and underflowed on a rollback** (PR #160): the sustained-growth gate applied the whole-window floor to a half window, which doubled the rate a leak had to reach, and a counter rollback underflowed the `uint64` interval into `0% reuse over 18 quintillion takes` forever. The gate now requires half the floor, and the interval re-seeds on a rollback.
 - **The Linux installer could download from the wrong fork** (PR #146): `do_install` carried a second copy of its whole body, so after a successful first pass the stale copy looked up the latest tag on the 3.23-fix repo and its mirror, and a fresh install could end with "Failed to download from both primary and mirror". The duplicate is removed, and the test harness pins the release lookup appearing once.
-- **`urnet-tools` updates resolved 3.23-fix tags** (PR #147): the release API and download URLs were hardcoded to `full-bars/urnetwork-3.23-fix`, so the update timer could replace the meso provider with a 3.23-fix build and `--tag v...-meso` returned 404. Every URL now goes through one release repo constant set to `full-bars/meso-miner`.
+- **`urnet-tools` updates resolved 3.23-fix tags** (PR #147): the release API and download URLs were hardcoded to `urfoundation/meso-miner`, so the update timer could replace the meso provider with a 3.23-fix build and `--tag v...-meso` returned 404. Every URL now goes through one release repo constant set to `urfoundation/meso-miner`.
 
 ### Tests and Docs
 
@@ -3583,7 +3583,7 @@ Brings meso-miner level with the 3.23-fix provider line for the fixes merged the
 
 ## 171. Combined TCP-Segment + TLS-Record Fragmentation Dialer (PR #183)
 
-Parity port of the `fragment+segment` dialer from `full-bars/urnetwork-3.23-fix` (PR #792; upstream `urnetwork/connect` commit `3fd67304`). `net_resilient.go` and `net_http.go` are sha256-identical to the 3.23-fix port; the combined test file matches it except the build-tag split below, which follows each repo's own test conventions.
+Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR #792; upstream `urnetwork/connect` commit `3fd67304`). `net_resilient.go` and `net_http.go` are sha256-identical to the 3.23-fix port; the combined test file matches it except the build-tag split below, which follows each repo's own test conventions.
 
 - **The combined fragmentation dialer** (PR #183): the new `fragment+segment` dialer (priority 50, minimumWeight 0.25) cuts every fragmented ClientHello record a second time, across two TCP segments at an interior byte, so a reassembling middlebox that defeats either single method cannot stitch the hello (FOCI 2025). No raw sockets needed, so it works where the ttl technique cannot (non-root Android, iOS network extension, non-Linux). It registers beside the other resilient dialers behind `ExposeServerHostNames && ExposeServerIps`, fails closed exactly like the fragment path, and changes no existing dialer's behavior. The smart dialer picks it up generically.
 - **Direct connections only**: the dialer is not registered on proxied instances (`settings.ProxySettings != nil`), because behind a SOCKS proxy the proxy re-segments and the mode equals plain `fragment` while costing an extra dial per reconnect round. The segment cut is best effort on a direct socket too. Tests `TestClientStrategyDialersWithProxy` and `TestClientStrategyDialersDirect` pin the registered set.

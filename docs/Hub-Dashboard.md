@@ -148,7 +148,7 @@ docker run -d \
   --name=urfix \
   -e URNETWORK_AUTH_CODE=YOUR_CODE \
   -e URNETWORK_REPORT_URL=http://HUB_IP:8080 \
-  ghcr.io/full-bars/meso-miner:latest
+  ghcr.io/urfoundation/meso-miner:latest
 ```
 
 **Startup (native binary):**

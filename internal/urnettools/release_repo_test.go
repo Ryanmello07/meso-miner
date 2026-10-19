@@ -15,8 +15,8 @@ import (
 // pointed at another fork, the timer would replace the meso provider and
 // tool with that fork's build.
 const (
-	mesoAPIPrefix      = "https://api.github.com/repos/full-bars/meso-miner/releases/"
-	mesoDownloadPrefix = "https://github.com/full-bars/meso-miner/releases/download/"
+	mesoAPIPrefix      = "https://api.github.com/repos/urfoundation/meso-miner/releases/"
+	mesoDownloadPrefix = "https://github.com/urfoundation/meso-miner/releases/download/"
 )
 
 func TestReleaseURLBuildersUseMesoRepo(t *testing.T) {
@@ -124,8 +124,13 @@ func TestNoForeignReleaseSlugInSource(t *testing.T) {
 	if len(files) == 0 {
 		t.Fatal("no files matched; the glob is wrong and this test would pass vacuously")
 	}
-	// A file that legitimately mentions the sibling fork is not the target
-	// (there is none today); the rule is that no shipped artifact may fetch it.
+	// This repo must only fetch its own releases. The fork this tree was synced
+	// from (full-bars/meso-miner, and its older urnetwork-3.23-fix name) is a
+	// foreign slug here: a shipped artifact that still names it would
+	// auto-update the provider from that fork. A legitimate mention of another
+	// sibling repo (full-bars/connect, which the drift monitor tracks) is not
+	// the target.
+	foreignSlugs := []string{"full-bars/meso-miner", "full-bars/urnetwork-3.23-fix"}
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -134,8 +139,10 @@ func TestNoForeignReleaseSlugInSource(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(b), "full-bars/urnetwork-3.23-fix") {
-			t.Errorf("%s references full-bars/urnetwork-3.23-fix; this repo must only fetch full-bars/meso-miner", f)
+		for _, slug := range foreignSlugs {
+			if strings.Contains(string(b), slug) {
+				t.Errorf("%s references the foreign release slug %s; this repo must only fetch urfoundation/meso-miner", f, slug)
+			}
 		}
 	}
 }

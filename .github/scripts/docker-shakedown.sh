@@ -55,7 +55,7 @@ run_check() {
   return "$rc"
 }
 
-IMAGE="ghcr.io/full-bars/meso-miner"
+IMAGE="ghcr.io/urfoundation/meso-miner"
 DSK_TMP="/tmp/dsk-work"
 mkdir -p "$DSK_TMP"
 
@@ -120,7 +120,7 @@ EOF
 stage_hotswap_binary() {
   local c="$1" tag="$2"
   local rel_json dl_url tb
-  rel_json=$(curl -fsSL "https://api.github.com/repos/full-bars/meso-miner/releases/tags/${tag}" 2>/dev/null)
+  rel_json=$(curl -fsSL "https://api.github.com/repos/urfoundation/meso-miner/releases/tags/${tag}" 2>/dev/null)
   [ -z "$rel_json" ] && { echo "stage_hotswap_binary: could not fetch release JSON for $tag"; return 1; }
   dl_url=$(echo "$rel_json" | python3 -c "
 import sys, json

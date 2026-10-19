@@ -113,7 +113,7 @@ section "A. Fresh install"
 # refs/heads/main, not the tag being cut. Tag-side installer regressions are
 # invisible to the shakedown, and a main-side installer break blocks an
 # unrelated release. Accepted tradeoff: the installer is rarely tag-specific.
-curl -fSsL https://raw.githubusercontent.com/full-bars/meso-miner/refs/heads/main/scripts/Provider_Install_Linux.sh -o /tmp/install.sh
+curl -fSsL https://raw.githubusercontent.com/urfoundation/meso-miner/refs/heads/main/scripts/Provider_Install_Linux.sh -o /tmp/install.sh
 bash -n /tmp/install.sh && ok "installer syntax" || bad "installer syntax"
 # PTY install: root prompt -> option 1 (create user) -> default name urnet.
 # Grep the FULL transcript, not tail -3 (installer prints after "complete").
@@ -138,7 +138,7 @@ if timeout 15 curl -fsS -o /dev/null -w "%{http_code}" https://api.bringyour.com
 else
   bad "api.bringyour.com NOT reachable (non-starter)"; NON_STARTER=1
 fi
-if timeout 10 curl -fsS -o /dev/null https://raw.githubusercontent.com/full-bars/meso-miner/main/README.md 2>/dev/null; then
+if timeout 10 curl -fsS -o /dev/null https://raw.githubusercontent.com/urfoundation/meso-miner/main/README.md 2>/dev/null; then
   ok "github reachable"
 else
   bad "github NOT reachable (non-starter)"; NON_STARTER=1
@@ -344,15 +344,15 @@ fi
 section "F. Docker"
 apt-get update -qq >/dev/null 2>&1
 run_check "docker installed" timeout 600 bash -c "apt-get install -y -qq docker.io >/dev/null 2>&1 && systemctl start docker"
-curl -fSsL https://raw.githubusercontent.com/full-bars/meso-miner/refs/heads/main/scripts/install-urnet-docker.sh -o /tmp/install-docker.sh
+curl -fSsL https://raw.githubusercontent.com/urfoundation/meso-miner/refs/heads/main/scripts/install-urnet-docker.sh -o /tmp/install-docker.sh
 sh /tmp/install-docker.sh 2>&1 | grep -q "sha256 verified" && ok "install-urnet-docker.sh verified" || bad "docker installer"
 run_check "urnet-docker version" /usr/local/bin/urnet-docker version 2>&1
 mkdir -p /tmp/docker-state && cp /home/urnet/.urnetwork/jwt /tmp/docker-state/jwt && cp /home/urnet/.urnetwork/network.json /tmp/docker-state/network.json
 # MUST-FIX 10: pull the EXPECTED image tag, not :latest (which lags a tag
 # push). The image tag follows the release tag.
-run_check "image pulled" timeout 300 docker pull "ghcr.io/full-bars/meso-miner:${EXPECTED_VERSION}" 2>&1
+run_check "image pulled" timeout 300 docker pull "ghcr.io/urfoundation/meso-miner:${EXPECTED_VERSION}" 2>&1
 # MUST-FIX 6 (docker): pass the cap into the container via env var.
-docker run -d --name urnetwork-test -v /tmp/docker-state:/root/.urnetwork -e PROXY_URL_MAX=200 -e BUILD=jwt "ghcr.io/full-bars/meso-miner:${EXPECTED_VERSION}" >/dev/null 2>&1
+docker run -d --name urnetwork-test -v /tmp/docker-state:/root/.urnetwork -e PROXY_URL_MAX=200 -e BUILD=jwt "ghcr.io/urfoundation/meso-miner:${EXPECTED_VERSION}" >/dev/null 2>&1
 sleep 8
 docker ps --format "{{.Names}}" | grep -q urnetwork-test && ok "container up" || bad "container"
 run_check "urnet-docker providers" /usr/local/bin/urnet-docker providers 2>&1
@@ -931,7 +931,7 @@ section "V. Hotswap decline and engage"
 # no-op. EXPECTED_VERSION is restored at the end of this section for
 # everything downstream.
 OLD_HOTSWAP_VERSION="v2026.9.9-1788916951-meso"
-V_HSWAP_TAGS=$(curl -fsS "https://api.github.com/repos/full-bars/meso-miner/releases?per_page=30" 2>/dev/null \
+V_HSWAP_TAGS=$(curl -fsS "https://api.github.com/repos/urfoundation/meso-miner/releases?per_page=30" 2>/dev/null \
   | grep -oE '"tag_name": "v[0-9]{4}\.[0-9]+\.[0-9]+-[0-9]+-meso"' \
   | grep -v -- '-hub' | sed 's/"tag_name": "//;s/"$//' | sort -r | head -2)
 V_TAG_A=$(echo "$V_HSWAP_TAGS" | sed -n 2p)

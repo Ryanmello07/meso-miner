@@ -52,7 +52,7 @@ type releaseJSON struct {
 // releaseRepo is the GitHub owner/repo that publishes this fork's releases.
 // Every release API and download URL the update path builds goes through it,
 // so the auto-update timer can never pull another fork's tags or assets.
-const releaseRepo = "full-bars/meso-miner"
+const releaseRepo = "urfoundation/meso-miner"
 
 // releaseLatestAPIURL is the GitHub API endpoint for the newest release.
 func releaseLatestAPIURL() string {

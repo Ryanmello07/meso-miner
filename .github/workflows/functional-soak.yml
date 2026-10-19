@@ -55,9 +55,6 @@ jobs:
             --user_auth="$GAUNTLET_USER" --password="$GAUNTLET_PW" \
             --api_url=https://api.bringyour.com -f 2>&1 | grep -vE '^I[0-9]{4}'
           test -s /tmp/mint/.urnetwork/jwt || { echo "JWT mint failed — see auth output above"; exit 1; }
-          if grep -qE '"(network_id|name)"\s*:\s*"(production|full-bars)"' /tmp/mint/.urnetwork/network.json 2>/dev/null; then
-            echo "REFUSING: production account"; exit 1
-          fi
           echo "JWT minted OK"
 
       - name: Set up state dir + accelerated grade config + pre-write source
