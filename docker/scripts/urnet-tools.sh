@@ -40,16 +40,22 @@ do_update() {
 
     echo "Checking for provider updates..."
 
+    api_root="https://api.github.com/repos/full-bars/urnetwork-3.23-fix"
     if [ -n "$requested_tag" ]; then
-        release_url="https://api.github.com/repos/full-bars/urnetwork-3.23-fix/releases/tags/$requested_tag"
+        release_url="$api_root/releases/tags/$requested_tag"
+        release_json="$(curl -s --connect-timeout 10 "$release_url")" || {
+            echo "ERROR: could not reach GitHub API."
+            exit 1
+        }
     else
-        release_url="https://api.github.com/repos/full-bars/urnetwork-3.23-fix/releases/latest"
+        # Stable channel: page past releases without a provider tarball and
+        # never treat a pre-release as stable. An explicitly requested tag
+        # above stays an operator override (canary/rollback).
+        release_json="$(upd_fetch_stable_release_json "$api_root")" || {
+            echo "ERROR: no stable release with a verified provider tarball found."
+            exit 1
+        }
     fi
-
-    release_json="$(curl -s --connect-timeout 10 "$release_url")" || {
-        echo "ERROR: could not reach GitHub API."
-        exit 1
-    }
 
     version="$(echo "$release_json" | jq -r '.tag_name // empty')"
     if [ -n "$requested_tag" ] && [ "$version" != "$requested_tag" ]; then

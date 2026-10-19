@@ -201,6 +201,78 @@ t "helper works when sourced by strict /bin/sh (dash-compatible)" test "$(cat "$
 sh -c ". '$HERE/update_verify.sh' && upd_asset_digest_from_json '$JSON_OK' '$ASSET' >/dev/null; test -z \"\${UPD_raw:-}\" && test -z \"\${UPD_json_clean:-}\" && test -z \"\${UPD_actual:-}\"" 2>/dev/null
 t "helper globals cleaned after successful call" true
 
+# --- Stable release selection (upd_select_stable_release_json) ---
+# Regression: releases/latest returns the newest non-draft, non-prerelease
+# release whether or not it carries a provider tarball, so a docs-only or
+# tool-only release stalls every updater on that tag. An rc published with
+# the prerelease flag unset is returned as latest too and was installed as
+# stable. The selector must page past both.
+HEX_A="$(printf 'a%.0s' $(seq 1 64))"
+HEX_C="$(printf 'c%.0s' $(seq 1 64))"
+REL_STABLE='{"tag_name":"v3.23.0-fix.32.10","draft":false,"prerelease":false,"assets":[{"name":"urnetwork-provider-v3.23.0-fix.32.10.tar.gz","digest":"sha256:'"$HEX_B"'"}]}'
+REL_NOTES='{"tag_name":"v3.23.0-fix.33.1-notes","draft":false,"prerelease":false,"assets":[{"name":"urnet-tools-linux-amd64","digest":"sha256:'"$HEX_A"'"}]}'
+REL_RC_UNFLAGGED='{"tag_name":"v3.23.0-fix.33.0-rc5","draft":false,"prerelease":false,"assets":[{"name":"urnetwork-provider-v3.23.0-fix.33.0-rc5.tar.gz","digest":"sha256:'"$HEX_C"'"}]}'
+REL_RC_FLAGGED='{"tag_name":"v3.23.0-fix.33.0-rc6","draft":false,"prerelease":true,"assets":[{"name":"urnetwork-provider-v3.23.0-fix.33.0-rc6.tar.gz","digest":"sha256:'"$HEX_C"'"}]}'
+REL_DRAFT='{"tag_name":"v3.23.0-fix.33.2","draft":true,"prerelease":false,"assets":[{"name":"urnetwork-provider-v3.23.0-fix.33.2.tar.gz","digest":"sha256:'"$HEX_C"'"}]}'
+REL_NO_DIGEST='{"tag_name":"v3.23.0-fix.32.11","draft":false,"prerelease":false,"assets":[{"name":"urnetwork-provider-v3.23.0-fix.32.11.tar.gz","digest":""}]}'
+
+sel_tag() { upd_select_stable_release_json "$1" | jq -r '.tag_name // empty'; }
+
+t "selector skips a newer release without a provider asset" \
+    test "$(sel_tag "[$REL_NOTES,$REL_STABLE]")" = "v3.23.0-fix.32.10"
+t "selector never selects an unflagged rc tag as stable" \
+    test "$(sel_tag "[$REL_RC_UNFLAGGED,$REL_STABLE]")" = "v3.23.0-fix.32.10"
+t "selector skips a prerelease-flagged release" \
+    test "$(sel_tag "[$REL_RC_FLAGGED,$REL_STABLE]")" = "v3.23.0-fix.32.10"
+t "selector skips a draft release" \
+    test "$(sel_tag "[$REL_DRAFT,$REL_STABLE]")" = "v3.23.0-fix.32.10"
+t "selector skips a provider tarball without a sha256 digest" \
+    test "$(sel_tag "[$REL_NO_DIGEST,$REL_STABLE]")" = "v3.23.0-fix.32.10"
+t "selector keeps the newest stable release with an asset (normal case)" \
+    test "$(sel_tag "[$REL_STABLE]")" = "v3.23.0-fix.32.10"
+sel_none="$(upd_select_stable_release_json "[$REL_NOTES,$REL_RC_UNFLAGGED]")"
+t "selector yields nothing when no release is eligible" test -z "$sel_none"
+
+# Paging: a full first page of ineligible releases must not end the walk.
+# curl is stubbed (shell function) so the walk is fully offline.
+PAGE_ONE="[$REL_NOTES,$REL_RC_UNFLAGGED]"
+PAGE_TWO="[$REL_STABLE]"
+paging_out="$(
+    . "$HERE/update_verify.sh"
+    PAGE_ONE="$PAGE_ONE" PAGE_TWO="$PAGE_TWO" CALLS_FILE="$tmp/paging_calls.txt"
+    export PAGE_ONE PAGE_TWO CALLS_FILE
+    : > "$CALLS_FILE"
+    curl() {
+        printf '%s\n' "$*" >> "$CALLS_FILE"
+        case "$*" in
+            *"page=1"*) printf '%s' "$PAGE_ONE" ;;
+            *"page=2"*) printf '%s' "$PAGE_TWO" ;;
+            *) return 22 ;;
+        esac
+    }
+    UPD_RELEASE_PER_PAGE=2 UPD_RELEASE_MAX_PAGES=3 upd_fetch_stable_release_json "https://api.invalid/repo"
+)"
+t "paging walk reaches page 2 and returns the eligible release" \
+    test "$(printf '%s' "$paging_out" | jq -r '.tag_name // empty')" = "v3.23.0-fix.32.10"
+t "paging walk requested both pages" \
+    sh -c "grep -q 'page=2' '$tmp/paging_calls.txt'"
+
+paging_none="$(
+    . "$HERE/update_verify.sh"
+    curl() { printf '%s' "[$REL_NOTES,$REL_RC_UNFLAGGED]"; }
+    UPD_RELEASE_PER_PAGE=2 UPD_RELEASE_MAX_PAGES=2 upd_fetch_stable_release_json "https://api.invalid/repo" 2>/dev/null
+)"
+t "paging walk gives up after max pages without an eligible release" \
+    test -z "$paging_none"
+
+# Every update path must use the paged selector, never the single
+# /releases/latest endpoint.
+for f in start_update.sh urnet-tools.sh start_nightly.sh; do
+    grep -q "/releases/latest" "$HERE/$f"
+    t "$f does not query the latest-release endpoint" test $? -ne 0
+    t "$f uses upd_fetch_stable_release_json" grep -q "upd_fetch_stable_release_json" "$HERE/$f"
+done
+
 # --- Caller asset-selection filter (start_update.sh Download_API) ---
 # Regression: jq `select(A) and B` parses as `(select(A)) and B`, so the
 # un-parenthesized form errors "Cannot index boolean with string" on every

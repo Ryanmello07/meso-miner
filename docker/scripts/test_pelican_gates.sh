@@ -40,6 +40,8 @@ run_check_update_gated() {
         echo "curl()  { echo \"NETWORK-CALL curl \$*\" >> '$tmp/calls.txt'; return 1; }"
         echo "wget()  { echo \"NETWORK-CALL wget \$*\" >> '$tmp/calls.txt'; return 1; }"
         echo "VERSION_FILE='$tmp/nonexistent-version-file'"
+        echo "API_ROOT='https://api.invalid/repo'"
+        echo ". '$REPO/docker/scripts/update_verify.sh'"
         extract_func "$REPO/docker/scripts/provider_common.sh" func_check_update
         echo 'func_check_update'
     } > "$script"
