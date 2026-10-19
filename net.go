@@ -618,6 +618,10 @@ func (self *ProxySettings) NewDialContext(ctx context.Context, forward proxy.Dia
 		}
 		host, port, err := net.SplitHostPort(addr)
 		targetHost := ""
+		// only a dial that resolved the target here has an address of its own
+		// to record an outcome against; a name handed to the proxy is the
+		// proxy's resolution, not evidence this host can use that target
+		targetUsesLocalAddress := false
 		if err == nil {
 			if ip := net.ParseIP(host); ip == nil {
 				if ProxyTargetFamilyCarriesName() {
@@ -630,6 +634,7 @@ func (self *ProxySettings) NewDialContext(ctx context.Context, forward proxy.Dia
 				} else if resolved, ok := lookupProxyTarget(ctx, host); ok {
 					addr = net.JoinHostPort(resolved, port)
 					targetHost = host
+					targetUsesLocalAddress = true
 				}
 			}
 		}
@@ -664,11 +669,10 @@ func (self *ProxySettings) NewDialContext(ctx context.Context, forward proxy.Dia
 			// the proxy's own upstream failure (see recordControlFamilyStrike).
 			return nil, &proxyDialError{index: self.Index, err: err}
 		}
-		if attempt != nil && targetHost != "" {
-			// the proxy reached the address: a stall from here on is about it.
-			// In proxy mode there is no pinned address to blame, so
-			// recordTargetOutcome records nothing until this dial resolves a
-			// target of its own again.
+		if attempt != nil && targetUsesLocalAddress {
+			// the proxy reached the address this dial resolved: a stall from
+			// here on is about that target. In proxy mode there is no such
+			// address, so nothing is recorded until a dial resolves one.
 			attempt.noteDialedTarget(targetHost, self.Index)
 		}
 
