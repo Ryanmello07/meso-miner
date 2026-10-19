@@ -15,34 +15,18 @@ import (
 	"github.com/wlynxg/anet"
 )
 
-// control_family.go — the address-family policy for this process's
-// CONTROL-PLANE dials: the api https client, the platform control websocket
-// and the resilient (fragment/reorder/segment) control dialers.
-//
-// Ported from connect v0.0.0-20261017075543-c8d8cdf536a8 (control_family.go),
-// adapted to this tree:
-//   - The legacy `ConnectSettings.DisableIpv4`/`DisableIpv6` pair is KEPT (it
-//     is public API here) and still applied first in
-//     `ConnectSettings.DialContext`; the policy below is applied on top of it,
-//     so with no force set and no learned demotion the narrowing is the
-//     identity and the family a dial reaches is the one this tree chose before
-//     this file existed.
-//   - There is no pinned platform transport and no single-address h3/quic
-//     name path in this tree, so `pinnedFamilyPolicyConflict`, the policy
-//     monitor that wakes a parked pinned transport, `pickControlIPAddr` and
-//     the per-dial evidence line are not ported. The pinned helpers the dial
-//     helper calls live with it in control_family_dial.go.
-//   - There is no network-change signal in this tree
-//     (no `AddNetworkChangeListener`), so `controlFamilyClear` is not
-//     registered anywhere: a demotion therefore lives out its backoff here
-//     instead of being dropped when the path changes. The function is kept so
-//     the host that adds that signal has the hook, and the tests exercise it
-//     directly.
+// Address-family policy for this process's CONTROL-PLANE dials: the api
+// https client, the platform control websocket, and the h3/quic transport's
+// name path. The tunnelled user data plane is not affected: it carries both
+// families and picks an exit by the packet's own version (IPV6.md B3). A
+// family-PINNED platform transport (transport_family.go) obeys a Force by
+// idling and bypasses a demotion by construction, so the policy below only
+// ever steers the family-agnostic dials.
 //
 // Two independent pieces of state live here. The POLICY is what a developer
 // set and is never changed by anything else. The DEMOTION LEDGER (below) is
 // what this process has learned about a family that connects and then fails.
-// Keeping them apart is what lets a ui round-trip "Auto" as "Auto" while a
+// Keeping them apart is what lets the ui round-trip "Auto" as "Auto" while a
 // demotion is quietly in force.
 //
 // Process-global, like the egress interface binding in egress.go, and read
@@ -62,6 +46,16 @@ const (
 
 var controlIpFamilyPolicy atomic.Int32
 
+// controlFamilyPolicyMonitor wakes whoever parks on the policy -- a pinned
+// platform transport idled by a Force -- when it changes.
+var controlFamilyPolicyMonitor = NewMonitor()
+
+// controlFamilyPolicyNotify closes on the next policy change. Capture it
+// before reading ControlIpFamilyPolicy.
+func controlFamilyPolicyNotify() chan struct{} {
+	return controlFamilyPolicyMonitor.NotifyChannel()
+}
+
 // SetControlIpFamilyPolicy sets the control-plane family policy for this
 // process. An unrecognised value is Auto rather than an error: this is fed
 // from a persisted file and across a gomobile boundary where an older or
@@ -74,7 +68,9 @@ func SetControlIpFamilyPolicy(policy IpFamilyPolicy) {
 	default:
 		policy = IpFamilyAuto
 	}
-	controlIpFamilyPolicy.Store(int32(policy))
+	if controlIpFamilyPolicy.Swap(int32(policy)) != int32(policy) {
+		controlFamilyPolicyMonitor.NotifyAll()
+	}
 }
 
 // ControlIpFamilyPolicy returns the policy alone. It never reflects a learned
@@ -88,9 +84,9 @@ func ControlIpFamilyPolicy() IpFamilyPolicy {
 // unchanged otherwise.
 //
 // A FORCE conflicting with an explicitly requested family is an error, which
-// preserves the semantics the DisableIpv4/DisableIpv6 pair had: a caller that
-// asked for tcp6 by name must not silently be given tcp4. A DEMOTION never
-// errors -- it is a heuristic, and a heuristic must not fail a caller's
+// preserves the semantics the dead DisableIpv4/DisableIpv6 pair had: a caller
+// that asked for tcp6 by name must not silently be given tcp4. A DEMOTION
+// never errors -- it is a heuristic, and a heuristic must not fail a caller's
 // explicit request.
 //
 // `addr` is the dial target, and is load bearing: see the literal check below.
@@ -102,11 +98,11 @@ func controlDialNetwork(network string, addr string) (string, error) {
 	// `dial tcp6 1.1.1.1:443` returns.
 	//
 	// That is not a corner case, it is the whole fallback layer: the extender
-	// dialers dial a configured ip, and the remote plain DNS resolver dials a
-	// configured resolver address (net_http_doh.go). A demotion learned on the
-	// api path used to take both of them down with it, and every one of those
-	// failures is a CONNECT failure, so none of them recorded anything that
-	// could undo the demotion.
+	// dialers dial extenderConfig.Ip (net_extender.go), and the remote plain
+	// DNS resolver dials a configured resolver address (net_http_doh.go). A
+	// demotion learned on the api path used to take both of them down with it,
+	// and every one of those failures is a CONNECT failure, so none of them
+	// recorded anything that could undo the demotion.
 	if isIPLiteralDialAddr(addr) {
 		return network, nil
 	}
@@ -190,8 +186,17 @@ var controlFamilyLedger = struct {
 	probe:   probeFamilySupport,
 }
 
+func init() {
+	// a path change invalidates everything learned about the old path
+	AddNetworkChangeListener(controlFamilyClear)
+}
+
 // controlFamilyDemote records that `family` connected and then failed. It
 // reports whether the demotion took.
+//
+// This is the raw ledger write, kept callable for the policy's own tests. A
+// dial path must reach it through recordControlFamilyStrike, which refuses the
+// evidence a proxied dial cannot supply.
 //
 // It is REFUSED when the other family is not usable on this device. On an
 // IPv6-only network with no CLAT there is no IPv4 to fall back to, and
@@ -208,9 +213,10 @@ func controlFamilyDemote(family int) bool {
 	// The damage lands later. A strike written under Force IPv4 makes the
 	// status line read "IPv4 demoted" beside a policy row reading Force IPv4,
 	// and it stays armed for the moment the developer sets the row back to
-	// Auto -- at which point Auto steers every control dial onto the family
-	// they had just forced away from, for five minutes and up to six hours if
-	// strikes accumulated while the force was on.
+	// Auto -- at which point Auto steers every control dial, every extender
+	// and the h3/quic pick onto the family they had just forced away from, for
+	// five minutes and up to six hours if strikes accumulated while the force
+	// was on.
 	if ControlIpFamilyPolicy() != IpFamilyAuto {
 		return false
 	}
@@ -252,6 +258,37 @@ func controlFamilyDemote(family int) bool {
 	return true
 }
 
+// recordControlFamilyStrike is the ONLY sanctioned way a finished control dial
+// turns into a strike against the family that carried it. It refuses evidence
+// that cannot be about this host's address family:
+//
+//   - a proxied dial, whatever it was: the connection it observed belonged to
+//     the proxy (see proxyDialError).
+//   - anything that is not the post-connect timeout that proves a path
+//     blackholed. A refusal, a reset, a certificate failure or an ALPN mismatch
+//     mean the packets arrived and something at the far end objected, which says
+//     nothing about the family.
+//
+// controlFamilyDemote stays the raw recorder, so the ported tests of the policy
+// itself keep working. New callers, including the control-family dial helper
+// when the 34 line ports it, go through here.
+func recordControlFamilyStrike(family int, err error) bool {
+	if err == nil {
+		return false
+	}
+	var proxyErr *proxyDialError
+	if errors.As(err, &proxyErr) {
+		loggerOrDefault(nil).Infof(
+			"[family]no strike family=%d (dial went through proxy[%d])\n",
+			family, proxyErr.proxyIndex())
+		return false
+	}
+	if !isPathTimeout(err) {
+		return false
+	}
+	return controlFamilyDemote(family)
+}
+
 // controlFamilyUndemote drops any demotion of `family`, strike count included,
 // and reports whether there was one.
 //
@@ -279,9 +316,7 @@ func controlFamilyUndemote(family int) bool {
 	return had
 }
 
-// controlFamilyClear drops everything learned. In the tree this was ported
-// from it is wired to NetworkChanged; this tree has no such signal yet, so it
-// is called by the tests and by whatever host learns one.
+// controlFamilyClear drops everything learned. Wired to NetworkChanged.
 func controlFamilyClear() {
 	controlFamilyLedger.mu.Lock()
 	hadEntries := 0 < len(controlFamilyLedger.demoted)
@@ -309,16 +344,23 @@ func controlFamilyDemotedFamily() int {
 // The self-inflicted-outage guard is RE-EVALUATED here, on every read, and not
 // only when the demotion was recorded. A demotion that was safe on the path it
 // was learned on is not necessarily safe on the next one, and the ledger's only
-// invalidation does not reach every process that keeps one. Checking on use
-// rather than only on record closes that on every platform at once, without
-// needing the host to tell us anything, and it is strictly stronger than a new
-// invalidation signal would be: a demotion can never be APPLIED on a path where
-// RECORDING it would have been refused. It costs a probe only while a demotion
-// is live -- the rare case, and one where the client is already on a degraded
-// path.
+// invalidation does not reach every process that keeps one:
+// connect.NetworkChanged() has exactly one caller in the tree, DeviceLocal, so
+// on ios the listener fires in the network extension and never in the APP
+// process -- which is the process that dials pre-login and whenever the tunnel
+// is down, the two regimes in the design's own table where a user is most
+// likely to be stuck. Android registers its callbacks from initDevice, so it is
+// exposed the same way while signed out.
+//
+// Checking on use rather than only on record closes that on every platform at
+// once, without needing the host to tell us anything, and it is strictly
+// stronger than a new invalidation signal would be: a demotion can never be
+// APPLIED on a path where RECORDING it would have been refused. It costs a
+// probe only while a demotion is live -- the rare case, and one where the
+// client is already on a degraded path.
 //
 // An entry that fails the check is dropped rather than merely ignored, so the
-// status line a developer ui reads agrees with what the dialer does, and so a
+// status line the developer ui reads agrees with what the dialer does, and so a
 // path that stays broken is not re-probed on every dial.
 func controlFamilyLiveDemotion() (int, controlFamilyDemotion, time.Time) {
 	controlFamilyLedger.mu.Lock()
@@ -385,12 +427,6 @@ func controlFamilyStatus() string {
 	)
 }
 
-// ControlFamilyStatus describes any live demotion, and is empty when there is
-// none. For a developer ui that shows what auto has learned.
-func ControlFamilyStatus() string {
-	return controlFamilyStatus()
-}
-
 // controlFamilyInterface is one interface as the probe needs to see it: a
 // name, its flags, and its addresses. net.Interface plus the result of its
 // Addrs() call, so the probe's decision can be exercised against a synthetic
@@ -407,7 +443,8 @@ type controlFamilyInterface struct {
 //
 // anet, not net. Android 11 restricted the netlink socket that Go's
 // net.Interfaces() uses, so it returns an error there, and this repo already
-// depends on wlynxg/anet for exactly that and already primes it. Off android
+// depends on wlynxg/anet for exactly that and already primes it
+// (transport_p2p_webrtc_android.go calls anet.SetAndroidVersion). Off android
 // anet.Interfaces is literally net.Interfaces. It matters more now than it
 // would have before: a probe that fails closed on an enumeration error would
 // otherwise refuse every demotion on modern android, disabling the feature on
@@ -465,8 +502,9 @@ var controlFamilyTunnelInterfacePrefixes = []string{
 //
 // Deliberately NOT here: 192.0.0.0/29, the 464XLAT CLAT range (RFC 7335). On
 // an IPv6-only mobile network the CLAT interface is the device's only IPv4
-// path, and it works. Listing it would put every such provider to sleep for
-// v4.
+// path, and it works -- a v4-pinned platform transport dials through it and
+// proves v4 over NAT64. Listing it would put every such provider to sleep for
+// v4 (transport_family.go).
 var controlFamilyReservedPrefixes = []*net.IPNet{
 	{IP: net.IPv4(192, 0, 2, 0), Mask: net.CIDRMask(24, 32)},    // TEST-NET-1
 	{IP: net.IPv4(198, 51, 100, 0), Mask: net.CIDRMask(24, 32)}, // TEST-NET-2
@@ -535,7 +573,8 @@ func probeFamilySupport(family int) bool {
 // FamilySupported reports whether this device has a usable path of ip version
 // 4 or 6 that is not this product's own tunnel. It is probeFamilySupport under
 // an exported name, for the callers outside this file that must skip a family
-// the host cannot prove an address for.
+// the host cannot prove an address for: the extender activation loop
+// (EXTENDER.md G3) in the sdk and in connectctl.
 //
 // Deliberately the raw probe and not the ledger's view (controlFamilyProbe): an
 // activation asks whether this host HAS an address of the family, and a learned
@@ -551,7 +590,7 @@ func FamilySupported(ipVersion int) bool {
 }
 
 // controlFamilyProbe is probeFamilySupport through the ledger's test seam, so
-// a hold and a demotion's guard answer from the same source.
+// a pinned transport's hold and a demotion's guard answer from the same source.
 func controlFamilyProbe(family int) bool {
 	controlFamilyLedger.mu.Lock()
 	probe := controlFamilyLedger.probe
@@ -585,6 +624,46 @@ func isControlFamilyReservedIP(ip net.IP) bool {
 		}
 	}
 	return false
+}
+
+// controlDialFamilyLine formats the per-dial family evidence.
+//
+// `family=4` / `family=6` is a LITERAL token, deliberately not derived from an
+// address in the rendered line. The sdk's log redactor rewrites both IPv4 and
+// IPv6 literals to the same opaque <addr:hex> shape, including the brackets
+// that would otherwise give an IPv6 address away -- so in a REDACTED bundle,
+// which is the mode a user is asked to send, an address cannot tell a support
+// engineer which family was dialed. This token can.
+func controlDialFamilyLine(
+	tag string,
+	network string,
+	addr string,
+	conn net.Conn,
+	err error,
+) string {
+	family := "?"
+	if f := connFamily(conn); f != 0 {
+		family = fmt.Sprintf("%d", f)
+	}
+	policy := "auto"
+	switch ControlIpFamilyPolicy() {
+	case IpFamilyForce4:
+		policy = "force4"
+	case IpFamilyForce6:
+		policy = "force6"
+	}
+	demoted := controlFamilyStatus()
+	if demoted == "" {
+		demoted = "none"
+	}
+	if err != nil {
+		return fmt.Sprintf(
+			"[family]dial tag=%s net=%s family=%s policy=%s demoted=%s err=%s",
+			tag, network, family, policy, demoted, err)
+	}
+	return fmt.Sprintf(
+		"[family]dial tag=%s net=%s family=%s policy=%s demoted=%s",
+		tag, network, family, policy, demoted)
 }
 
 // isPathTimeout reports whether err is the post-connect timeout that proves a
@@ -654,6 +733,57 @@ func swapControlFamilyClock(now func() time.Time) func() {
 		defer controlFamilyLedger.mu.Unlock()
 		controlFamilyLedger.now = prev
 	}
+}
+
+// pickControlIPAddr chooses which resolved address a single-address control
+// dial should use, honoring a force and then a demotion.
+//
+// Falls back to the first address when nothing matches the preference: a
+// forced family the name does not publish must degrade to "dial what exists"
+// rather than make the transport unusable.
+func pickControlIPAddr(addrs []net.IPAddr) net.IPAddr {
+	if len(addrs) == 0 {
+		return net.IPAddr{}
+	}
+	want := 0
+	switch ControlIpFamilyPolicy() {
+	case IpFamilyForce4:
+		want = 4
+	case IpFamilyForce6:
+		want = 6
+	default:
+		switch controlFamilyDemotedFamily() {
+		case 6:
+			want = 4
+		case 4:
+			want = 6
+		}
+	}
+	if want == 0 {
+		// No preference in force: keep net.ResolveUDPAddr's own tie-break
+		// (addrs.first(isIPv4), GOROOT/src/net/ipsock.go) rather than letting
+		// the resolver's own ordering -- normally IPv6-first per RFC 6724 on a
+		// dual-stack, v6-capable device -- become the de facto default. Force
+		// and demotion above are the only things allowed to move off IPv4.
+		for _, addr := range addrs {
+			if addr.IP.To4() != nil {
+				return addr
+			}
+		}
+		return addrs[0]
+	}
+	for _, addr := range addrs {
+		if (addr.IP.To4() != nil) == (want == 4) {
+			return addr
+		}
+	}
+	return addrs[0]
+}
+
+// ControlFamilyStatus describes any live demotion, and is empty when there is
+// none. For a developer ui that shows what auto has learned.
+func ControlFamilyStatus() string {
+	return controlFamilyStatus()
 }
 
 func swapControlFamilyInterfaces(

@@ -516,7 +516,7 @@ func TestFamilyFallbackDoesNotUndoAForce(t *testing.T) {
 	defer SetControlIpFamilyPolicy(IpFamilyAuto)
 
 	attempts := 0
-	dialErr := errors.New("connect: network is unreachable")
+	dialErr := syscall.ENETUNREACH
 	dial := func(ctx context.Context, network string, addr string) (net.Conn, error) {
 		attempts += 1
 		return nil, dialErr
@@ -562,7 +562,7 @@ func TestFamilyFallbackRollsBackTheStrikeWhenTheRetryAlsoFails(t *testing.T) {
 			dial := func(ctx context.Context, network string, addr string) (net.Conn, error) {
 				if network == "tcp4" {
 					if test.retryDialErr {
-						return nil, &net.OpError{Op: "dial", Net: "tcp4", Err: syscall.ENETUNREACH}
+						return nil, syscall.ENETUNREACH
 					}
 					return &stubConn{remote: &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 443}}, nil
 				}
@@ -1087,8 +1087,7 @@ func TestFamilyFallbackDoesNotBoundACallerWithNoRoomForTwoAttempts(t *testing.T)
 
 // A dial through a SOCKS proxy observes the hop to the proxy, so the family of
 // the connection is the proxy's, not the destination's. A stalled handshake
-// there is not evidence about this host's path: it must neither demote a family
-// nor retry, since a retry changes only the family of the hop.
+// there must neither demote a family nor retry.
 func TestProxyDialDoesNotDemoteOrRetry(t *testing.T) {
 	restore := swapControlFamilyProbe(func(int) bool { return true })
 	defer restore()
@@ -1122,8 +1121,7 @@ func TestProxyDialDoesNotDemoteOrRetry(t *testing.T) {
 	}
 }
 
-// A failed SOCKS hop is the proxy's failure, not this host's route, so it must
-// not be retried over the other family either.
+// A failed SOCKS hop is the proxy's failure, not this host's route.
 func TestProxyDialFailureDoesNotRedial(t *testing.T) {
 	restore := swapControlFamilyProbe(func(int) bool { return true })
 	defer restore()

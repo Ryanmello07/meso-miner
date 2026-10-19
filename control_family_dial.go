@@ -1,12 +1,11 @@
 package connect
 
-// control_family_dial.go — the family-aware control-plane dial.
+// control_family_dial.go -- the family-aware control-plane dial.
 //
 // Ported from connect v0.0.0-20261017075543-c8d8cdf536a8 (control_family_dial.go).
-// The only structural adaptation: this tree has no transport_family.go, so the
-// two pinned-family helpers the dial reads (pinnedIpFamilyFromContext,
-// pinnedDialNetwork) are carried at the bottom of this file with the doc they
-// need, and the comment references to the pinned platform transport and the
+// This tree already carries transport_family.go, so the two pinned-family
+// helpers the dial reads (pinnedIpFamilyFromContext, pinnedDialNetwork) come
+// from there. The comment references to the pinned platform transport and the
 // h3/quic name path are written for the call sites that exist HERE -- the
 // normal tls dialer and the resilient (fragment/reorder/segment) dialers in
 // net_http.go and net_resilient.go, both of which feed the platform control
@@ -102,10 +101,9 @@ func dialControlTlsWithFamilyFallback(
 	// the pinned record type, and a Force that contradicts the pin surfaces
 	// there as the error the transport idles on.
 	// A dial that goes through a SOCKS proxy observes the PROXY's address
-	// family, not the destination's: connFamily(conn) reads the hop to the
-	// proxy, and a retry over the other family changes only that hop. No
-	// strike, no narrowing, and no retry -- a proxy failure is not evidence
-	// about this host's path.
+	// family, not the destination's: connFamily reads the hop to the proxy,
+	// and a handshake timeout on that connection is the proxy or its upstream.
+	// No strike, no narrowing, no retry.
 	proxied := settings != nil && settings.dialUsesProxy()
 	pinnedFamily := pinnedIpFamilyFromContext(ctx)
 	if pinnedFamily != 0 {
@@ -149,7 +147,7 @@ func dialControlTlsWithFamilyFallback(
 	// read: it is recorded (subject to the same guards) and not retried.
 	if pinnedFamily != 0 {
 		if !proxied && isPathTimeout(err) && failed != 0 && ctx.Err() == nil && !isIPLiteralDialAddr(addr) {
-			controlFamilyDemote(failed)
+			recordControlFamilyStrike(failed, err)
 		}
 		return nil, err
 	}
@@ -182,7 +180,7 @@ func dialControlTlsWithFamilyFallback(
 	if ctx.Err() != nil {
 		return nil, err
 	}
-	if !controlFamilyDemote(failed) {
+	if !recordControlFamilyStrike(failed, err) {
 		// refused: the other family is not usable on this device, so there is
 		// nothing to retry onto
 		return nil, err

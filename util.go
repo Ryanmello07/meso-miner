@@ -700,3 +700,45 @@ func (self *Reconnect) After() <-chan time.Time {
 		return time.After(randomTimeout)
 	}
 }
+
+// networkChangeListeners are callbacks fired when the host reports a network path change
+// (wifi<->cell, interface change). Components that hold long-lived connections over the
+// OLD path subscribe to fail over immediately.
+var networkChangeListeners = NewCallbackList[func()]()
+
+// networkQualityChangeListeners receive app-reported radio or path-quality
+// changes that do not require rebuilding a working transport.
+var networkQualityChangeListeners = NewCallbackList[func()]()
+
+// AddNetworkChangeListener registers a callback invoked by NetworkChanged. It returns an
+// unregister closure; an owner must unregister when it closes.
+func AddNetworkChangeListener(listener func()) func() {
+	callbackId := networkChangeListeners.Add(listener)
+	return func() {
+		networkChangeListeners.Remove(callbackId)
+	}
+}
+
+// AddNetworkQualityChangeListener registers a callback invoked by
+// NetworkQualityChanged. It returns an unregister closure.
+func AddNetworkQualityChangeListener(listener func()) func() {
+	callbackId := networkQualityChangeListeners.Add(listener)
+	return func() {
+		networkQualityChangeListeners.Remove(callbackId)
+	}
+}
+
+// NetworkQualityChanged reports a change in radio or path quality.
+func NetworkQualityChanged() {
+	for _, listener := range networkQualityChangeListeners.Get() {
+		HandleError(listener)
+	}
+}
+
+// NetworkChanged invokes the registered network-change listeners.
+func NetworkChanged() {
+	NetworkQualityChanged()
+	for _, listener := range networkChangeListeners.Get() {
+		HandleError(listener)
+	}
+}
