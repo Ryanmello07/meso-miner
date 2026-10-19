@@ -120,6 +120,39 @@ func ipNetwork(network string) (string, error) {
 	}
 }
 
+// preferredAddress applies net.Resolve*'s preference for IPv4 when the network
+// leaves the family open. LookupNetIP returns the resolver's order, and a
+// dual-stack STUN/TURN name can put its AAAA first; joining that address parks
+// candidate gathering on a dead or filtered v6 path. A family-filtered lookup
+// is already ordered by the resolver and keeps its first answer.
+func preferredAddress(addresses []netip.Addr, lookupNetwork string) netip.Addr {
+	if lookupNetwork != "ip" {
+		return addresses[0]
+	}
+	for _, address := range addresses {
+		if address.Unmap().Is4() {
+			return address
+		}
+	}
+	return addresses[0]
+}
+
+// literalFamilyAllowed mirrors net.Resolve*'s family check for an address
+// literal, which never reaches the resolver: ip4 accepts the IPv4 forms
+// (including an IPv4-mapped IPv6 literal) and rejects the rest; ip6 accepts
+// only a real IPv6 literal, so an IPv4-mapped one is refused exactly as
+// net.ResolveUDPAddr refuses it; a family-agnostic network accepts either.
+func literalFamilyAllowed(address netip.Addr, lookupNetwork string) bool {
+	switch lookupNetwork {
+	case "ip4":
+		return address.Unmap().Is4()
+	case "ip6":
+		return !address.Unmap().Is4()
+	default:
+		return true
+	}
+}
+
 // resolveIPAddr resolves one hostname with cancellation and preserves literal
 // IPv6 zones without involving DNS.
 func (self *peerConnectionResolveNet) resolveIPAddr(
@@ -135,6 +168,9 @@ func (self *peerConnectionResolveNet) resolveIPAddr(
 		return &net.IPAddr{}, nil
 	}
 	if address, parseErr := netip.ParseAddr(host); parseErr == nil {
+		if !literalFamilyAllowed(address, lookupNetwork) {
+			return nil, &net.AddrError{Err: "no suitable address found", Addr: host}
+		}
 		return &net.IPAddr{
 			IP:   net.IP(address.AsSlice()),
 			Zone: address.Zone(),
@@ -151,7 +187,7 @@ func (self *peerConnectionResolveNet) resolveIPAddr(
 	if len(addresses) == 0 {
 		return nil, fmt.Errorf("resolve %s: no addresses", host)
 	}
-	address := addresses[0]
+	address := preferredAddress(addresses, lookupNetwork)
 	return &net.IPAddr{
 		IP:   net.IP(address.AsSlice()),
 		Zone: address.Zone(),

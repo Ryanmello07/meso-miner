@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
@@ -200,10 +201,88 @@ func TestPeerConnectionResolveNetCancelsStunAndTurnLookups(t *testing.T) {
 	}
 }
 
-// TestWebRtcPeerTeardownCancelsBlockedStunResolution reproduces the production
-// shutdown ordering: SetLocalDescription starts a STUN hostname lookup, then
-// the peer retires while that lookup is blocked. Teardown must cancel DNS
-// before PeerConnection.Close joins the ICE gatherer's WaitGroup.
+// TestPreferredAddress pins the family-agnostic preference: the first IPv4
+// answer wins even when a dual-stack name returns its AAAA first, and a
+// family-filtered lookup keeps the resolver's own order.
+func TestPreferredAddress(t *testing.T) {
+	v6 := netip.MustParseAddr("2001:db8::1")
+	v4a := netip.MustParseAddr("192.0.2.10")
+	v4b := netip.MustParseAddr("192.0.2.11")
+	mapped := netip.MustParseAddr("::ffff:192.0.2.12")
+
+	cases := []struct {
+		name      string
+		lookup    string
+		addresses []netip.Addr
+		want      netip.Addr
+	}{
+		{"dual stack prefers the first v4", "ip", []netip.Addr{v6, v4a, v4b}, v4a},
+		{"v4-mapped answer counts as v4", "ip", []netip.Addr{v6, mapped}, mapped},
+		{"v6 only falls back to the first answer", "ip", []netip.Addr{v6}, v6},
+		{"ip4 keeps the resolver order", "ip4", []netip.Addr{v4a, v4b}, v4a},
+		{"ip6 keeps the resolver order", "ip6", []netip.Addr{v6}, v6},
+	}
+	for _, testCase := range cases {
+		if got := preferredAddress(testCase.addresses, testCase.lookup); got != testCase.want {
+			t.Fatalf("%s: preferredAddress = %v, want %v", testCase.name, got, testCase.want)
+		}
+	}
+}
+
+// TestResolveIPAddrLiteralFamily covers the literal branch, which never reaches
+// DNS: the requested family must still reject the other family, shaped like
+// net.Resolve*'s own error.
+func TestResolveIPAddrLiteralFamily(t *testing.T) {
+	base, err := stdnet.NewNet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	network, cancel := newPeerConnectionResolveNet(context.Background(), base, nil, 0)
+	defer cancel()
+
+	cases := []struct {
+		network string
+		host    string
+		wantErr bool
+		wantV4  bool
+	}{
+		{network: "udp4", host: "::1", wantErr: true},
+		{network: "tcp4", host: "2001:db8::1", wantErr: true},
+		{network: "udp6", host: "1.2.3.4", wantErr: true},
+		{network: "udp", host: "::1"},
+		{network: "udp", host: "1.2.3.4", wantV4: true},
+		{network: "udp4", host: "::ffff:1.2.3.4", wantV4: true},
+		{network: "udp6", host: "::ffff:1.2.3.4", wantErr: true},
+	}
+	for _, testCase := range cases {
+		address, resolveErr := network.ResolveIPAddr(testCase.network, testCase.host)
+		if testCase.wantErr {
+			var addrErr *net.AddrError
+			if !errors.As(resolveErr, &addrErr) {
+				t.Fatalf("%s %q: error = %v, want *net.AddrError", testCase.network, testCase.host, resolveErr)
+			}
+			if addrErr.Err != "no suitable address found" {
+				t.Fatalf("%s %q: AddrError.Err = %q", testCase.network, testCase.host, addrErr.Err)
+			}
+			continue
+		}
+		if resolveErr != nil {
+			t.Fatalf("%s %q: unexpected error %v", testCase.network, testCase.host, resolveErr)
+		}
+		if gotV4 := address.IP.To4() != nil; gotV4 != testCase.wantV4 {
+			t.Fatalf("%s %q: IPv4 = %v, want %v (%v)", testCase.network, testCase.host, gotV4, testCase.wantV4, address.IP)
+		}
+	}
+
+	// The UDP entry point keeps the same family check after splitting the port.
+	if _, err := network.ResolveUDPAddr("udp4", "[::ffff:1.2.3.4]:3478"); err != nil {
+		t.Fatalf("mapped literal under udp4: %v", err)
+	}
+	if _, err := network.ResolveUDPAddr("udp4", "[::1]:3478"); err == nil {
+		t.Fatal("udp4 accepted an IPv6 literal through ResolveUDPAddr")
+	}
+}
+
 func TestWebRtcPeerTeardownCancelsBlockedStunResolution(t *testing.T) {
 	defer restoreStunTallyWindowForTest()
 
