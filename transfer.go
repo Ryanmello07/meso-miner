@@ -215,6 +215,10 @@ func DefaultReceiveBufferSettings() *ReceiveBufferSettings {
 		// the receive idle timeout should be a bit longer than the send idle timeout
 		IdleTimeout:        120 * time.Second,
 		SequenceBufferSize: DefaultTransferBufferSize,
+		// A reliable carrier reader may retain its one already-read frame until
+		// the bounded per-sequence queue drains or the sequence/client closes.
+		// This restores stream backpressure without enlarging any queue.
+		ReliablePackHandoffTimeout: -1,
 		// AckBufferSize: DefaultTransferBufferSize,
 		AckCompressTimeout: time.Duration(0),
 		// End one compression wait early when a hole becomes provable to the
@@ -555,6 +559,46 @@ type Client struct {
 	receiveQueueTentativeEvictionByteCount atomic.Uint64
 	// held items that crossed the commit boundary and were acknowledged
 	receiveQueueCommitCount atomic.Uint64
+
+	// handoff census for the inbound Pack channel: how often a full channel
+	// made a reader wait, how often that wait was rescued by a release, and
+	// how often the arrival was dropped instead. Observation only; no counter
+	// here selects a behaviour.
+	receivePackHandoffWaitCount     atomic.Uint64
+	receivePackHandoffWaitSuccess   atomic.Uint64
+	receivePackHandoffDropCount     atomic.Uint64
+	receivePackHandoffDropByteCount atomic.Uint64
+}
+
+// ClientReceiveStatsSnapshot is an immutable, lock-free view of receive-pump
+// admission loss. Pack bytes are application message bytes, not encoded
+// carrier bytes. Counters are monotonic for the lifetime of one Client.
+type ClientReceiveStatsSnapshot struct {
+	PackHandoffDropCount     uint64
+	PackHandoffDropByteCount uint64
+	PackHandoffWaitCount     uint64
+	PackHandoffWaitSuccess   uint64
+}
+
+// ReceiveStats reads the independently updated receive counters without
+// stopping receive processing.
+func (self *Client) ReceiveStats() ClientReceiveStatsSnapshot {
+	return ClientReceiveStatsSnapshot{
+		PackHandoffDropCount:     self.receivePackHandoffDropCount.Load(),
+		PackHandoffDropByteCount: self.receivePackHandoffDropByteCount.Load(),
+		PackHandoffWaitCount:     self.receivePackHandoffWaitCount.Load(),
+		PackHandoffWaitSuccess:   self.receivePackHandoffWaitSuccess.Load(),
+	}
+}
+
+// recordReceivePackHandoffDrop counts a receive-side Pack that could not be
+// handed to its sequence. Transfer retransmission is responsible for recovery.
+func (self *Client) recordReceivePackHandoffDrop(messageByteCount ByteCount) {
+	if self == nil {
+		return
+	}
+	self.receivePackHandoffDropCount.Add(1)
+	self.receivePackHandoffDropByteCount.Add(uint64(messageByteCount))
 }
 
 // ReceiveQueueEvictionCount returns the number of held items that were
@@ -4933,6 +4977,25 @@ type ReceiveBufferSettings struct {
 	// parented ReceiveQueueBudget forces it on in NewReceiveSequence.
 	ReceiveQueueRetainedByteAccounting bool
 
+	// H1PackHandoffTimeout applies bounded reader backpressure only after an
+	// unclassified legacy H1 handoff is full. A positive value is a total wait
+	// bound, not a per-retry delay. A negative value waits until capacity or
+	// sequence/client cancellation, extending an already-reliable H1 stream's
+	// backpressure without enlarging the channel. Zero keeps nonblocking loss.
+	H1PackHandoffTimeout time.Duration
+	// ReliablePackHandoffTimeout applies to an exact route explicitly
+	// published as reliable (H1, H3/DNS QUIC stream, SCTP, or a framed server
+	// exchange). A negative value waits for capacity or cancellation without
+	// enlarging the queue. Zero keeps nonblocking behaviour for explicitly
+	// customized settings.
+	//
+	// The selector that reads it, packHandoffTimeout, is carried here with the
+	// pin's placement and default. This tree's receive path still selects its
+	// handoff wait with ClientSettings.BufferTimeout, so wiring this value in
+	// is a separate decision: a negative default would replace that existing
+	// positive bound with an unbounded wait on reliable lanes.
+	ReliablePackHandoffTimeout time.Duration
+
 	// ReceiveHoldPolicy decides what a full hold does with an arrival that
 	// is earlier than what it holds (THROUGHPUTFIX §37.20, ported from
 	// upstream 609cb1b6). Defaults to ReceiveHoldCommittedPrefix (the zero
@@ -4945,6 +5008,33 @@ type ReceiveBufferSettings struct {
 	MaxOpenReceiveContract int
 
 	ProtocolVersion int
+}
+
+// packHandoffTimeout selects the bounded reader backpressure for one inbound
+// Pack. An exact route that publishes its reliability decides on its own; an
+// unclassified legacy H1 stream falls back to its transport type; anything
+// else stays nonblocking. A negative value is a wait until capacity or
+// cancellation, zero is nonblocking loss, and a positive value is one total
+// wait bound.
+func (self *ReceiveBufferSettings) packHandoffTimeout(
+	transportType TransportType,
+	reliabilities ...CarrierReliability,
+) time.Duration {
+	if self == nil {
+		return 0
+	}
+	if 0 < len(reliabilities) {
+		switch reliabilities[0] {
+		case CarrierReliabilityReliable:
+			return self.ReliablePackHandoffTimeout
+		case CarrierReliabilityUnreliable:
+			return 0
+		}
+	}
+	if transportType == TransportTypeH1 {
+		return self.H1PackHandoffTimeout
+	}
+	return 0
 }
 
 type receiveSequenceId struct {
@@ -5328,31 +5418,49 @@ func (self *ReceiveSequence) Pack(receivePack *ReceivePack, timeout time.Duratio
 	}
 	defer self.idleCondition.UpdateClose()
 
+	// Nonblocking attempt first. A ready channel is taken here whether or not
+	// the caller asked to wait, so the census below only counts a wait that
+	// will actually block, and the selection stays what it was.
+	select {
+	case <-self.ctx.Done():
+		return false, errors.New("Done.")
+	case self.packs <- receivePack:
+		return true, nil
+	default:
+	}
+	if timeout == 0 {
+		if self.client != nil {
+			self.client.recordReceivePackHandoffDrop(receivePack.MessageByteCount)
+		}
+		return false, nil
+	}
+	if self.client != nil {
+		self.client.receivePackHandoffWaitCount.Add(1)
+	}
 	if timeout < 0 {
 		select {
 		case <-self.ctx.Done():
 			return false, errors.New("Done.")
 		case self.packs <- receivePack:
+			if self.client != nil {
+				self.client.receivePackHandoffWaitSuccess.Add(1)
+			}
 			return true, nil
 		}
-	} else if timeout == 0 {
-		select {
-		case <-self.ctx.Done():
-			return false, errors.New("Done.")
-		case self.packs <- receivePack:
-			return true, nil
-		default:
-			return false, nil
+	}
+	select {
+	case <-self.ctx.Done():
+		return false, errors.New("Done.")
+	case self.packs <- receivePack:
+		if self.client != nil {
+			self.client.receivePackHandoffWaitSuccess.Add(1)
 		}
-	} else {
-		select {
-		case <-self.ctx.Done():
-			return false, errors.New("Done.")
-		case self.packs <- receivePack:
-			return true, nil
-		case <-time.After(timeout):
-			return false, nil
+		return true, nil
+	case <-time.After(timeout):
+		if self.client != nil {
+			self.client.recordReceivePackHandoffDrop(receivePack.MessageByteCount)
 		}
+		return false, nil
 	}
 }
 
