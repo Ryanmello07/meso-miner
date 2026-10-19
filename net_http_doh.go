@@ -322,16 +322,6 @@ func dnsResolverAddrs(settings *DohSettings, remote bool, network string) []stri
 		ipv4 = settings.DnsResolverSettings.LocalDnsIpv4
 		ipv6 = settings.DnsResolverSettings.LocalDnsIpv6
 	}
-	// The probe is a heuristic, so it only governs the dual-stack default. An
-	// explicit IPv6 request is the operator's configuration and is honoured as
-	// written: nilling the list here would hand a `udp6` dial IPv4 resolver
-	// addresses, and on an IPv6-only host that is every resolution failing.
-	wants6 := strings.HasSuffix(network, "6") || settings.IpVersion == 6
-	if !wants6 && !hostHasGlobalIpv6() {
-		// without working IPv6 the v6 resolvers are only timeouts
-		ipv6 = nil
-	}
-
 	switch {
 	case strings.HasSuffix(network, "6") || settings.IpVersion == 6:
 		if 0 < len(ipv6) {

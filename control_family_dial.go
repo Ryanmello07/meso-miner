@@ -101,6 +101,12 @@ func dialControlTlsWithFamilyFallback(
 	// ConnectSettings.DialContext, so name resolution below it requests only
 	// the pinned record type, and a Force that contradicts the pin surfaces
 	// there as the error the transport idles on.
+	// A dial that goes through a SOCKS proxy observes the PROXY's address
+	// family, not the destination's: connFamily(conn) reads the hop to the
+	// proxy, and a retry over the other family changes only that hop. No
+	// strike, no narrowing, and no retry -- a proxy failure is not evidence
+	// about this host's path.
+	proxied := settings != nil && settings.dialUsesProxy()
 	pinnedFamily := pinnedIpFamilyFromContext(ctx)
 	if pinnedFamily != 0 {
 		narrowed, err := pinnedDialNetwork(network, pinnedFamily)
@@ -111,6 +117,9 @@ func dialControlTlsWithFamilyFallback(
 	}
 	conn, err := dial(ctx, network, addr)
 	if err != nil {
+		if proxied {
+			return nil, err
+		}
 		conn, err = redialWithoutAContradictedDemotion(ctx, network, addr, dial, err)
 		if err != nil {
 			return nil, err
@@ -139,9 +148,13 @@ func dialControlTlsWithFamilyFallback(
 	// its family is still evidence for the ledger the family-agnostic dials
 	// read: it is recorded (subject to the same guards) and not retried.
 	if pinnedFamily != 0 {
-		if isPathTimeout(err) && failed != 0 && ctx.Err() == nil && !isIPLiteralDialAddr(addr) {
+		if !proxied && isPathTimeout(err) && failed != 0 && ctx.Err() == nil && !isIPLiteralDialAddr(addr) {
 			controlFamilyDemote(failed)
 		}
+		return nil, err
+	}
+	// a proxied dial has nowhere family-specific to go
+	if proxied {
 		return nil, err
 	}
 	// only a family-agnostic dial has somewhere else to go
@@ -186,13 +199,17 @@ func dialControlTlsWithFamilyFallback(
 		// second failure over the second family is not a family problem.
 		// Leaving the strike standing would narrow every control dial in the
 		// process onto a family that just failed outright.
-		controlFamilyUndemote(failed)
+		if ctx.Err() == nil && isPathFailure(retryErr) {
+			controlFamilyUndemote(failed)
+		}
 		return nil, err
 	}
 	retryTlsConn, retryErr := handshake(ctx, retryConn)
 	if retryErr != nil {
 		retryConn.Close()
-		controlFamilyUndemote(failed)
+		if ctx.Err() == nil && isPathFailure(retryErr) {
+			controlFamilyUndemote(failed)
+		}
 		return nil, err
 	}
 	return retryTlsConn, nil

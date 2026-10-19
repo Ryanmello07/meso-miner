@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -561,7 +562,7 @@ func TestFamilyFallbackRollsBackTheStrikeWhenTheRetryAlsoFails(t *testing.T) {
 			dial := func(ctx context.Context, network string, addr string) (net.Conn, error) {
 				if network == "tcp4" {
 					if test.retryDialErr {
-						return nil, errors.New("connect: network is unreachable")
+						return nil, &net.OpError{Op: "dial", Net: "tcp4", Err: syscall.ENETUNREACH}
 					}
 					return &stubConn{remote: &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 443}}, nil
 				}
@@ -1081,5 +1082,72 @@ func TestFamilyFallbackDoesNotBoundACallerWithNoRoomForTwoAttempts(t *testing.T)
 	}
 	if got := controlFamilyDemotedFamily(); got != 0 {
 		t.Fatalf("ipv%d was demoted by the caller's own budget expiring", got)
+	}
+}
+
+// A dial through a SOCKS proxy observes the hop to the proxy, so the family of
+// the connection is the proxy's, not the destination's. A stalled handshake
+// there is not evidence about this host's path: it must neither demote a family
+// nor retry, since a retry changes only the family of the hop.
+func TestProxyDialDoesNotDemoteOrRetry(t *testing.T) {
+	restore := swapControlFamilyProbe(func(int) bool { return true })
+	defer restore()
+	controlFamilyClear()
+	defer controlFamilyClear()
+
+	settings := DefaultConnectSettings()
+	settings.ProxySettings = &ProxySettings{Index: 0, Network: "tcp", Address: "127.0.0.1:1080"}
+
+	attempts := 0
+	dial := func(ctx context.Context, network string, addr string) (net.Conn, error) {
+		attempts += 1
+		return &stubConn{remote: &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 443}}, nil
+	}
+	handshake := func(ctx context.Context, conn net.Conn) (net.Conn, error) {
+		return nil, &timeoutError{}
+	}
+
+	if _, err := dialControlTlsWithFamilyFallback(
+		context.Background(), settings, "tcp", "api.example:443", dial, handshake,
+	); err == nil {
+		t.Fatal("expected the handshake failure")
+	}
+	if attempts != 1 {
+		t.Fatalf("dialed %d times through the proxy, want 1 (no family retry)", attempts)
+	}
+	for _, family := range []int{4, 6} {
+		if until := controlFamilyDemotedUntil(family); !until.IsZero() {
+			t.Fatalf("a proxied handshake demoted family %d until %s", family, until)
+		}
+	}
+}
+
+// A failed SOCKS hop is the proxy's failure, not this host's route, so it must
+// not be retried over the other family either.
+func TestProxyDialFailureDoesNotRedial(t *testing.T) {
+	restore := swapControlFamilyProbe(func(int) bool { return true })
+	defer restore()
+	controlFamilyClear()
+	defer controlFamilyClear()
+
+	settings := DefaultConnectSettings()
+	settings.ProxySettings = &ProxySettings{Index: 0, Network: "tcp", Address: "127.0.0.1:1080"}
+
+	attempts := 0
+	dial := func(ctx context.Context, network string, addr string) (net.Conn, error) {
+		attempts += 1
+		return nil, &timeoutError{}
+	}
+	handshake := func(ctx context.Context, conn net.Conn) (net.Conn, error) {
+		return conn, nil
+	}
+
+	if _, err := dialControlTlsWithFamilyFallback(
+		context.Background(), settings, "tcp", "api.example:443", dial, handshake,
+	); err == nil {
+		t.Fatal("expected the proxy failure")
+	}
+	if attempts != 1 {
+		t.Fatalf("dialed %d times after a proxy failure, want 1", attempts)
 	}
 }
