@@ -49,6 +49,13 @@ const (
 	proxyResolutionNoSource  int32 = 5 // no proxy source configured and the direct transport is off: nothing is served
 )
 
+// currentProxyResolution exposes the settled proxy-resolution state to the
+// transport default logic (direct-only H3 opt-in). Exposed as a function so the
+// atomic is not read directly from other files.
+func currentProxyResolution() int32 {
+	return proxyResolutionStatus.Load()
+}
+
 // Status severity bands for the live/configured proxy ratio. The exact
 // percentage always renders alongside the word so the scale reads
 // continuously; a node with 40% live and one with 9% live are both

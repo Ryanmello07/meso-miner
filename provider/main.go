@@ -2338,6 +2338,25 @@ func runHealthHeartbeat(ctx context.Context, startTime time.Time, profile string
 // silently corrupted the on-disk token from network JWT to client JWT.
 func refreshJWT(ctx context.Context, apiUrl, byJwt string) (string, error) {
 	clientStrategy := connect.NewClientStrategyWithDefaults(ctx)
+
+	if !jwtContainsClientId(byJwt) {
+		tlog("🔑 [jwt] refresh → network-refresh: renewing network JWT at %s/auth/network-refresh...\n", apiUrl)
+		newJwt, fallback, err := networkRefreshJWT(ctx, clientStrategy, apiUrl, byJwt)
+		if err == nil {
+			tlog("🔑 [jwt] refresh → network-refresh ok: network JWT received (%d chars)\n", len(newJwt))
+			if err := verifyRefreshedJWT(ctx, apiUrl, newJwt, "network-refresh"); err != nil {
+				return "", err
+			}
+			return newJwt, nil
+		}
+		if !fallback {
+			return "", err
+		}
+		tlog("🔑 [jwt] refresh → network-refresh unavailable (%v); falling back to code-create/code-login\n", err)
+	} else {
+		tlog("🔑 [jwt] refresh → network-refresh skipped: the jwt file holds a client JWT, not a network JWT\n")
+	}
+
 	api := connect.NewBringYourApi(ctx, clientStrategy, apiUrl)
 	api.SetByJwt(byJwt)
 
@@ -2403,25 +2422,30 @@ func refreshJWT(ctx context.Context, apiUrl, byJwt string) (string, error) {
 
 	tlog("🔑 [jwt] refresh → step 2/3 ok: network JWT received (%d chars)\n", len(newJwt))
 
-	tlog("🔑 [jwt] refresh → step 3/3: verifying new token against %s/transfer/stats...\n", apiUrl)
+	if err := verifyRefreshedJWT(ctx, apiUrl, newJwt, "step 3/3"); err != nil {
+		return "", err
+	}
 
-	// Verify the fresh token works before returning it so the caller never
-	// overwrites the on-disk JWT with a dead token. Uses a lightweight read-only
-	// API endpoint to keep side effects zero (no auth codes, no client rows).
+	return newJwt, nil
+}
+
+func verifyRefreshedJWT(ctx context.Context, apiUrl, byJwt, label string) error {
+	tlog("🔑 [jwt] refresh → %s: verifying new token against %s/transfer/stats...\n", label, apiUrl)
+
 	req, err := http.NewRequestWithContext(ctx, "GET", apiUrl+"/transfer/stats", nil)
 	if err != nil {
-		return "", fmt.Errorf("could not build verification request: %w", err)
+		return fmt.Errorf("could not build verification request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+newJwt)
+	req.Header.Set("Authorization", "Bearer "+byJwt)
 	verifyClient := &http.Client{Timeout: 30 * time.Second}
 	resp, err := verifyClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("fresh token failed verification: %w", err)
+		return fmt.Errorf("fresh token failed verification: %w", err)
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("fresh token rejected by server (HTTP %d)", resp.StatusCode)
+		return fmt.Errorf("fresh token rejected by server (HTTP %d)", resp.StatusCode)
 	}
 
 	var stats struct {
@@ -2429,12 +2453,11 @@ func refreshJWT(ctx context.Context, apiUrl, byJwt string) (string, error) {
 		UnpaidBytes uint64 `json:"unpaid_bytes_provided"`
 	}
 	if err := json.Unmarshal(body, &stats); err == nil {
-		tlog("🔑 [jwt] refresh → step 3/3 ok: verification passed (HTTP %d, unpaid: %s, paid: %s)\n", resp.StatusCode, formatBytes(stats.UnpaidBytes), formatBytes(stats.PaidBytes))
+		tlog("🔑 [jwt] refresh → %s ok: verification passed (HTTP %d, unpaid: %s, paid: %s)\n", label, resp.StatusCode, formatBytes(stats.UnpaidBytes), formatBytes(stats.PaidBytes))
 	} else {
-		tlog("🔑 [jwt] refresh → step 3/3 ok: verification passed (HTTP %d)\n", resp.StatusCode)
+		tlog("🔑 [jwt] refresh → %s ok: verification passed (HTTP %d)\n", label, resp.StatusCode)
 	}
-
-	return newJwt, nil
+	return nil
 }
 
 // runJWTRefresher polls once per hour and refreshes the JWT under two
