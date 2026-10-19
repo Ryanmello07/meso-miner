@@ -318,7 +318,7 @@ type sendAckFrame struct {
 	windowByteCount *uint64
 }
 
-// sizeAck returns the encoded size of the Ack submessage body (fields 1-4).
+// sizeAck returns the encoded size of the Ack submessage body (fields 1-4, 8).
 func (m *sendAckFrame) sizeAck() int {
 	n := 0
 	// message_id=1, sequence_id=2 (always 16-byte bytes)

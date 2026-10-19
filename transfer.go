@@ -5129,13 +5129,13 @@ func (self *ReceiveSequence) Run() {
 			path := self.source.Reverse().AddSource(self.client.ClientId())
 			// what this receiver can still hold out of order, on every ack so the
 			// peer can clamp its window to it (receive_window_byte_count)
-			receiveWindowByteCount := self.receiveWindowAdvertisement()
+			receiveWindow := self.receiveWindowAdvertisement()
 
 			var transferFrameBytes []byte
 			if 2 <= self.receiveBufferSettings.ProtocolVersion {
 				// hand-rolled marshal of the hot Ack TransferFrame; wire-identical
 				// to the proto structs in the legacy branch (see frame_protobuf_test.go).
-				saf := newSendAckFrame(sendAck, self.sequenceId, path, receiveWindowByteCount)
+				saf := newSendAckFrame(sendAck, self.sequenceId, path, receiveWindow)
 				transferFrameBytes = marshalSendAckTransferFrame(saf)
 			} else {
 				ack := &protocol.Ack{
@@ -5143,7 +5143,7 @@ func (self *ReceiveSequence) Run() {
 					SequenceId:             self.sequenceId.Bytes(),
 					Selective:              sendAck.selective,
 					Tag:                    sendAck.tag,
-					ReceiveWindowByteCount: &receiveWindowByteCount,
+					ReceiveWindowByteCount: &receiveWindow,
 				}
 				ackBytes, _ := ProtoMarshal(ack)
 				defer MessagePoolReturn(ackBytes)
