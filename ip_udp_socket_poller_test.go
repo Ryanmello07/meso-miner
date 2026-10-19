@@ -100,15 +100,32 @@ func TestUdpSocketReadPollerDrainsFlowsInOrder(t *testing.T) {
 		poller.waitForLifecycle()
 	})
 
-	const flowCount = 6
 	const packetCount = 16
+	const maxFlows = 12
 	type flowFixture struct {
 		sequence *UdpSequence
 		socket   net.Conn
 		received chan byte
 	}
-	flows := make([]*flowFixture, 0, flowCount)
-	for i := range flowCount {
+	registeredShards := func() int {
+		count := 0
+		for i := range poller.shards {
+			shard := &poller.shards[i]
+			shard.mutex.RLock()
+			registrationCount := len(shard.byFd)
+			shard.mutex.RUnlock()
+			if 0 < registrationCount {
+				count += 1
+			}
+		}
+		return count
+	}
+	flows := make([]*flowFixture, 0, maxFlows)
+	// A flow's shard is a hash of its destination path, so six ephemeral echo
+	// ports can all land on one shard. Keep adding flows until the fan-out is
+	// real: this test is about ordering across shards, and the hash spread has
+	// its own test.
+	for i := 0; i < maxFlows; i++ {
 		received := make(chan byte, packetCount)
 		destinationPort := UDPPort(startUdpSocketReadTestEcho(t))
 		sequence, socket := startUdpSocketReadTestFlow(
@@ -126,20 +143,13 @@ func TestUdpSocketReadPollerDrainsFlowsInOrder(t *testing.T) {
 			},
 		)
 		flows = append(flows, &flowFixture{sequence: sequence, socket: socket, received: received})
-	}
-
-	shardCount := 0
-	for i := range poller.shards {
-		shard := &poller.shards[i]
-		shard.mutex.RLock()
-		registrationCount := len(shard.byFd)
-		shard.mutex.RUnlock()
-		if 0 < registrationCount {
-			shardCount += 1
+		if registeredShards() == len(poller.shards) {
+			break
 		}
 	}
-	if shardCount != 2 {
-		t.Fatalf("registered shards=%d, want 2 (fan-out exhausted or uneven)", shardCount)
+	flowCount := len(flows)
+	if shardCount := registeredShards(); shardCount != len(poller.shards) {
+		t.Fatalf("registered shards=%d, want %d (fan-out exhausted)", shardCount, len(poller.shards))
 	}
 
 	for i, flow := range flows {
