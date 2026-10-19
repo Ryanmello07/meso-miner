@@ -20,18 +20,123 @@ log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') >>> UrNetwork >>> $*"
 }
 
-# Default BUILD: stable, unless an auth code is supplied — a positional JWT
-# argument or URNETWORK_AUTH_CODE means the caller is authenticating with a
-# code (not a user/password), so use jwt mode automatically. An explicit
-# BUILD= overrides this auto-selection.
-if [ -z "${BUILD:-}" ]; then
-  if [ "$#" -gt 0 ] || [ -n "${URNETWORK_AUTH_CODE:-}" ]; then
-    BUILD="jwt"
+# Sourcing JWT verification helper
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -f "$SCRIPT_DIR/jwt_verify.sh" ]; then
+  . "$SCRIPT_DIR/jwt_verify.sh"
+elif [ -f "/app/jwt_verify.sh" ]; then
+  . "/app/jwt_verify.sh"
+fi
+
+# Accept AUTHCODE as an alias for URNETWORK_AUTH_CODE
+if [ -z "${URNETWORK_AUTH_CODE:-}" ] && [ -n "${AUTHCODE:-}" ]; then
+  export URNETWORK_AUTH_CODE="$AUTHCODE"
+fi
+
+ORIG_BUILD="${BUILD:-}"
+AUTH_RAW="${AUTH:-}"
+AUTH_LC="$(printf '%s' "$AUTH_RAW" | tr '[:upper:]' '[:lower:]')"
+AUTH_DERIVED_BUILD=""
+
+if [ -n "$AUTH_LC" ]; then
+  case "$AUTH_LC" in
+    userpass)
+      AUTH_DERIVED_BUILD="stable"
+      ;;
+    authcode)
+      AUTH_DERIVED_BUILD="jwt"
+      ;;
+    *)
+      log "ERROR: Invalid AUTH '$AUTH_RAW'. Valid options are: userpass, authcode"
+      exit 1
+      ;;
+  esac
+fi
+
+# Precedence & Deprecation Hint:
+# Explicit BUILD wins. If BUILD is unset and AUTH is set, derive from AUTH.
+# If both set and they conflict, log a clear WARNING and let BUILD win.
+if [ -n "$ORIG_BUILD" ]; then
+  BUILD="$(printf '%s' "$ORIG_BUILD" | tr '[:upper:]' '[:lower:]')"
+  if [ -z "$AUTH_LC" ]; then
+    log "BUILD is deprecated for auth selection, use AUTH=userpass|authcode"
   else
-    BUILD="stable"
+    if [ "$BUILD" != "$AUTH_DERIVED_BUILD" ]; then
+      log "WARNING: Conflicting AUTH='$AUTH_RAW' and BUILD='$ORIG_BUILD' specified; BUILD takes precedence"
+    fi
+  fi
+else
+  if [ -n "$AUTH_LC" ]; then
+    BUILD="$AUTH_DERIVED_BUILD"
+  else
+    # Both unset: keep today's auto-selection
+    if [ "$#" -gt 0 ] || [ -n "${URNETWORK_AUTH_CODE:-}" ]; then
+      BUILD="jwt"
+    else
+      BUILD="stable"
+    fi
   fi
 fi
-BUILD="$(echo "$BUILD" | tr '[:upper:]' '[:lower:]')"
+
+# Validate stored JWT if present: decode locally and verify exp/nbf
+JWT_FILE="${HOME:-/root}/.urnetwork/jwt"
+if [ -s "$JWT_FILE" ]; then
+  if command -v validate_jwt_file >/dev/null 2>&1; then
+    if ! validate_jwt_file "$JWT_FILE"; then
+      log "Stored JWT expired or invalid - removing stale token"
+      rm -f "$JWT_FILE"
+    fi
+  fi
+fi
+
+# Validate credentials for AUTH modes:
+# AUTH=userpass requires USER_AUTH and PASSWORD.
+# AUTH=authcode requires an auth code (or an existing stored JWT).
+if [ "$AUTH_LC" = "userpass" ]; then
+  if [ -z "${USER_AUTH:-}" ] || [ -z "${PASSWORD:-}" ]; then
+    missing=""
+    [ -z "${USER_AUTH:-}" ] && missing="USER_AUTH"
+    [ -z "${PASSWORD:-}" ] && missing="${missing:+$missing and }PASSWORD"
+    log "ERROR: AUTH=userpass requires $missing to be set"
+    exit 1
+  fi
+elif [ "$AUTH_LC" = "authcode" ]; then
+  if [ -z "${URNETWORK_AUTH_CODE:-}" ] && [ "$#" -eq 0 ] && [ ! -s "$JWT_FILE" ]; then
+    log "ERROR: AUTH=authcode requires AUTHCODE (or an existing session volume at ${HOME:-/root}/.urnetwork)"
+    exit 1
+  fi
+fi
+
+# === Startup Safety Messages ===
+STATE_DIR="${HOME:-/root}/.urnetwork"
+[ -d "$STATE_DIR" ] || STATE_DIR="/root/.urnetwork"
+
+is_mounted() {
+  target="$1"
+  if command -v mountpoint >/dev/null 2>&1; then
+    mountpoint -q "$target" 2>/dev/null && return 0
+  fi
+  if [ -r /proc/self/mountinfo ]; then
+    awk -v d="$target" '$5 == d { found=1 } END { exit !found }' /proc/self/mountinfo 2>/dev/null && return 0
+  fi
+  return 1
+}
+
+has_identity() {
+  target="$1"
+  [ -s "$target/jwt" ] || [ -f "$target/identity.json" ] || [ -f "$target/private_key.pem" ] || [ -f "$target/network.json" ]
+}
+
+is_empty_dir() {
+  target="$1"
+  [ ! -d "$target" ] || [ -z "$(ls -A "$target" 2>/dev/null)" ]
+}
+
+if ! is_mounted "$STATE_DIR" && ! is_mounted "/root/.urnetwork" || ( ! has_identity "$STATE_DIR" && is_empty_dir "$STATE_DIR" ); then
+  log "WARNING: Without a persistent volume mounted at /root/.urnetwork every container restart creates a NEW provider identity."
+fi
+
+log "INFO: A payout wallet and consent must be set in the URnetwork app or website (or with the provider wallet commands in docs/Bittensor-Operations.md) for the provider to be paid."
 
 # Translate TURBO=v4|v8 into URNETWORK_PROFILE so the binary picks it up.
 # GOGC is handled internally by the binary when turbo is active.
