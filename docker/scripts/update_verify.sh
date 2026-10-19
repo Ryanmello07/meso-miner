@@ -61,6 +61,90 @@ upd_asset_digest_from_json() {
     upd_json_digest_field "$@"
 }
 
+# --- Stable release selection ---------------------------------------------
+# GitHub's /releases/latest endpoint returns the newest non-draft,
+# non-prerelease release whether or not it carries a provider tarball. A
+# docs-only or tool-only release published after a good one therefore stalls
+# every updater on that tag until an even newer release appears. These
+# helpers walk GET /releases instead and return the newest release that is:
+#   - not a draft,
+#   - not flagged prerelease,
+#   - not named like a pre-release (-rcN, .beta2, -nightly, ...), and
+#   - carrying urnetwork-provider-<tag>.tar.gz with a sha256 digest.
+# The tag-name rule matters because a release published by hand can carry an
+# rc tag with the prerelease flag unset; GitHub then reports it as latest.
+#
+# jq is required (the image installs it and every update path already uses
+# it). Selection is pure: the caller owns the network and the logging.
+
+# upd_select_stable_release_json <releases-array-json>
+# Prints the first eligible stable release object (compact JSON), or nothing
+# when the page holds no eligible release. Exit status is jq's: non-zero only
+# when the JSON cannot be parsed.
+upd_select_stable_release_json() {
+    printf '%s' "$1" | jq -c '
+      [ .[]
+        | select(type == "object")
+        | select((.draft // false) == false)
+        | select((.prerelease // false) == false)
+        | select(((.tag_name // "")
+                  | test("(^|[-._])(rc|alpha|beta|pre|preview|nightly|snapshot|dev)[0-9]*($|[-._])"; "i")
+                  | not))
+        | . as $r
+        | ("urnetwork-provider-" + $r.tag_name + ".tar.gz") as $want
+        | select([$r.assets[]? | select(.name == $want and ((.digest // "") | test("^sha256:[0-9a-fA-F]+$")))] | length > 0)
+      ] | first // empty'
+}
+
+# upd_release_select_cleanup: POSIX sh has no function-local scope; drop the
+# UPD_ globals the selection walk uses (mirrors the digest helpers' rule).
+upd_release_select_cleanup() {
+    unset UPD_root UPD_per_page UPD_max_pages UPD_page UPD_page_json UPD_selected UPD_count
+}
+
+# upd_fetch_stable_release_json <api-root>
+# Walks release pages (newest first) and prints the newest eligible stable
+# release object. UPD_RELEASE_PER_PAGE / UPD_RELEASE_MAX_PAGES override the
+# 100/10 defaults (tests use small pages). Returns 1 when no eligible release
+# exists in the walked pages.
+upd_fetch_stable_release_json() {
+    UPD_root="$1"
+    UPD_per_page="${UPD_RELEASE_PER_PAGE:-100}"
+    UPD_max_pages="${UPD_RELEASE_MAX_PAGES:-10}"
+    UPD_page=1
+    while [ "$UPD_page" -le "$UPD_max_pages" ]; do
+        if ! UPD_page_json="$(curl -sfL --connect-timeout 10 --max-time 30 \
+                "$UPD_root/releases?per_page=$UPD_per_page&page=$UPD_page" 2>/dev/null)"; then
+            echo "upd_verify: release listing page $UPD_page unavailable" >&2
+            upd_release_select_cleanup
+            return 1
+        fi
+        if ! UPD_selected="$(upd_select_stable_release_json "$UPD_page_json")"; then
+            echo "upd_verify: could not parse release listing page $UPD_page" >&2
+            upd_release_select_cleanup
+            return 1
+        fi
+        if [ -n "$UPD_selected" ]; then
+            printf '%s\n' "$UPD_selected"
+            upd_release_select_cleanup
+            return 0
+        fi
+        UPD_count="$(printf '%s' "$UPD_page_json" | jq 'length' 2>/dev/null)" || UPD_count=""
+        case "$UPD_count" in
+            ''|*[!0-9]*) UPD_count=0 ;;
+        esac
+        # A short page is the last page: stop rather than paging forever.
+        if [ "$UPD_count" -lt "$UPD_per_page" ]; then
+            upd_release_select_cleanup
+            return 1
+        fi
+        UPD_page=$((UPD_page + 1))
+    done
+    echo "upd_verify: no stable release with a provider tarball in the newest $UPD_max_pages release pages" >&2
+    upd_release_select_cleanup
+    return 1
+}
+
 # upd_sha256_of <file>
 # Prints the hex sha256 of $1 via sha256sum, falling back to openssl.
 upd_sha256_of() {

@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -137,6 +138,10 @@ type ClientStrategySettings struct {
 	// expose consistent ips
 	// if true, enables ech
 	ExposeServerIps bool
+	// DisableManualExtenders makes SetCustomExtenders a no-op. A strategy built
+	// with fixed extenders keeps its own set.
+	DisableManualExtenders bool
+
 	// expose server names
 	// if true, enables non-ech
 	// TODO set this to default false
@@ -398,6 +403,9 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 }
 
 func (self *ClientStrategy) SetCustomExtenders(extenderIpSecrets map[netip.Addr]string) {
+	if self.settings.DisableManualExtenders {
+		return
+	}
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 
@@ -1656,12 +1664,34 @@ func NewBlockingApiCallback[R any](ctx context.Context) (ApiCallback[R], chan Ap
 // body instead of plain text or JSON; embedding that verbatim produces
 // multi-line, unreadable log spam at every call site that prints the error.
 // Collapse an HTML body down to a short descriptor instead.
-func httpErrorFromResponse(status string, bodyBytes []byte) error {
-	body := strings.TrimSpace(string(bodyBytes))
+// HttpStatusError is a confirmed non-2xx response. The status code makes a
+// rejection distinguishable from a transport error without matching on text.
+type HttpStatusError struct {
+	StatusCode int
+	Status     string
+	Body       []byte
+}
+
+func (self *HttpStatusError) Error() string {
+	body := strings.TrimSpace(string(self.Body))
 	if strings.HasPrefix(body, "<") {
-		return fmt.Errorf("%s: <html error page, %d bytes>", status, len(bodyBytes))
+		return fmt.Sprintf("%s: <html error page, %d bytes>", self.Status, len(self.Body))
 	}
-	return fmt.Errorf("%s: %s", status, body)
+	return fmt.Sprintf("%s: %s", self.Status, body)
+}
+
+func (self *HttpStatusError) HTTPStatusCode() int {
+	return self.StatusCode
+}
+
+func httpErrorFromResponse(status string, bodyBytes []byte) error {
+	statusCode := 0
+	if fields := strings.Fields(status); 0 < len(fields) {
+		if parsed, err := strconv.Atoi(fields[0]); err == nil {
+			statusCode = parsed
+		}
+	}
+	return &HttpStatusError{StatusCode: statusCode, Status: status, Body: bodyBytes}
 }
 
 func HttpPostWithStrategyRaw(

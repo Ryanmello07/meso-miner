@@ -370,6 +370,10 @@ func (self *ConnectSettings) dialUsesProxy() bool {
 
 type DialContextSettings struct {
 	DialContext DialContextFunction
+	// PacketConnFactory, when set, supplies the packet conn for udp dials so a
+	// pinned transport can bind its own family (ported from upstream at
+	// 20b29f79, inert here; nil keeps the existing behavior).
+	PacketConnFactory func(context.Context) (net.PacketConn, error)
 }
 
 // DialContext dials network/addr, applying the family policy from

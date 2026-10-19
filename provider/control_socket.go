@@ -369,7 +369,14 @@ func validateControlValue(key, value string) error {
 		default:
 			return fmt.Errorf("%s: must be none, url, or all (got %q)", key, value)
 		}
-	case "fast_auth", "proxy_self_heal", "proxy_audit", "smart_dialer", "baseline", "h3", "h3_datagram", "h3_datagram_send":
+	case "h3":
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("h3: must be off, direct, on, auto, a positive proxy count, or all (got an empty value)")
+		}
+		if _, err := parseH3Mode(value); err != nil {
+			return err
+		}
+	case "fast_auth", "proxy_self_heal", "proxy_audit", "smart_dialer", "baseline", "h3_datagram", "h3_datagram_send":
 		switch valLower {
 		case "on", "off":
 		default:
@@ -470,12 +477,11 @@ var liveDefaults = map[string]string{
 	// off default; without the entry, clear reported success while the live
 	// dialer stayed enabled until restart.
 	"smart_dialer": "off",
-	// Clearing h3_datagram_send stops sending datagrams: it is an experiment and
-	// its default is off, with no environment variable behind it.
-	"h3_datagram_send": "off",
-	// Clearing h3_datagram stops offering DATAGRAM: it is an experiment and
-	// its default is off, with no environment variable behind it.
-	"h3_datagram": "off",
+	// Clearing h3_datagram_send returns to the default: on, as upstream.
+	"h3_datagram_send": "on",
+	// Clearing h3_datagram returns to the default: offering DATAGRAM is on, as
+	// upstream.
+	"h3_datagram": "on",
 	// Clearing the baseline key re-enables the recorder. Its default is ON,
 	// because a free upgrade baseline is the point: leaving it off after an
 	// operator cleared it would mean the file silently stops growing and
@@ -490,7 +496,7 @@ func applyLiveDefault(key string) error {
 	if key == "h3" {
 		// Clearing the key hands the decision back to URNETWORK_H3, which is
 		// what a restart would use, so the live state matches the persisted one.
-		return applyLiveSideEffect(key, onOff(h3Enabled()))
+		return applyLiveSideEffect(key, resolveH3Mode(nil, currentProxyResolution()).String())
 	}
 	def, ok := liveDefaults[key]
 	if !ok {
@@ -1064,12 +1070,18 @@ func applyLiveSideEffect(key, value string) error {
 		}
 		tlog("⚙️ [control] applied smart_dialer=%s (was %s)\n", value, was)
 	case "h3":
-		// Eligible direct identities already have an idle H3 transport waiting
-		// on this gate, so it takes effect at once: on lets it dial, off closes
-		// a live H3 connection and stops further dials. See connect.SetH3Enabled.
-		enabled := strings.EqualFold(value, "on")
-		previous := connect.SetH3Enabled(enabled)
-		tlog("⚙️ [control] applied h3=%s (was %s)\n", value, onOff(previous))
+		// The mode (see h3Mode) is read when an identity builds its transport.
+		// The beside-H1 gate follows it at once; a changed mode relaunches the
+		// direct identity, the only one it affects.
+		setting, err := parseH3Mode(value)
+		if err != nil {
+			return err
+		}
+		previous, relaunch := applyH3Mode(setting)
+		tlog("⚙️ [control] applied h3=%s (was %s)\n", setting, previous)
+		if relaunch {
+			go connect.HandleError(restartDirectIdentity)
+		}
 	case "h3_datagram":
 		// The offer is made when H3 dials, so a change closes the live H3
 		// connection and it reconnects with the new setting. It does nothing
@@ -1288,20 +1300,26 @@ func applyPersistedRuntimeTuning(state *controlState) {
 			tlog("[control] failed to apply persisted metrics=on: %s\n", err)
 		}
 	}
-	// h3_datagram has no environment default, so an unset key means off.
-	datagramValue, _ := state.get("h3_datagram")
+	// h3_datagram / h3_datagram_send have no environment default. They default
+	// on everywhere, as upstream offers and sends datagrams by default. An
+	// explicit persisted key (off included) still wins.
+	res := currentProxyResolution()
+	directOnly := datagramDefaultOn(res)
+	datagramValue, datagramSet := state.get("h3_datagram")
+	if !datagramSet && directOnly {
+		datagramValue = "on"
+	}
 	if err := applyLiveSideEffect("h3_datagram", onOff(strings.EqualFold(datagramValue, "on"))); err != nil {
 		tlog("[control] failed to apply h3_datagram: %s\n", err)
 	}
-	// h3_datagram_send has no environment default either: unset means off.
-	sendValue, _ := state.get("h3_datagram_send")
+	sendValue, sendSet := state.get("h3_datagram_send")
+	if !sendSet && directOnly {
+		sendValue = "on"
+	}
 	if err := applyLiveSideEffect("h3_datagram_send", onOff(strings.EqualFold(sendValue, "on"))); err != nil {
 		tlog("[control] failed to apply h3_datagram_send: %s\n", err)
 	}
-	// h3 is replayed in BOTH directions, falling back to URNETWORK_H3 when the
-	// key was never set: a persisted off must beat the env var, and an unset key
-	// must not leave the gate at its zero value when the env var asks for H3.
-	if err := applyLiveSideEffect("h3", onOff(resolveH3(state))); err != nil {
+	if err := applyLiveSideEffect("h3", resolveH3Mode(state, currentProxyResolution()).String()); err != nil {
 		tlog("[control] failed to apply h3: %s\n", err)
 	}
 	if v, ok := state.get("smart_dialer"); ok && strings.EqualFold(v, "on") {
