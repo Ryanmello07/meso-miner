@@ -510,7 +510,7 @@ func_start_provider_stable(){
         log "[INFO] Starting UrNetwork (attempt #$((failures+1)))"
         PROVIDER_BIN="$APP_DIR/urnetwork_${A_SYS_ARCH}_${PROVIDER_FLAVOR}"
 		BIN_VER="$($PROVIDER_BIN --version)"
-		log "[INFO] Running UrNetwork build v${BIN_VER}"
+		log "[INFO] Running UrNetwork build ${BIN_VER}"
         # Capture the real exit code (set -e safe; avoids the `|| true` that pinned code to 0)
         resolve_provider_env_args
         # shellcheck disable=SC2086  # PROVIDER_ENV_ARGS is a deliberately split flag list
@@ -576,7 +576,7 @@ func_start_provider_nightly(){
         log "[INFO] Starting UrNetwork (attempt #$((failures+1)))"
         PROVIDER_BIN="$APP_DIR/urnetwork_${A_SYS_ARCH}_${PROVIDER_FLAVOR}"
 		BIN_VER="$($PROVIDER_BIN --version)"
-		log "[INFO] Running UrNetwork build v${BIN_VER}"
+		log "[INFO] Running UrNetwork build ${BIN_VER}"
         # Capture the real exit code (set -e safe; bare `provide` would abort the loop on crash)
         resolve_provider_env_args
         # shellcheck disable=SC2086  # PROVIDER_ENV_ARGS is a deliberately split flag list
@@ -640,7 +640,7 @@ func_start_provider_jwt(){
     JWT_TOKEN="${1:-}"
     PROVIDER_BIN="$APP_DIR/urnetwork_${A_SYS_ARCH}_${PROVIDER_FLAVOR}"
     BIN_VER="$($PROVIDER_BIN --version 2>/dev/null || echo "dev")"
-    log "[INFO] Running UrNetwork build v${BIN_VER}"
+    log "[INFO] Running UrNetwork build ${BIN_VER}"
 
     # Priority 1: Existing session file (Shared Volume / Watchtower Path)
     if [ -s "$JWT_FILE" ]; then
