@@ -273,9 +273,14 @@ type PlatformTransportSettings struct {
 	QuicTlsConfig        *tls.Config
 	AuthTimeout          time.Duration
 	ReconnectTimeout     time.Duration
-	PingTimeout          time.Duration
-	WriteTimeout         time.Duration
-	ReadTimeout          time.Duration
+	// ReconnectLongAfter and ReconnectLongMaxTimeout add a second backoff tier:
+	// after this many consecutive failed dials while the platform was
+	// reachable, the wait may grow past the usual cap. Zero disables it.
+	ReconnectLongAfter      int
+	ReconnectLongMaxTimeout time.Duration
+	PingTimeout             time.Duration
+	WriteTimeout            time.Duration
+	ReadTimeout             time.Duration
 
 	// FlapStableAfter is how long a platform session must live before the next
 	// reconnect is treated as ordinary. Sessions that die sooner extend the wait
@@ -317,6 +322,12 @@ type PlatformTransportSettings struct {
 	DnsTlds        [][]byte
 	V2H1Auth       bool
 	FramerSettings *FramerSettings
+
+	// H3PacketConnFactory, when set, creates the raw UDP endpoint for any H3
+	// mode; DNS modes then apply their admitted packet translation. A proxied
+	// identity relays QUIC through its proxy rather than opening a host socket.
+	// Nil retains the host UDP socket path.
+	H3PacketConnFactory func(context.Context) (net.PacketConn, error)
 
 	// Log, when set, is used by the transport.
 	// nil resolves to DefaultLogger().

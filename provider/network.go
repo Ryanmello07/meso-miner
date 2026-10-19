@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/docopt/docopt-go"
 )
@@ -81,6 +82,13 @@ func readNetworkConfig() (cfg networkConfig, ok bool, err error) {
 	}
 	if err := json.Unmarshal(b, &cfg); err != nil {
 		return networkConfig{}, false, fmt.Errorf("parse %s: %w", p, err)
+	}
+	// A file that parses but does not name a network (`{}`, `null`, or a
+	// half-written one with a single field) is an error here rather than a
+	// config: returning it would hand an empty base URL to the api client and
+	// fail much further from the cause.
+	if cfg.ApiUrl == "" || cfg.ConnectUrl == "" {
+		return networkConfig{}, false, fmt.Errorf("%s: api_url and connect_url are both required", p)
 	}
 	return cfg, true, nil
 }
@@ -190,4 +198,75 @@ func resolveAPIProbeHostPort() (string, uint16) {
 		apiUrl = cfg.ApiUrl
 	}
 	return apiProbeHostPort(apiUrl)
+}
+
+func insecureNetworkWarning(apiUrl, connectUrl string) string {
+	insecure := []string{}
+	if urlScheme(apiUrl) == "http" {
+		insecure = append(insecure, "api_url uses http")
+	}
+	if urlScheme(connectUrl) == "ws" {
+		insecure = append(insecure, "connect_url uses ws")
+	}
+	if len(insecure) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"warning: %s. Traffic to this network is unencrypted, including the provider's auth token, "+
+			"and is readable by anyone on the network path. Use https:// and wss:// unless this is a "+
+			"local test deployment.",
+		strings.Join(insecure, " and "),
+	)
+}
+
+func networkSwitchNotice(dir string) string {
+	if _, err := os.Stat(filepath.Join(dir, "jwt")); err != nil {
+		return ""
+	}
+	return fmt.Sprintf(
+		"note: the jwt in %s was issued by the previously selected network. "+
+			"Run `provider auth` against the new network before `provider provide`.",
+		dir,
+	)
+}
+
+func networkShowText() (string, error) {
+	cfg, ok, err := readNetworkConfig()
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return fmt.Sprintf(
+			"no custom network saved; using the main network\n    api_url: %s\n    connect_url: %s\n",
+			DefaultApiUrl, DefaultConnectUrl,
+		), nil
+	}
+	p, err := networkConfigPath()
+	if err != nil {
+		return "", err
+	}
+	text := fmt.Sprintf(
+		"custom network saved at %s\n    api_url: %s\n    connect_url: %s\n",
+		p, cfg.ApiUrl, cfg.ConnectUrl,
+	)
+	if warning := insecureNetworkWarning(cfg.ApiUrl, cfg.ConnectUrl); warning != "" {
+		text += warning + "\n"
+	}
+	return text, nil
+}
+
+func networkSwitchNoticeForState() string {
+	p, err := networkConfigPath()
+	if err != nil {
+		return ""
+	}
+	return networkSwitchNotice(filepath.Dir(p))
+}
+
+func urlScheme(rawUrl string) string {
+	u, err := url.Parse(rawUrl)
+	if err != nil {
+		return ""
+	}
+	return u.Scheme
 }

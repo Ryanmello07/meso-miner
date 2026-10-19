@@ -69,18 +69,24 @@ const (
 // setProxyResolutionStatus records the outcome of a proxy resolution attempt
 // and refreshes the systemd STATUS= line.
 func setProxyResolutionStatus(status int32, reason string) {
+	prev := proxyResolutionStatus.Load()
 	proxyResolutionStatus.Store(status)
 	if reason != "" {
 		proxyResolutionReason.Store(reason)
 	}
 	reportProxyStatusToSystemd()
+	// Direct-only H3 defaults depend on this status becoming ZeroValid, so the
+	// re-apply belongs here -- the one choke point every path goes through --
+	// and fires only on transitions into or out of it.
+	if (status == proxyResolutionZeroValid) != (prev == proxyResolutionZeroValid) {
+		applyDirectOnlyH3Defaults()
+	}
 }
 
 // setProxyResolutionOK marks resolution as successful (called when proxies
 // are found). Clears any stale failure/rejection state.
 func setProxyResolutionOK() {
-	proxyResolutionStatus.Store(proxyResolutionOK)
-	reportProxyStatusToSystemd()
+	setProxyResolutionStatus(proxyResolutionOK, "")
 }
 
 // getProxyResolutionReason returns the stored reason string.

@@ -20,6 +20,7 @@ log "[INFO] Starting provider update process"
 # upstream urnetwork/* repos ship the vanilla provider — installing from them
 # would silently replace this fork's hardened binary, so they are never named.
 readonly UPSTREAM_REPO="full-bars/meso-miner"
+readonly API_ROOT="https://api.github.com/repos/full-bars/meso-miner"
 
 # === Function to download release tar.gz from GitHub API ===
 Download_API() {
@@ -27,17 +28,23 @@ Download_API() {
 
     log "[INFO] Download_API → Repo: $UPSTREAM_REPO | Suffix: $suffix"
 
-    local API="https://api.github.com/repos/full-bars/meso-miner/releases/latest"
-    local release_url
-    release_url=$(curl -s "$API" | jq -r '.url')
-    [ -n "$release_url" ] && [ "$release_url" != "null" ] || {
-        log "[ERROR] Could not resolve latest release URL from $API"
+    local release_json tag
+    # Walk the releases listing instead of trusting releases/latest: GitHub
+    # calls the newest non-draft, non-prerelease release "latest" whether or
+    # not it carries a provider tarball, so a docs-only or tool-only release
+    # used to stall every update on that tag. The helper pages past releases
+    # without urnetwork-provider-<tag>.tar.gz plus its sha256 digest, and it
+    # never selects a pre-release (flagged, or only named like one) as stable.
+    release_json="$(upd_fetch_stable_release_json "$API_ROOT")" || {
+        log "[ERROR] No stable release with a verified urnetwork-provider tarball found"
         exit 1
     }
-    log "[INFO] Release URL: $release_url"
-
-    local release_json
-    release_json=$(curl -s "$release_url")
+    tag="$(printf '%s' "$release_json" | jq -r '.tag_name // empty')"
+    [ -n "$tag" ] || {
+        log "[ERROR] Selected release carries no tag_name"
+        exit 1
+    }
+    log "[INFO] Selected stable release: $tag"
 
     local filename download_url asset_digest
     # NOTE: the parens matter — select((A) and (B)); without them jq parses

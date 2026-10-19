@@ -962,6 +962,7 @@ Usage:
     provider print-network-id <file>
     provider choose_network <api_url> [<connect_url>]
     provider choose_network --reset
+    provider choose_network --show
 
 Options:
     -h --help                        Show this help and exit.
@@ -977,6 +978,7 @@ Options:
                                      or a preset: main | beta.
     <connect_url>                    Connect URL to save as the chosen network (ws:// or wss://).
     --reset                          With choose_network, clear the saved network and revert to the main network.
+    --show                           With choose_network, print the network currently in effect and exit.
     --user_auth=<user_auth>	         Login with a username.
     --password=<password>            Login with a password. If --user_auth is used, you will be prompted for your
     				                 password anyways, if you don't specify it using this option.

@@ -138,6 +138,10 @@ type ClientStrategySettings struct {
 	// expose consistent ips
 	// if true, enables ech
 	ExposeServerIps bool
+	// DisableManualExtenders makes SetCustomExtenders a no-op. A strategy built
+	// with fixed extenders keeps its own set.
+	DisableManualExtenders bool
+
 	// expose server names
 	// if true, enables non-ech
 	// TODO set this to default false
@@ -399,6 +403,9 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 }
 
 func (self *ClientStrategy) SetCustomExtenders(extenderIpSecrets map[netip.Addr]string) {
+	if self.settings.DisableManualExtenders {
+		return
+	}
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 
