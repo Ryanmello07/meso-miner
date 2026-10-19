@@ -134,7 +134,7 @@ func_start_provider(){
         log "[INFO] Starting UrNetwork (attempt #$((failures+1)))"
         PROVIDER_BIN="$APP_DIR/urnetwork_${A_SYS_ARCH}_stable"
 		BIN_VER="$($PROVIDER_BIN --version)"
-		log "[INFO] Running UrNetwork build v${BIN_VER}"
+		log "[INFO] Running UrNetwork build ${BIN_VER}"
         # Capture the real exit code (set -e safe; bare `provide` would abort the loop on crash)
         if "$PROVIDER_BIN" provide; then code=0; else code=$?; fi
         if [ "$code" -eq 0 ]; then
@@ -164,7 +164,7 @@ func_start_provider_jwt(){
     log "[INFO] Starting UrNetwork ..."
     PROVIDER_BIN="$APP_DIR/urnetwork_${A_SYS_ARCH}_stable"
     BIN_VER="$($PROVIDER_BIN --version)"
-    log "[INFO] Running UrNetwork build v${BIN_VER}"
+    log "[INFO] Running UrNetwork build ${BIN_VER}"
 
     # set -e safe: bare command + code=$? would abort before the error branch
     if "$PROVIDER_BIN" auth-provide "$AUTHCODE" -f; then
