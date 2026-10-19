@@ -40,6 +40,11 @@ type peerConnectionResolveNet struct {
 	ctx      context.Context
 	resolver *net.Resolver
 	timeout  time.Duration
+	// lookupNetIP is a test seam for the address-order rule. The real resolver
+	// sorts answers by RFC 6724, so a fake DNS server cannot make an
+	// "AAAA first" answer survive to LookupNetIP deterministically; tests
+	// replace this to drive the exact order the rule exists for.
+	lookupNetIP func(ctx context.Context, network string, host string) ([]netip.Addr, error)
 }
 
 // newPeerConnectionResolveNet creates the per-generation cancellation owner.
@@ -103,6 +108,19 @@ func (self *peerConnectionResolveNet) resolverOrDefault() *net.Resolver {
 		return self.resolver
 	}
 	return net.DefaultResolver
+}
+
+// lookupAddresses applies the test seam when one is installed and otherwise
+// resolves through this peer's resolver.
+func (self *peerConnectionResolveNet) lookupAddresses(
+	ctx context.Context,
+	lookupNetwork string,
+	host string,
+) ([]netip.Addr, error) {
+	if self.lookupNetIP != nil {
+		return self.lookupNetIP(ctx, lookupNetwork, host)
+	}
+	return self.resolverOrDefault().LookupNetIP(ctx, lookupNetwork, host)
 }
 
 // ipNetwork maps a transport endpoint network onto net.Resolver's accepted
@@ -176,11 +194,7 @@ func (self *peerConnectionResolveNet) resolveIPAddr(
 			Zone: address.Zone(),
 		}, nil
 	}
-	addresses, err := self.resolverOrDefault().LookupNetIP(
-		ctx,
-		lookupNetwork,
-		host,
-	)
+	addresses, err := self.lookupAddresses(ctx, lookupNetwork, host)
 	if err != nil {
 		return nil, err
 	}
