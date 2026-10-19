@@ -1774,6 +1774,11 @@ type SendBufferSettings struct {
 	ResendQueueMaxByteCount ByteCount
 	ResendQueueMinByteCount ByteCount
 	ResendQueueBudget       *TransferMemoryBudget
+	// ResendQueueRetainedByteAccounting charges pooled roots and retained owners
+	// with exact, shared lifetime admission. Floors and an empty sequence cannot
+	// overdraw this budget. Off preserves the historical per-byte reserve path;
+	// a parented ResendQueueBudget forces it on in NewSendSequence.
+	ResendQueueRetainedByteAccounting bool
 
 	// as this ->1, there is more risk that noack messages will get dropped due to out of sync contracts
 	ContractFillFraction float32
@@ -2512,6 +2517,16 @@ func NewSendSequence(
 	encryptionCompanion bool,
 	sendBufferSettings *SendBufferSettings) *SendSequence {
 	cancelCtx, cancel := context.WithCancel(ctx)
+	if sendBufferSettings.ResendQueueBudget != nil &&
+		sendBufferSettings.ResendQueueBudget.Parent() != nil &&
+		!sendBufferSettings.ResendQueueRetainedByteAccounting {
+		// A composed budget cannot use check-then-Reserve or an uncharged
+		// per-flow floor. Make parentage sufficient to select exact ownership
+		// even if a future settings copier forgets the optional policy flag.
+		copy := *sendBufferSettings
+		copy.ResendQueueRetainedByteAccounting = true
+		sendBufferSettings = &copy
+	}
 
 	rttWindow := NewRttWindow(
 		client.log,
@@ -2549,6 +2564,9 @@ func NewSendSequence(
 		rttWindow:           rttWindow,
 		flightController:    newSendFlightController(sendBufferSettings),
 		contractSeqIndex:    0,
+	}
+	if sendBufferSettings.ResendQueueRetainedByteAccounting {
+		seq.resendQueue.setLifetimeBudget()
 	}
 	// Never encrypt control-plane traffic. A SendSequence's data source is
 	// always this client (sourceId == client.ClientId()) and its destination
@@ -4674,6 +4692,19 @@ type ReceiveBufferSettings struct {
 	ReceiveQueueMaxByteCount ByteCount
 	ReceiveQueueMinByteCount ByteCount
 	ReceiveQueueBudget       *TransferMemoryBudget
+	// PackQueueRetainedByteAccounting charges PackQueueBudget for pooled outer
+	// and decoded message roots plus the decoded owner envelope rather than
+	// payload bytes alone. This tree has no PackQueueBudget yet, so the flag is
+	// carried unused and false: it is the settings half of the pin's pack
+	// handoff accounting, whose charging path lands with the retained-owner
+	// envelope.
+	PackQueueRetainedByteAccounting bool
+	// ReceiveQueueRetainedByteAccounting charges the shared queue budget for
+	// carrier/frame backing classes plus the decoded owner rather than payload
+	// bytes alone. Per-sequence ReceiveQueueMaxByteCount remains a logical
+	// payload window. Off preserves the historical per-byte reserve path; a
+	// parented ReceiveQueueBudget forces it on in NewReceiveSequence.
+	ReceiveQueueRetainedByteAccounting bool
 
 	// ReceiveHoldPolicy decides what a full hold does with an arrival that
 	// is earlier than what it holds (THROUGHPUTFIX §37.20, ported from
@@ -4991,6 +5022,16 @@ func NewReceiveSequence(
 	encryptionCompanion bool,
 	receiveBufferSettings *ReceiveBufferSettings) *ReceiveSequence {
 	cancelCtx, cancel := context.WithCancel(ctx)
+	if receiveBufferSettings.ReceiveQueueBudget != nil &&
+		receiveBufferSettings.ReceiveQueueBudget.Parent() != nil &&
+		!receiveBufferSettings.ReceiveQueueRetainedByteAccounting {
+		// Same rule as the send side: a composed budget selects exact item
+		// ownership, so a settings copy that forgets the flag cannot fall back
+		// to an uncharged per-flow floor.
+		copy := *receiveBufferSettings
+		copy.ReceiveQueueRetainedByteAccounting = true
+		receiveBufferSettings = &copy
+	}
 	seq := &ReceiveSequence{
 		ctx:                   cancelCtx,
 		cancel:                cancel,
@@ -5009,6 +5050,9 @@ func NewReceiveSequence(
 		idleCondition:         NewIdleCondition(),
 		ackWindow:             newSequenceAckWindowWithGapWake(receiveBufferSettings.AckGapWakeSelectiveCount),
 		exit:                  make(chan struct{}),
+	}
+	if receiveBufferSettings.ReceiveQueueRetainedByteAccounting {
+		seq.receiveQueue.setLifetimeBudget()
 	}
 	// Never encrypt control-plane traffic. A ReceiveSequence's data source is
 	// the peer (source.SourceId) and its destination is always this client
