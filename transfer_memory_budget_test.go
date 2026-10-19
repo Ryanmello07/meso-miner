@@ -1,12 +1,13 @@
 package connect
 
-// Exact-admission budget tests, ported from the pinned v2026 engine.
+// Exact-admission budget and queue tests, ported from the pinned v2026 engine.
 //
 // Source: github.com/full-bars/connect@v0.0.0-20261017075543-c8d8cdf536a8
-// `transfer_memory_budget_test.go`, the budget-only subset (the queue,
-// handoff and receive-window tests in that file belong to later stages and
-// are deliberately not carried here). `transfer_memory_budget_hierarchy_test.go`
-// is carried whole alongside this file.
+// `transfer_memory_budget_test.go`, pin lines 1-531: the budget tests and the
+// queue half. The retained-root, handoff and receive-window tests that follow
+// at pin line 532 belong to later stages and are deliberately not carried
+// here. `transfer_memory_budget_hierarchy_test.go` is carried whole alongside
+// this file.
 //
 // Only the imports the carried tests use are declared; the pinned file's
 // `context`/`fmt`/`runtime`/`strings`/`protocol` imports belong to the
@@ -407,6 +408,127 @@ func TestTransferMemoryBudgetResize(t *testing.T) {
 	budget.Release(kib(16))
 	AssertEqual(t, budget.UsedByteCount(), ByteCount(0))
 
+	reserved, released := budget.Counts()
+	AssertEqual(t, reserved, released)
+}
+
+func TestTransferQueueBudgetBorrow(t *testing.T) {
+	budget := NewTransferMemoryBudget(kib(8))
+	queue := newTransferQueue[*transferItem](func(a *transferItem, b *transferItem) int {
+		if a.sequenceNumber < b.sequenceNumber {
+			return -1
+		} else if b.sequenceNumber < a.sequenceNumber {
+			return 1
+		}
+		return 0
+	})
+	queue.setBudget(budget, kib(4))
+
+	newItem := func(sequenceNumber uint64, byteCount ByteCount) *transferItem {
+		return &transferItem{
+			messageId:        NewId(),
+			messageByteCount: byteCount,
+			sequenceNumber:   sequenceNumber,
+		}
+	}
+
+	// below the floor there is no borrowing
+	a := newItem(1, kib(2))
+	queue.Add(a)
+	AssertEqual(t, budget.UsedByteCount(), ByteCount(0))
+	// crossing the floor borrows the excess
+	b := newItem(2, kib(4))
+	queue.Add(b)
+	AssertEqual(t, budget.UsedByteCount(), kib(2))
+	// removal below the floor releases everything borrowed
+	queue.RemoveByMessageId(b.messageId)
+	AssertEqual(t, budget.UsedByteCount(), ByteCount(0))
+
+	// CanAdd: under floor always; above floor requires headroom under max
+	AssertEqual(t, queue.CanAdd(kib(1), kib(64)), true)
+	// would exceed max
+	AssertEqual(t, queue.CanAdd(kib(64), kib(4)), false)
+	// zero byte count probe: at the floor, requires headroom
+	queue.Add(newItem(3, kib(2)))
+	AssertEqual(t, queue.CanAdd(0, kib(64)), true)
+	// exhaust the budget elsewhere: above-floor growth is refused, and a
+	// same-size add below max but above floor is refused too
+	budget.Reserve(kib(8))
+	AssertEqual(t, queue.CanAdd(0, kib(64)), false)
+	AssertEqual(t, queue.CanAdd(kib(2), kib(64)), false)
+	budget.Release(kib(8))
+	AssertEqual(t, queue.CanAdd(0, kib(64)), true)
+
+	// grow above the floor, then Clear releases all borrowed bytes
+	// (2 + 2 + 4 + 2 KiB queued - 4 KiB floor = 6 KiB borrowed)
+	queue.Add(newItem(4, kib(4)))
+	queue.Add(newItem(5, kib(2)))
+	AssertEqual(t, budget.UsedByteCount(), kib(6))
+	items := queue.Clear()
+	AssertEqual(t, len(items), 4)
+	AssertEqual(t, budget.UsedByteCount(), ByteCount(0))
+	AssertEqual(t, queue.Len(), 0)
+	_, queueByteCount := queue.QueueSize()
+	AssertEqual(t, queueByteCount, ByteCount(0))
+
+	reserved, released := budget.Counts()
+	AssertEqual(t, reserved, released)
+}
+
+// A zero byte floor charges every reorder item after the queue's mandatory
+// first progress item. This is the mobile topology: many browser flows must
+// not each multiply a large unaccounted byte floor, while an empty flow still
+// makes progress when another flow temporarily owns the aggregate window.
+func TestTransferQueueZeroFloorBoundsManyFlowReorderOwnership(t *testing.T) {
+	budget := NewTransferMemoryBudget(kib(8))
+	newQueue := func() *transferQueue[*transferItem] {
+		queue := newTransferQueue[*transferItem](func(a *transferItem, b *transferItem) int {
+			if a.sequenceNumber < b.sequenceNumber {
+				return -1
+			}
+			if b.sequenceNumber < a.sequenceNumber {
+				return 1
+			}
+			return 0
+		})
+		queue.setBudget(budget, 0)
+		return queue
+	}
+	newItem := func(sequenceNumber uint64, byteCount ByteCount) *transferItem {
+		return &transferItem{
+			messageId:        NewId(),
+			messageByteCount: byteCount,
+			sequenceNumber:   sequenceNumber,
+		}
+	}
+
+	first := newQueue()
+	if !first.CanAdd(kib(4), kib(64)) {
+		t.Fatal("empty first flow did not admit its progress item")
+	}
+	first.Add(newItem(1, kib(4)))
+	if !first.CanAdd(kib(4), kib(64)) {
+		t.Fatal("aggregate headroom did not admit the second first-flow item")
+	}
+	first.Add(newItem(2, kib(4)))
+	AssertEqual(t, budget.UsedByteCount(), kib(8))
+	if first.CanAdd(1, kib(64)) {
+		t.Fatal("full aggregate budget admitted additional ownership")
+	}
+
+	second := newQueue()
+	if !second.CanAdd(kib(4), kib(64)) {
+		t.Fatal("empty second flow did not retain one-item liveness")
+	}
+	second.Add(newItem(1, kib(4)))
+	AssertEqual(t, budget.UsedByteCount(), kib(12))
+	if second.CanAdd(1, kib(64)) {
+		t.Fatal("second flow multiplied its one-item overdraft")
+	}
+
+	first.Clear()
+	second.Clear()
+	AssertEqual(t, budget.UsedByteCount(), ByteCount(0))
 	reserved, released := budget.Counts()
 	AssertEqual(t, reserved, released)
 }

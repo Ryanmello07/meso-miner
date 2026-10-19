@@ -4582,6 +4582,11 @@ func (self *sendItem) MessageByteCount() ByteCount {
 	return self.messageByteCount
 }
 
+// Send queues use the encoded frame length for both their per-sequence limit
+// and their shared resend budget. transferItem.QueueByteCount cannot delegate
+// to this type's MessageByteCount through the embedded receiver, so implement
+// the retained-accounting method explicitly instead of silently charging the
+// base transferItem's (unused) messageByteCount field.
 func (self *sendItem) QueueByteCount() ByteCount {
 	return self.MessageByteCount()
 }
