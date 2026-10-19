@@ -40,6 +40,11 @@ type peerConnectionResolveNet struct {
 	ctx      context.Context
 	resolver *net.Resolver
 	timeout  time.Duration
+	// lookupNetIP is a test seam for the address-order rule. The real resolver
+	// sorts answers by RFC 6724, so a fake DNS server cannot make an
+	// "AAAA first" answer survive to LookupNetIP deterministically; tests
+	// replace this to drive the exact order the rule exists for.
+	lookupNetIP func(ctx context.Context, network string, host string) ([]netip.Addr, error)
 }
 
 // newPeerConnectionResolveNet creates the per-generation cancellation owner.
@@ -105,6 +110,19 @@ func (self *peerConnectionResolveNet) resolverOrDefault() *net.Resolver {
 	return net.DefaultResolver
 }
 
+// lookupAddresses applies the test seam when one is installed and otherwise
+// resolves through this peer's resolver.
+func (self *peerConnectionResolveNet) lookupAddresses(
+	ctx context.Context,
+	lookupNetwork string,
+	host string,
+) ([]netip.Addr, error) {
+	if self.lookupNetIP != nil {
+		return self.lookupNetIP(ctx, lookupNetwork, host)
+	}
+	return self.resolverOrDefault().LookupNetIP(ctx, lookupNetwork, host)
+}
+
 // ipNetwork maps a transport endpoint network onto net.Resolver's accepted
 // LookupNetIP network names.
 func ipNetwork(network string) (string, error) {
@@ -117,6 +135,39 @@ func ipNetwork(network string) (string, error) {
 		return "ip6", nil
 	default:
 		return "", net.UnknownNetworkError(network)
+	}
+}
+
+// preferredAddress applies net.Resolve*'s preference for IPv4 when the network
+// leaves the family open. LookupNetIP returns the resolver's order, and a
+// dual-stack STUN/TURN name can put its AAAA first; joining that address parks
+// candidate gathering on a dead or filtered v6 path. A family-filtered lookup
+// is already ordered by the resolver and keeps its first answer.
+func preferredAddress(addresses []netip.Addr, lookupNetwork string) netip.Addr {
+	if lookupNetwork != "ip" {
+		return addresses[0]
+	}
+	for _, address := range addresses {
+		if address.Unmap().Is4() {
+			return address
+		}
+	}
+	return addresses[0]
+}
+
+// literalFamilyAllowed mirrors net.Resolve*'s family check for an address
+// literal, which never reaches the resolver: ip4 accepts the IPv4 forms
+// (including an IPv4-mapped IPv6 literal) and rejects the rest; ip6 accepts
+// only a real IPv6 literal, so an IPv4-mapped one is refused exactly as
+// net.ResolveUDPAddr refuses it; a family-agnostic network accepts either.
+func literalFamilyAllowed(address netip.Addr, lookupNetwork string) bool {
+	switch lookupNetwork {
+	case "ip4":
+		return address.Unmap().Is4()
+	case "ip6":
+		return !address.Unmap().Is4()
+	default:
+		return true
 	}
 }
 
@@ -135,23 +186,22 @@ func (self *peerConnectionResolveNet) resolveIPAddr(
 		return &net.IPAddr{}, nil
 	}
 	if address, parseErr := netip.ParseAddr(host); parseErr == nil {
+		if !literalFamilyAllowed(address, lookupNetwork) {
+			return nil, &net.AddrError{Err: "no suitable address found", Addr: host}
+		}
 		return &net.IPAddr{
 			IP:   net.IP(address.AsSlice()),
 			Zone: address.Zone(),
 		}, nil
 	}
-	addresses, err := self.resolverOrDefault().LookupNetIP(
-		ctx,
-		lookupNetwork,
-		host,
-	)
+	addresses, err := self.lookupAddresses(ctx, lookupNetwork, host)
 	if err != nil {
 		return nil, err
 	}
 	if len(addresses) == 0 {
 		return nil, fmt.Errorf("resolve %s: no addresses", host)
 	}
-	address := addresses[0]
+	address := preferredAddress(addresses, lookupNetwork)
 	return &net.IPAddr{
 		IP:   net.IP(address.AsSlice()),
 		Zone: address.Zone(),

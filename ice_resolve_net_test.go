@@ -25,6 +25,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -197,6 +199,228 @@ func TestPeerConnectionResolveNetCancelsStunAndTurnLookups(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+// TestPreferredAddress pins the family-agnostic preference: the first IPv4
+// answer wins even when a dual-stack name returns its AAAA first, and a
+// family-filtered lookup keeps the resolver's own order.
+func TestPreferredAddress(t *testing.T) {
+	v6 := netip.MustParseAddr("2001:db8::1")
+	v4a := netip.MustParseAddr("192.0.2.10")
+	v4b := netip.MustParseAddr("192.0.2.11")
+	mapped := netip.MustParseAddr("::ffff:192.0.2.12")
+
+	cases := []struct {
+		name      string
+		lookup    string
+		addresses []netip.Addr
+		want      netip.Addr
+	}{
+		{"dual stack prefers the first v4", "ip", []netip.Addr{v6, v4a, v4b}, v4a},
+		{"v4-mapped answer counts as v4", "ip", []netip.Addr{v6, mapped}, mapped},
+		{"v6 only falls back to the first answer", "ip", []netip.Addr{v6}, v6},
+		{"ip4 keeps the resolver order", "ip4", []netip.Addr{v4a, v4b}, v4a},
+		{"ip6 keeps the resolver order", "ip6", []netip.Addr{v6}, v6},
+	}
+	for _, testCase := range cases {
+		if got := preferredAddress(testCase.addresses, testCase.lookup); got != testCase.want {
+			t.Fatalf("%s: preferredAddress = %v, want %v", testCase.name, got, testCase.want)
+		}
+	}
+}
+
+// TestResolveIPAddrLiteralFamily covers the literal branch, which never reaches
+// DNS: the requested family must still reject the other family, shaped like
+// net.Resolve*'s own error.
+func TestResolveIPAddrLiteralFamily(t *testing.T) {
+	base, err := stdnet.NewNet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	network, cancel := newPeerConnectionResolveNet(context.Background(), base, nil, 0)
+	defer cancel()
+
+	cases := []struct {
+		network string
+		host    string
+		wantErr bool
+		wantV4  bool
+	}{
+		{network: "udp4", host: "::1", wantErr: true},
+		{network: "tcp4", host: "2001:db8::1", wantErr: true},
+		{network: "udp6", host: "1.2.3.4", wantErr: true},
+		{network: "udp", host: "::1"},
+		{network: "udp", host: "1.2.3.4", wantV4: true},
+		{network: "udp4", host: "::ffff:1.2.3.4", wantV4: true},
+		{network: "udp6", host: "::ffff:1.2.3.4", wantErr: true},
+	}
+	for _, testCase := range cases {
+		address, resolveErr := network.ResolveIPAddr(testCase.network, testCase.host)
+		if testCase.wantErr {
+			var addrErr *net.AddrError
+			if !errors.As(resolveErr, &addrErr) {
+				t.Fatalf("%s %q: error = %v, want *net.AddrError", testCase.network, testCase.host, resolveErr)
+			}
+			if addrErr.Err != "no suitable address found" {
+				t.Fatalf("%s %q: AddrError.Err = %q", testCase.network, testCase.host, addrErr.Err)
+			}
+			continue
+		}
+		if resolveErr != nil {
+			t.Fatalf("%s %q: unexpected error %v", testCase.network, testCase.host, resolveErr)
+		}
+		if gotV4 := address.IP.To4() != nil; gotV4 != testCase.wantV4 {
+			t.Fatalf("%s %q: IPv4 = %v, want %v (%v)", testCase.network, testCase.host, gotV4, testCase.wantV4, address.IP)
+		}
+	}
+
+	// The UDP entry point keeps the same family check after splitting the port.
+	if _, err := network.ResolveUDPAddr("udp4", "[::ffff:1.2.3.4]:3478"); err != nil {
+		t.Fatalf("mapped literal under udp4: %v", err)
+	}
+	if _, err := network.ResolveUDPAddr("udp4", "[::1]:3478"); err == nil {
+		t.Fatal("udp4 accepted an IPv6 literal through ResolveUDPAddr")
+	}
+}
+
+// TestResolveIPAddrPrefersIPv4ForDualStackLookup closes the wiring gap for F6:
+// it drives the order a dual-stack name can return (AAAA first) through the
+// real entry point, which a fake DNS server cannot stage deterministically
+// because LookupNetIP sorts answers by RFC 6724.
+func TestResolveIPAddrPrefersIPv4ForDualStackLookup(t *testing.T) {
+	base, err := stdnet.NewNet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	v6 := netip.MustParseAddr("2001:db8::1")
+	v4 := netip.MustParseAddr("192.0.2.10")
+	for _, testCase := range []struct {
+		name      string
+		addresses []netip.Addr
+		wantV4    bool
+	}{
+		{name: "dual stack prefers v4", addresses: []netip.Addr{v6, v4}, wantV4: true},
+		{name: "v6 only keeps the first answer", addresses: []netip.Addr{v6}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			network, cancel := newPeerConnectionResolveNet(context.Background(), base, nil, 0)
+			defer cancel()
+			lookups := 0
+			network.lookupNetIP = func(_ context.Context, lookupNetwork string, host string) ([]netip.Addr, error) {
+				lookups++
+				if lookupNetwork != "ip" {
+					t.Fatalf("lookup network = %q, want ip", lookupNetwork)
+				}
+				if host != "stun.example" {
+					t.Fatalf("lookup host = %q", host)
+				}
+				return testCase.addresses, nil
+			}
+			address, resolveErr := network.ResolveUDPAddr("udp", "stun.example:3478")
+			if resolveErr != nil {
+				t.Fatal(resolveErr)
+			}
+			if address.Port != 3478 {
+				t.Fatalf("port = %d, want 3478", address.Port)
+			}
+			if gotV4 := address.IP.To4() != nil; gotV4 != testCase.wantV4 {
+				t.Fatalf("IPv4 = %v, want %v (%v)", gotV4, testCase.wantV4, address.IP)
+			}
+			if lookups != 1 {
+				t.Fatalf("lookups = %d, want 1", lookups)
+			}
+		})
+	}
+}
+
+// TestResolveIPAddrLookupNetwork pins the network mapping every lookup passes
+// to the resolver, so a family-filtered endpoint cannot ask for the wrong one.
+func TestResolveIPAddrLookupNetwork(t *testing.T) {
+	base, err := stdnet.NewNet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		network string
+		want    string
+	}{
+		{"ip", "ip"}, {"udp", "ip"}, {"tcp", "ip"},
+		{"ip4", "ip4"}, {"udp4", "ip4"}, {"tcp4", "ip4"},
+		{"ip6", "ip6"}, {"udp6", "ip6"}, {"tcp6", "ip6"},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.network, func(t *testing.T) {
+			network, cancel := newPeerConnectionResolveNet(context.Background(), base, nil, 0)
+			defer cancel()
+			got := ""
+			network.lookupNetIP = func(_ context.Context, lookupNetwork string, _ string) ([]netip.Addr, error) {
+				got = lookupNetwork
+				return []netip.Addr{netip.MustParseAddr("192.0.2.10")}, nil
+			}
+			if _, err := network.ResolveIPAddr(testCase.network, "host.example"); err != nil {
+				t.Fatal(err)
+			}
+			if got != testCase.want {
+				t.Fatalf("lookup network = %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}
+
+// TestResolveIPAddrPreservesLiteralZone keeps the literal branch zoned and out
+// of DNS, which is what link-local ICE hosts depend on.
+func TestResolveIPAddrPreservesLiteralZone(t *testing.T) {
+	base, err := stdnet.NewNet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	network, cancel := newPeerConnectionResolveNet(context.Background(), base, nil, 0)
+	defer cancel()
+	network.lookupNetIP = func(context.Context, string, string) ([]netip.Addr, error) {
+		t.Fatal("a literal reached DNS")
+		return nil, nil
+	}
+	address, err := network.ResolveIPAddr("udp6", "fe80::1%eth0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if address.Zone != "eth0" {
+		t.Fatalf("zone = %q, want eth0", address.Zone)
+	}
+	if address.IP.To4() != nil {
+		t.Fatalf("link-local literal resolved as IPv4: %v", address.IP)
+	}
+}
+
+// TestResolveIPAddrErrorPaths covers the two refusal branches and lookup error
+// propagation that the happy-path tables cannot reach.
+func TestResolveIPAddrErrorPaths(t *testing.T) {
+	base, err := stdnet.NewNet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	network, cancel := newPeerConnectionResolveNet(context.Background(), base, nil, 0)
+	defer cancel()
+
+	var unknown net.UnknownNetworkError
+	if _, err := network.ResolveIPAddr("udp9", "host.example"); !errors.As(err, &unknown) {
+		t.Fatalf("unknown network error = %v, want net.UnknownNetworkError", err)
+	}
+
+	network.lookupNetIP = func(context.Context, string, string) ([]netip.Addr, error) {
+		return nil, nil
+	}
+	if _, err := network.ResolveIPAddr("udp", "empty.example"); err == nil || !strings.Contains(err.Error(), "no addresses") {
+		t.Fatalf("empty lookup error = %v, want a no-addresses error", err)
+	}
+
+	sentinel := errors.New("synthetic lookup failure")
+	network.lookupNetIP = func(context.Context, string, string) ([]netip.Addr, error) {
+		return nil, sentinel
+	}
+	if _, err := network.ResolveIPAddr("udp", "fail.example"); !errors.Is(err, sentinel) {
+		t.Fatalf("lookup failure = %v, want the resolver error", err)
 	}
 }
 
