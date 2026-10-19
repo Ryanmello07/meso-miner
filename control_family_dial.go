@@ -281,6 +281,13 @@ func redialWithoutAContradictedDemotion(
 	if ControlIpFamilyPolicy() != IpFamilyAuto {
 		return nil, dialErr
 	}
+	// Only a path failure on the narrowed family contradicts the demotion. A
+	// cancellation, an expired deadline, DNS, or a refusal says nothing about
+	// the family, and clearing the entry would send the next dial down the
+	// blackholed path for the full handshake bound again.
+	if ctx.Err() != nil || !isPathFailure(dialErr) {
+		return nil, dialErr
+	}
 	demoted := controlFamilyDemotedFamily()
 	if demoted == 0 {
 		return nil, dialErr

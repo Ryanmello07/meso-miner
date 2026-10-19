@@ -476,7 +476,7 @@ func TestFamilyFallbackUndoesADemotionThatCannotConnect(t *testing.T) {
 		if resolved == "tcp4" {
 			// the device has no ipv4 route at all
 			return nil, &net.OpError{
-				Op: "dial", Net: "tcp4", Err: errors.New("connect: network is unreachable"),
+				Op: "dial", Net: "tcp4", Err: syscall.ENETUNREACH,
 			}
 		}
 		return &stubConn{remote: &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 443}}, nil
