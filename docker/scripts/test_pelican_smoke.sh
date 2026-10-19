@@ -62,7 +62,7 @@ JP=$!; sleep 4; kill $JP 2>/dev/null; wait $JP 2>/dev/null
 JWTLOG="$(cat "$tmp/jwt.log")"; CALLS="$(cat "$tmp/calls.log" 2>/dev/null)"
 
 t "jwt mode calls auth-provide with code" grep -q "FAKE-CALL: auth-provide code-test" <<<"${JWTLOG}${CALLS}"
-t "jwt mode logged running build version" grep -q "Running UrNetwork build vv.test"   <<<"$JWTLOG"
+t "jwt mode logged running build version" grep -q "Running UrNetwork build v.test"   <<<"$JWTLOG"
 
 # --- (3) stable/user-pass mode ---
 rm -f "$tmp/calls.log"

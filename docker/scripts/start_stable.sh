@@ -214,7 +214,7 @@ func_start_provider(){
         log "[INFO] Starting UrNetwork (attempt #$((failures+1)))"
         PROVIDER_BIN="$APP_DIR/urnetwork_${A_SYS_ARCH}_stable"
 		BIN_VER="$($PROVIDER_BIN --version)"
-		log "[INFO] Running UrNetwork build v${BIN_VER}"
+		log "[INFO] Running UrNetwork build ${BIN_VER}"
         # Capture the real exit code (set -e safe; avoids the `|| true` that pinned code to 0)
         if "$PROVIDER_BIN" provide; then code=0; else code=$?; fi
         if [ "$code" -eq 0 ]; then

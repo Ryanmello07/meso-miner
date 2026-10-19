@@ -134,7 +134,7 @@ func_start_provider(){
     JWT_TOKEN="${1:-}"
     PROVIDER_BIN="$APP_DIR/urnetwork_${A_SYS_ARCH}_stable"
     BIN_VER="$($PROVIDER_BIN --version 2>/dev/null || echo "dev")"
-    log "[INFO] Running UrNetwork build v${BIN_VER}"
+    log "[INFO] Running UrNetwork build ${BIN_VER}"
 
     # Priority 1: Existing session file (Shared Volume / Watchtower Path)
     if [ -s "$JWT_FILE" ]; then
