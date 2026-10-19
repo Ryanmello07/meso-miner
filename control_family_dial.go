@@ -138,7 +138,7 @@ func dialControlTlsWithFamilyFallback(
 	// read: it is recorded (subject to the same guards) and not retried.
 	if pinnedFamily != 0 {
 		if isPathTimeout(err) && failed != 0 && ctx.Err() == nil && !isIPLiteralDialAddr(addr) {
-			controlFamilyDemote(failed)
+			recordControlFamilyStrike(failed, err)
 		}
 		return nil, err
 	}
@@ -167,7 +167,7 @@ func dialControlTlsWithFamilyFallback(
 	if ctx.Err() != nil {
 		return nil, err
 	}
-	if !controlFamilyDemote(failed) {
+	if !recordControlFamilyStrike(failed, err) {
 		// refused: the other family is not usable on this device, so there is
 		// nothing to retry onto
 		return nil, err

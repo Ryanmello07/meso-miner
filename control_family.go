@@ -193,6 +193,10 @@ func init() {
 // controlFamilyDemote records that `family` connected and then failed. It
 // reports whether the demotion took.
 //
+// This is the raw ledger write, kept callable for the policy's own tests. A
+// dial path must reach it through recordControlFamilyStrike, which refuses the
+// evidence a proxied dial cannot supply.
+//
 // It is REFUSED when the other family is not usable on this device. On an
 // IPv6-only network with no CLAT there is no IPv4 to fall back to, and
 // demoting IPv6 there would take the user from a slow control plane to no
@@ -243,6 +247,37 @@ func controlFamilyDemote(family int) bool {
 	loggerOrDefault(nil).Infof(
 		"[family]demote family=%d strikes=%d for=%s\n", family, strikes, backoff)
 	return true
+}
+
+// recordControlFamilyStrike is the ONLY sanctioned way a finished control dial
+// turns into a strike against the family that carried it. It refuses evidence
+// that cannot be about this host's address family:
+//
+//   - a proxied dial, whatever it was: the connection it observed belonged to
+//     the proxy (see proxyDialError).
+//   - anything that is not the post-connect timeout that proves a path
+//     blackholed. A refusal, a reset, a certificate failure or an ALPN mismatch
+//     mean the packets arrived and something at the far end objected, which says
+//     nothing about the family.
+//
+// controlFamilyDemote stays the raw recorder, so the ported tests of the policy
+// itself keep working. New callers, including the control-family dial helper
+// when the 34 line ports it, go through here.
+func recordControlFamilyStrike(family int, err error) bool {
+	if err == nil {
+		return false
+	}
+	var proxyErr *proxyDialError
+	if errors.As(err, &proxyErr) {
+		loggerOrDefault(nil).Infof(
+			"[family]no strike family=%d (dial went through proxy[%d])\n",
+			family, proxyErr.proxyIndex())
+		return false
+	}
+	if !isPathTimeout(err) {
+		return false
+	}
+	return controlFamilyDemote(family)
 }
 
 // controlFamilyUndemote drops any demotion of `family`, strike count included,
