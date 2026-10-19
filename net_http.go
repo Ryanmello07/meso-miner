@@ -279,9 +279,9 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 			normalTlsConfig := newClientTlsConfig(settings.TlsConfig, nil)
 			// the handshake metric label follows the strategy's transport, which
 			// the unified dial no longer branches on
-			tlsPath := tlsPathNormal
+			handshakePath := tlsPathNormal
 			if settings.ProxySettings != nil {
-				tlsPath = tlsPathNormalProxy
+				handshakePath = tlsPathNormalProxy
 			}
 			var tlsDialContext DialTlsContextFunction
 			tlsDialContext = func(ctx context.Context, network string, addr string) (net.Conn, error) {
@@ -308,7 +308,7 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 						defer tlsCancel()
 						err = tlsConn.HandshakeContext(tlsCtx)
 					}()
-					noteTlsHandshake(tlsPath, host, tlsConn.ConnectionState(), err)
+					noteTlsHandshake(handshakePath, host, tlsConn.ConnectionState(), err)
 					if err != nil {
 						tlsConn.Close()
 						return nil, err
