@@ -186,9 +186,24 @@ STUB_EOF
         echo "log() { :; }"
         echo "sleep() { :; }"
         echo "pgrep() { return 1; }"
+        case "$script_file" in
+            start_stable.sh)  _mode=stable;  _flavor=stable ;;
+            start_nightly.sh) _mode=nightly; _flavor=nightly ;;
+            start_jwt.sh)     _mode=jwt;     _flavor=stable ;;
+            *)                _mode=stable;  _flavor=stable ;;
+        esac
+        echo "PROVIDER_MODE='$_mode'"
+        echo "PROVIDER_FLAVOR='$_flavor'"
         echo ". '$HELPER'"
-        extract_func "$REPO/docker/scripts/$script_file" func_start_provider
-        echo "func_start_provider"
+        case "$script_file" in
+            start_stable.sh)  _fn=func_start_provider_stable ;;
+            start_nightly.sh) _fn=func_start_provider_nightly ;;
+            start_jwt.sh)     _fn=func_start_provider_jwt ;;
+            *)                _fn=func_start_provider ;;
+        esac
+        extract_func "$REPO/docker/scripts/provider_common.sh" resolve_provider_env_args
+        extract_func "$REPO/docker/scripts/provider_common.sh" "$_fn"
+        echo "$_fn"
     } > "$runner"
 
     env -i PATH="$PATH" HOME="$test_dir/home" TEST_DIR="$test_dir" "$@" \

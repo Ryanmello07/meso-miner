@@ -49,7 +49,6 @@ fi
 if [ "$PROVIDER_MODE" = "nightly" ]; then
     # shellcheck source=update_verify.sh
     . "$SCRIPT_DIR/update_verify.sh"
-    API_URL="https://api.github.com/repos/full-bars/urnetwork-3.23-fix/releases/latest"
     API_ROOT="https://api.github.com/repos/full-bars/urnetwork-3.23-fix"
     VERSION_FILE="$APP_DIR/version.txt"
     UPDATE_TIME="12:00"

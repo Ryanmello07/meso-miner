@@ -267,7 +267,7 @@ t "paging walk gives up after max pages without an eligible release" \
 
 # Every update path must use the paged selector, never the single
 # /releases/latest endpoint.
-for f in start_update.sh urnet-tools.sh start_nightly.sh; do
+for f in start_update.sh urnet-tools.sh provider_common.sh; do
     grep -q "/releases/latest" "$HERE/$f"
     t "$f does not query the latest-release endpoint" test $? -ne 0
     t "$f uses upd_fetch_stable_release_json" grep -q "upd_fetch_stable_release_json" "$HERE/$f"
