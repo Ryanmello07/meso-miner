@@ -24,6 +24,11 @@ import (
 //	        relay and never from the host; a proxy that cannot relay UDP stays on
 //	        H1 (see proxy_udp_check.go).
 //	all     direct, plus the automatic fallbacks for every proxy.
+//	auto    direct, plus the automatic fallbacks for a number of proxies chosen
+//	        from memory pressure, from none up to about 64 (see h3_auto.go).
+//	        The set widens a few proxies at a time while the box is calm and
+//	        sheds at the first pressure tier. It never turns on the beside-H1
+//	        auxiliary; that stays what `on` means.
 //
 // The setting is read when an identity builds its platform transport (see
 // platformTransportSettingsFor), so a change reaches an identity at its next
@@ -36,6 +41,7 @@ const (
 	h3ModeOn
 	h3ModeTop
 	h3ModeAll
+	h3ModeAuto
 )
 
 const (
@@ -43,6 +49,7 @@ const (
 	h3ModeDirectName = "direct"
 	h3ModeOnName     = "on"
 	h3ModeAllName    = "all"
+	h3ModeAutoName   = "auto"
 )
 
 // h3Setting is a parsed h3 value: the mode, plus the proxy count for h3ModeTop.
@@ -61,6 +68,8 @@ func (s h3Setting) String() string {
 		return strconv.Itoa(s.Cap)
 	case h3ModeAll:
 		return h3ModeAllName
+	case h3ModeAuto:
+		return h3ModeAutoName
 	default:
 		return h3ModeDirectName
 	}
@@ -69,7 +78,7 @@ func (s h3Setting) String() string {
 // proxiesMayUseTransports is whether any proxied identity can be given the
 // fallback transports under this setting.
 func (s h3Setting) proxiesMayUseTransports() bool {
-	return s.Mode == h3ModeTop || s.Mode == h3ModeAll
+	return s.Mode == h3ModeTop || s.Mode == h3ModeAll || s.Mode == h3ModeAuto
 }
 
 // directPolicy is the mode as far as the direct identity is concerned: a count
@@ -95,11 +104,13 @@ func parseH3Mode(value string) (h3Setting, error) {
 		return h3Setting{Mode: h3ModeOn}, nil
 	case h3ModeAllName:
 		return h3Setting{Mode: h3ModeAll}, nil
+	case h3ModeAutoName:
+		return h3Setting{Mode: h3ModeAuto}, nil
 	}
 	if n, err := strconv.Atoi(v); err == nil && 0 < n && strconv.Itoa(n) == v {
 		return h3Setting{Mode: h3ModeTop, Cap: n}, nil
 	}
-	return h3Setting{Mode: h3ModeDirect}, fmt.Errorf("h3: must be off, direct, on, a positive proxy count, or all (got %q)", value)
+	return h3Setting{Mode: h3ModeDirect}, fmt.Errorf("h3: must be off, direct, on, auto, a positive proxy count, or all (got %q)", value)
 }
 
 // resolveH3Mode is the setting in force: the h3 control key when it is set and

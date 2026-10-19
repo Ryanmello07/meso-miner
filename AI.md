@@ -120,7 +120,7 @@ urnet-tools uninstall              # full removal
 # Experimental
 urnet-tools hot-restart on|off     # client JWT reuse (default off)
 urnet-tools fast-auth on|off       # bypass auth rate limiter
-urnet-tools set h3 off|direct|on|N|all # which identities may use H3 (QUIC) and the DNS carriers (default: direct)
+urnet-tools set h3 off|direct|on|auto|N|all # which identities may use H3 (QUIC) and the DNS carriers; auto = memory-sized 0..64 (default: direct)
 urnet-tools set h3-datagram on|off # offer QUIC DATAGRAM on the H3 connection (default on)
 urnet-tools set ip-version dual|ipv4|ipv6|legacy # IP families for the direct identity (default dual)
 urnet-tools set h1-plus on|off     # H1+ carrier upgrade on new H1 dials (default on)

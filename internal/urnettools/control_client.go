@@ -222,10 +222,10 @@ func validateControlValue(canonicalKey, value string) error {
 	case "h3":
 		// must match parseH3Mode in the provider: a positive proxy count or a word
 		switch v := strings.ToLower(strings.TrimSpace(value)); v {
-		case "off", "direct", "on", "all":
+		case "off", "direct", "on", "auto", "all":
 		default:
 			if n, err := strconv.Atoi(v); err != nil || n < 0 || strconv.Itoa(n) != v {
-				return fmt.Errorf("h3: must be off, direct, on, a positive proxy count, or all (got %q)", value)
+				return fmt.Errorf("h3: must be off, direct, on, auto, a positive proxy count, or all (got %q)", value)
 			}
 		}
 	case "oom_cap":

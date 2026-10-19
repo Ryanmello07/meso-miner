@@ -88,6 +88,16 @@ func TestH3ProxyEligibleByMode(t *testing.T) {
 	if h3ProxyEligible(h3Setting{Mode: h3ModeTop, Cap: 2}, key) {
 		t.Fatal("a ranking for another count must not be used")
 	}
+	// auto admits exactly its own ranking, whatever the stored cap says
+	auto := h3Setting{Mode: h3ModeAuto}
+	h3RankingValue.Store(&h3Ranking{cap: 1, auto: true, keys: map[string]bool{key: true}})
+	if !h3ProxyEligible(auto, key) || h3ProxyEligible(auto, candidates[1].Key()) {
+		t.Fatal("auto must admit exactly the auto-ranked proxies")
+	}
+	h3RankingValue.Store(&h3Ranking{cap: 1, keys: map[string]bool{key: true}})
+	if h3ProxyEligible(auto, key) {
+		t.Fatal("a count ranking must not admit proxies under auto")
+	}
 }
 
 func TestRelaunchListFollowsEligibility(t *testing.T) {

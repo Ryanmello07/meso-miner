@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- **`h3 auto`: the H3 fallback set sizes itself to memory**: a new value for the `h3` control key. The direct identity keeps the `direct` behavior, and the fallback transports go to a number of proxies chosen from memory pressure, from none up to 64. The set widens 4 proxies per 30 s sample while memory is calm, holds in a hysteresis band, and sheds to 16 or to direct-only as pressure rises. Capacity comes from the effective memory limit (one proxy per 64 MiB, none below 2 GiB), not from host free RAM. It is off by default: without the key nothing changes. `urnet-tools set h3 auto`.
+
 ## [v3.23.0-fix.33.0]
 
 ### Added
