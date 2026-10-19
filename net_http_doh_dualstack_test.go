@@ -1,5 +1,25 @@
 package connect
 
+// net_http_doh_dualstack_test.go — the DoH resolver's address-family policy
+// and its round-robin server choice.
+//
+// Ported from connect v0.0.0-20261017075543-c8d8cdf536a8
+// (net_http_doh_dualstack_test.go), adapted to this tree's DohServer type (a
+// url plus the query format it speaks, not a bare url string).
+//
+// The test this replaces, TestDnsResolverAddrsOmitIpv6WithoutHostIpv6, pinned
+// the older `if !hostHasGlobalIpv6() { ipv6 = nil }` filter: a v6 resolver was
+// never offered on a host whose one-shot v6 probe failed. That filter is gone
+// (see dnsResolverAddrs): the family a lookup needs is decided per query by the
+// record type (dnsLookupNetwork), and a family the path lacks costs one
+// attempt out of an operator-interleaved list rather than suppressing the other
+// family for the life of the process.
+//
+// The PIN's launch-wave grouping (dohServerSiblings/dohLaunchWaves) is NOT
+// ported: this tree's fan-out is the stagger in dohQueryWithClientResult, which
+// has no per-operator wave concept. The operator pairing it consumes is ported
+// (familySiblings), so a later port can build on it.
+
 import (
 	"net"
 	"net/url"

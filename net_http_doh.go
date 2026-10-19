@@ -344,9 +344,51 @@ func dnsResolverAddrs(settings *DohSettings, remote bool, network string) []stri
 		}
 		return ipv6
 	default:
-		addrs := append([]string{}, ipv4...)
-		return append(addrs, ipv6...)
+		// both families, operator-paired and so interleaved v4 first: the
+		// plain-dns dial hook walks this list one entry per resolver attempt
+		// (see NewDohCache), so two attempts cover both families whichever
+		// one the path lacks.
+		//
+		// This replaces the older `if !hostHasGlobalIpv6() { ipv6 = nil }`
+		// filter. That probe answered a question about the HOST from a
+		// one-shot dial that does not re-run across a wifi/cellular switch,
+		// and it could only ever suppress the v6 list -- never the v4 one --
+		// so on a host whose v6 came up after the probe ran, v6 resolvers
+		// stayed unreachable for the life of the process. The family a
+		// lookup needs is decided per query by the record type instead (see
+		// dnsLookupNetwork), and a family the path lacks now costs one
+		// attempt rather than suppressing the other family for everyone.
+		return dualStackList(ipv4, ipv6, knownDnsServerPairs)
 	}
+}
+
+// dnsLookupNetwork is the net.Resolver network for a plain-dns lookup of one
+// record type: an A query must look up ip4 and an AAAA query ip6, whatever the
+// cache-wide IpVersion says, or the answer of one family would be cached under
+// the other's key. The second result is false when IpVersion excludes the
+// record type's family, in which case the lookup is skipped.
+func dnsLookupNetwork(recordType string, ipVersion int) (string, bool) {
+	switch recordType {
+	case "A":
+		return "ip4", ipVersion != 6
+	case "AAAA":
+		return "ip6", ipVersion != 4
+	default:
+		return "", false
+	}
+}
+
+// dnsResolverAddrPick is the server ONE resolver attempt dials: the next entry
+// in the family-filtered list, rotated per attempt. Round robin rather than a
+// random pick, so a family the path lacks costs one attempt each time instead
+// of a fresh coin flip -- over an operator-paired list a random choice can
+// land on the same unreachable family on every retry of the same name, and
+// each miss costs the caller a full resolver timeout.
+//
+// `next` is per cache and per resolver (remote/local), so concurrent lookups
+// spread across the configured servers instead of all pinning the first.
+func dnsResolverAddrPick(addrs []string, next *atomic.Uint64) string {
+	return addrs[int((next.Add(1)-1)%uint64(len(addrs)))]
 }
 
 func netIPAddr(ip net.IP) (netip.Addr, bool) {
@@ -367,6 +409,13 @@ func authoritativeDnsMiss(err error) bool {
 }
 
 func NewDohCache(settings *DohSettings) *DohCache {
+	// each resolver attempt takes the next server in the interleaved list
+	// (dnsResolverAddrs), so a family the path lacks costs ONE attempt instead
+	// of a coin flip per attempt: a random pick over an operator-paired list
+	// can land on the same unreachable family every time a name is retried,
+	// and the caller pays a full resolver timeout for each miss.
+	var remoteDnsNext atomic.Uint64
+	var localDnsNext atomic.Uint64
 	remoteResolver := &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network string, addr string) (net.Conn, error) {
@@ -378,7 +427,7 @@ func NewDohCache(settings *DohSettings) *DohCache {
 			if len(localAddrs) == 0 {
 				return nil, fmt.Errorf("no remote DNS resolvers configured")
 			}
-			localAddr := localAddrs[mathrand.Intn(len(localAddrs))]
+			localAddr := dnsResolverAddrPick(localAddrs, &remoteDnsNext)
 			addr = net.JoinHostPort(localAddr, port)
 			return settings.DialContext(ctx, network, addr)
 		},
@@ -396,7 +445,7 @@ func NewDohCache(settings *DohSettings) *DohCache {
 			if len(localAddrs) == 0 {
 				return nil, fmt.Errorf("no local DNS resolvers configured")
 			}
-			localAddr := localAddrs[mathrand.Intn(len(localAddrs))]
+			localAddr := dnsResolverAddrPick(localAddrs, &localDnsNext)
 			addr = net.JoinHostPort(localAddr, port)
 			return netDialer.DialContext(ctx, network, addr)
 		},
@@ -672,9 +721,17 @@ func (self *DohCache) resolve(ctx context.Context, q DohKey, now time.Time) ([]n
 		}
 	}
 
-	if len(addrExpirations) == 0 && self.settings.DnsResolverSettings.EnableRemoteDns {
+	// the plain-dns fallback is the only step that carries a family of its own:
+	// an A query must look up ip4 and an AAAA query ip6, whatever the
+	// cache-wide IpVersion says, or one family's answer would be cached under
+	// the other's key. A record type with no address lookup (and a family
+	// IpVersion excludes) skips the fallback entirely rather than asking the
+	// resolver for an address the caller never wanted.
+	lookupNetwork, lookupFamilyEnabled := dnsLookupNetwork(q.RecordType, self.settings.IpVersion)
+
+	if len(addrExpirations) == 0 && lookupFamilyEnabled && self.settings.DnsResolverSettings.EnableRemoteDns {
 		// try the remote resolver
-		resolvedIps, err := self.remoteResolver.LookupIP(ctx, self.settings.ResolverIp(), q.Domain)
+		resolvedIps, err := self.remoteResolver.LookupIP(ctx, lookupNetwork, q.Domain)
 		if err == nil {
 			found := false
 			for _, ip := range resolvedIps {
@@ -702,9 +759,9 @@ func (self *DohCache) resolve(ctx context.Context, q DohKey, now time.Time) ([]n
 		}
 	}
 
-	if len(addrExpirations) == 0 && self.settings.DnsResolverSettings.EnableLocalDns {
+	if len(addrExpirations) == 0 && lookupFamilyEnabled && self.settings.DnsResolverSettings.EnableLocalDns {
 		// try the local resolver
-		resolvedIps, err := self.localResolver.LookupIP(ctx, self.settings.ResolverIp(), q.Domain)
+		resolvedIps, err := self.localResolver.LookupIP(ctx, lookupNetwork, q.Domain)
 		if err == nil {
 			found := false
 			for _, ip := range resolvedIps {
@@ -783,6 +840,140 @@ func DohQueryWithClient(
 	return dohQueryWithClientResult(ctx, httpClient, nil, remoteDohServers(settings, ipVersion), ipVersion, recordType, settings, domains...).AddrTtls
 }
 
+// knownDohUrlPairs are the v4/v6 endpoint pairs of the default DoH operators,
+// matched on the urls this tree ships (note the Google pair's `/resolve` path).
+// A pair is what "race each operator's v4 and v6 endpoint" means for a url the
+// defaults ship; a url outside this table pairs by index only with another url
+// outside it (see familySiblings).
+var knownDohUrlPairs = [][2]string{
+	{"https://1.1.1.1/dns-query", "https://[2606:4700:4700::1111]/dns-query"},
+	{"https://8.8.8.8/resolve", "https://[2001:4860:4860::8888]/resolve"},
+	{"https://9.9.9.9/dns-query", "https://[2620:fe::fe]/dns-query"},
+	{"https://208.67.222.222/dns-query", "https://[2620:119:35::35]/dns-query"},
+}
+
+// knownDnsServerPairs are the v4/v6 pairs of the default and regional plain
+// dns operators, the same rule for the plain-dns lists.
+var knownDnsServerPairs = [][2]string{
+	{"1.1.1.1", "2606:4700:4700::1111"},
+	{"1.0.0.1", "2606:4700:4700::1001"},
+	{"8.8.8.8", "2001:4860:4860::8888"},
+	{"8.8.4.4", "2001:4860:4860::8844"},
+	{"9.9.9.9", "2620:fe::fe"},
+	{"149.112.112.112", "2620:fe::9"},
+	{"208.67.222.222", "2620:119:35::35"},
+	{"208.67.220.220", "2620:119:53::53"},
+	{"223.5.5.5", "2400:3200::1"},
+	{"119.29.29.29", "2402:4e00::"},
+	{"77.88.8.8", "2a02:6b8::feed:0ff"},
+}
+
+// familySiblings pairs the entries of a v4 list and a v6 list by operator:
+// a known pair from the table when both members are configured, else by
+// list index for entries that are outside the table on both sides. The
+// result maps each paired entry to its sibling in both directions.
+//
+// The table rule is what lets "start from the defaults and replace the v4
+// list" keep meaning "use only these servers": the default v6 entries are
+// known operators whose v4 partners are then absent, so they pair with
+// nothing and dualStackList leaves them out, instead of index-pairing a
+// caller's private server with Cloudflare's v6 endpoint.
+func familySiblings(ipv4 []string, ipv6 []string, known [][2]string) map[string]string {
+	siblings := map[string]string{}
+	knownOf := map[string]string{}
+	for _, pair := range known {
+		knownOf[pair[0]] = pair[1]
+		knownOf[pair[1]] = pair[0]
+	}
+	present6 := map[string]bool{}
+	for _, entry := range ipv6 {
+		present6[entry] = true
+	}
+	unknown4 := []string{}
+	for _, entry := range ipv4 {
+		if partner, ok := knownOf[entry]; ok {
+			if present6[partner] && partner != entry {
+				siblings[entry] = partner
+				siblings[partner] = entry
+			}
+			continue
+		}
+		unknown4 = append(unknown4, entry)
+	}
+	unknown6 := []string{}
+	for _, entry := range ipv6 {
+		if _, ok := knownOf[entry]; !ok {
+			unknown6 = append(unknown6, entry)
+		}
+	}
+	for i := 0; i < min(len(unknown4), len(unknown6)); i++ {
+		if unknown4[i] == "" || unknown6[i] == "" || unknown4[i] == unknown6[i] {
+			continue
+		}
+		siblings[unknown4[i]] = unknown6[i]
+		siblings[unknown6[i]] = unknown4[i]
+	}
+	return siblings
+}
+
+// dualStackList is the list a family-agnostic (IpVersion 0) consumer walks:
+// every v4 entry in order, each followed by its v6 sibling, so the families
+// interleave by operator.
+//
+// Two kinds of leftover v6 entry are treated differently, and the difference
+// is what makes "start from the defaults and replace the v4 list" behave:
+//
+//   - A KNOWN-TABLE entry whose v4 partner is absent is left out. Those are
+//     the shipped defaults; a caller who replaced the v4 list means "use my
+//     servers", and pulling Cloudflare's v6 endpoint back in would send real
+//     queries to an operator they just removed.
+//   - An entry OUTSIDE the table is kept, at the end. Those can only have come
+//     from the caller, so dropping one would ignore a server they explicitly
+//     configured -- which is what happened to every custom v6 endpoint past
+//     the shorter list's length, since familySiblings can only index-pair
+//     min(len4, len6) of them.
+func dualStackList(ipv4 []string, ipv6 []string, known [][2]string) []string {
+	if len(ipv4) == 0 {
+		return append([]string{}, ipv6...)
+	}
+	inTable := make(map[string]bool, 2*len(known))
+	for _, pair := range known {
+		inTable[pair[0]] = true
+		inTable[pair[1]] = true
+	}
+	siblings := familySiblings(ipv4, ipv6, known)
+	list := make([]string, 0, len(ipv4)+len(ipv6))
+	emitted := make(map[string]bool, len(ipv4)+len(ipv6))
+	emit := func(entry string) {
+		if emitted[entry] {
+			return
+		}
+		emitted[entry] = true
+		list = append(list, entry)
+	}
+	for _, entry := range ipv4 {
+		emit(entry)
+		if sibling, ok := siblings[entry]; ok {
+			emit(sibling)
+		}
+	}
+	for _, entry := range ipv6 {
+		if !inTable[entry] {
+			emit(entry)
+		}
+	}
+	return list
+}
+
+// dohServerUrls is the url view of a server list, for the pairing helpers.
+func dohServerUrls(servers []DohServer) []string {
+	urls := make([]string, len(servers))
+	for i, server := range servers {
+		urls[i] = server.Url
+	}
+	return urls
+}
+
 func dohServersFor(ipv4 []DohServer, ipv6 []DohServer, ipVersion int) []DohServer {
 	switch ipVersion {
 	case 4:
@@ -790,8 +981,26 @@ func dohServersFor(ipv4 []DohServer, ipv6 []DohServer, ipVersion int) []DohServe
 	case 6:
 		return ipv6
 	default:
-		servers := append([]DohServer{}, ipv4...)
-		return append(servers, ipv6...)
+		// both families, operator-paired (see dualStackList): each v4 endpoint
+		// followed by its operator's v6 endpoint, so a fan-out that launches
+		// one endpoint per operator still reaches both families in its first
+		// passes instead of walking every v4 endpoint before any v6 one. A
+		// server configured in both lists keeps its v4 entry, which is the
+		// first appearance.
+		byUrl := make(map[string]DohServer, len(ipv4)+len(ipv6))
+		for _, server := range ipv6 {
+			byUrl[server.Url] = server
+		}
+		for _, server := range ipv4 {
+			byUrl[server.Url] = server
+		}
+		servers := make([]DohServer, 0, len(ipv4)+len(ipv6))
+		for _, url := range dualStackList(dohServerUrls(ipv4), dohServerUrls(ipv6), knownDohUrlPairs) {
+			if server, ok := byUrl[url]; ok {
+				servers = append(servers, server)
+			}
+		}
+		return servers
 	}
 }
 

@@ -231,38 +231,28 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 	if settings.EnableNormal {
 		// TODO ECH support
 		if settings.ExposeServerHostNames && settings.ExposeServerIps {
-			netDialer := settings.NetDialer()
-
+			// Every dial takes the explicit path below -- proxy or not --
+			// instead of a raw tls.Dialer. The dial runs through
+			// ConnectSettings.DialContext, which applies the address-family
+			// policy and routes through ProxySettings when one is configured;
+			// the tls.Dialer shortcut bypassed both, so a strategy raced a
+			// forced dialer against an unforced one, and the fallback below
+			// never saw the tls handshake it exists to classify.
+			//
+			// The cost is that ConnectTimeout and TlsTimeout are now separate
+			// budgets rather than one deadline shared across connect and
+			// handshake. That is the intended behavior, and it applies to every
+			// dial, not only forced ones.
 			var tlsDialContext DialTlsContextFunction
-			if settings.ProxySettings != nil {
-				tlsDialContext = func(ctx context.Context, network string, addr string) (net.Conn, error) {
-					proxyDialContext := settings.ProxySettings.NewDialContext(
-						ctx,
-						netDialer,
-					)
-
-					// this rest of this function is adapted from `tls.dial` to use a proxy dialer
-
-					conn, err := proxyDialContext(ctx, network, addr)
-					if err != nil {
-						return nil, err
-					}
-
-					if netDialer.Timeout != 0 {
-						var cancel context.CancelFunc
-						ctx, cancel = context.WithTimeout(ctx, netDialer.Timeout)
-						defer cancel()
-					}
-
-					if !netDialer.Deadline.IsZero() {
-						var cancel context.CancelFunc
-						ctx, cancel = context.WithDeadline(ctx, netDialer.Deadline)
-						defer cancel()
-					}
-
+			tlsDialContext = func(ctx context.Context, network string, addr string) (net.Conn, error) {
+				// the handshake half of the dial. It owns the connection's tls
+				// lifetime, and closes what it was handed on its own error paths
+				// -- dialControlTlsWithFamilyFallback has already read the
+				// family off the connection by then, so the close cannot hide it.
+				handshake := func(ctx context.Context, conn net.Conn) (net.Conn, error) {
 					host, _, err := net.SplitHostPort(addr)
 					if err != nil {
-						panic(err)
+						return nil, err
 					}
 
 					tlsConfig := settings.TlsConfig
@@ -288,12 +278,11 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 					}
 					return tlsConn, nil
 				}
-			} else {
-				tlsDialer := &tls.Dialer{
-					NetDialer: netDialer,
-					Config:    settings.TlsConfig,
-				}
-				tlsDialContext = tlsDialer.DialContext
+				// one retry over the other address family when the handshake
+				// hits its own timeout after the connect succeeded
+				// (control_family_dial.go)
+				return dialControlTlsWithFamilyFallback(
+					ctx, &settings.ConnectSettings, network, addr, settings.DialContext, handshake)
 			}
 
 			dialer := &clientDialer{
