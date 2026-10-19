@@ -1556,7 +1556,7 @@ func (self *UdpSequence) Run() {
 		// A UDP dial cannot yield a meaningful refusal to the inner source.
 		if self.ctx.Err() == nil {
 			if _, signal := classifyDialFailure(self.IpPath(), err, time.Since(dialStart)); signal != nil {
-				receive(MessagePoolCopy(signal))
+				self.receivePacket(MessagePoolCopy(signal))
 			}
 		}
 		return
