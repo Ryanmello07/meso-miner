@@ -584,8 +584,10 @@ func_start_provider_nightly(){
 		log "[INFO] Running UrNetwork build ${BIN_VER}"
         # Capture the real exit code (set -e safe; bare `provide` would abort the loop on crash)
         resolve_provider_env_args
+        set -f
         # shellcheck disable=SC2086  # PROVIDER_ENV_ARGS is a deliberately split flag list
         if "$PROVIDER_BIN" provide $PROVIDER_ENV_ARGS; then code=0; else code=$?; fi
+        set +f
         if [ "$code" -eq 0 ]; then
             if [ -f "$HOME/.urnetwork/update-pending" ]; then
                 rm -f "$HOME/.urnetwork/update-pending"
@@ -704,8 +706,10 @@ func_start_provider_jwt(){
         # the compound's status, 0 whenever provide failed: every crash logged
         # code=0 and the code 78 re-auth branch below could never run.
         resolve_provider_env_args
+        set -f
         # shellcheck disable=SC2086  # PROVIDER_ENV_ARGS is a deliberately split flag list
         if "$PROVIDER_BIN" provide $PROVIDER_ENV_ARGS; then code=0; else code=$?; fi
+        set +f
         if [ "$code" -eq 0 ]; then
             if [ -f "$HOME/.urnetwork/update-pending" ]; then
                 rm -f "$HOME/.urnetwork/update-pending"
