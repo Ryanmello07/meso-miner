@@ -43,6 +43,13 @@ func applyH3Mode(setting h3Setting) (previous h3Setting, relaunch bool) {
 	if prev == nil {
 		return setting, false
 	}
+	// A mode that can give proxies transports, or one that stops doing so,
+	// changes each running proxy's set; rerank took effect above, and this
+	// starts the relaunch pass so they do not carry the old set until some
+	// unrelated restart.
+	if prev.proxiesMayUseTransports() || setting.proxiesMayUseTransports() {
+		go connect.HandleError(func() { relaunchH3ProxiesNow(setting) })
+	}
 	return *prev, prev.directPolicy() != setting.directPolicy()
 }
 

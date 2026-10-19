@@ -91,7 +91,7 @@ func applyDirectOnlyH3Defaults() {
 		}
 		value := onOff(datagramDefaultOn(resolution))
 		if key == "h3" {
-			value = onOff(defaultH3Setting(state, resolution))
+			value = resolveH3Mode(nil, resolution).String()
 		}
 		if err := applyLiveSideEffect(key, value); err != nil {
 			tlog("[t]h3 default: failed to apply %s=%s: %s\n", key, value, err)

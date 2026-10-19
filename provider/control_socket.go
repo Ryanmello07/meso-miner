@@ -371,7 +371,7 @@ func validateControlValue(key, value string) error {
 		}
 	case "h3":
 		if strings.TrimSpace(value) == "" {
-			return fmt.Errorf("h3: must be off, direct, on, a positive proxy count, or all (got an empty value)")
+			return fmt.Errorf("h3: must be off, direct, on, auto, a positive proxy count, or all (got an empty value)")
 		}
 		if _, err := parseH3Mode(value); err != nil {
 			return err
@@ -496,7 +496,7 @@ func applyLiveDefault(key string) error {
 	if key == "h3" {
 		// Clearing the key hands the decision back to URNETWORK_H3, which is
 		// what a restart would use, so the live state matches the persisted one.
-		return applyLiveSideEffect(key, onOff(h3Enabled()))
+		return applyLiveSideEffect(key, resolveH3Mode(nil, currentProxyResolution()).String())
 	}
 	def, ok := liveDefaults[key]
 	if !ok {

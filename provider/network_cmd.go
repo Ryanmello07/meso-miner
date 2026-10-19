@@ -39,14 +39,23 @@ func chooseNetworkCmd(opts docopt.Opts) {
 		return
 	}
 
+	// The switch notice is about credentials issued by a DIFFERENT network, so
+	// it only belongs on a command that actually changes the effective pair.
+	previous, hadPrevious, _ := readNetworkConfig()
+	networkChanged := func(apiUrl, connectUrl string) bool {
+		return !hadPrevious || previous.ApiUrl != apiUrl || previous.ConnectUrl != connectUrl
+	}
+
 	if reset, _ := opts.Bool("--reset"); reset {
 		if err := resetNetworkConfig(); err != nil {
 			fmt.Printf("failed to reset network: %s\n", err)
 			os.Exit(1)
 		}
 		fmt.Println("network reset to the main network")
-		if notice := networkSwitchNoticeForState(); notice != "" {
-			fmt.Println(notice)
+		if hadPrevious {
+			if notice := networkSwitchNoticeForState(); notice != "" {
+				fmt.Println(notice)
+			}
 		}
 		return
 	}
@@ -72,8 +81,10 @@ func chooseNetworkCmd(opts docopt.Opts) {
 			os.Exit(1)
 		}
 		fmt.Printf("network saved (preset): api_url=%s connect_url=%s\n", apiUrl, connectUrl)
-		if notice := networkSwitchNoticeForState(); notice != "" {
-			fmt.Println(notice)
+		if networkChanged(apiUrl, connectUrl) {
+			if notice := networkSwitchNoticeForState(); notice != "" {
+				fmt.Println(notice)
+			}
 		}
 		return
 	}
@@ -97,7 +108,9 @@ func chooseNetworkCmd(opts docopt.Opts) {
 	if warning := insecureNetworkWarning(apiUrl, connectUrl); warning != "" {
 		fmt.Println(warning)
 	}
-	if notice := networkSwitchNoticeForState(); notice != "" {
-		fmt.Println(notice)
+	if networkChanged(apiUrl, connectUrl) {
+		if notice := networkSwitchNoticeForState(); notice != "" {
+			fmt.Println(notice)
+		}
 	}
 }

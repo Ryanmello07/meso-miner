@@ -513,8 +513,13 @@ func_start_provider_stable(){
 		log "[INFO] Running UrNetwork build ${BIN_VER}"
         # Capture the real exit code (set -e safe; avoids the `|| true` that pinned code to 0)
         resolve_provider_env_args
+        # the flag list is deliberately split, and the cwd is /app: an argument
+        # that happens to contain a glob metacharacter must reach the provider
+        # as written, not as whatever happens to match on disk
+        set -f
         # shellcheck disable=SC2086  # PROVIDER_ENV_ARGS is a deliberately split flag list
         if "$PROVIDER_BIN" provide $PROVIDER_ENV_ARGS; then code=0; else code=$?; fi
+        set +f
         if [ "$code" -eq 0 ]; then
             if [ -f "$HOME/.urnetwork/update-pending" ]; then
                 rm -f "$HOME/.urnetwork/update-pending"

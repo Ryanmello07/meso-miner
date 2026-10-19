@@ -24,6 +24,11 @@ t() {
         return 1
     fi
 }
+# reject runs a predicate in THIS shell, so the helper functions the predicate
+# calls exist. `sh -c "! validate_jwt_file ..."` ran in a fresh shell with no
+# such function: it exited 127, `!` turned that into success, and every
+# rejection test passed even when the validator was broken.
+reject() { ! "$@"; }
 
 # shellcheck source=jwt_verify.sh
 . "$REPO/docker/scripts/jwt_verify.sh"
@@ -45,11 +50,11 @@ t "valid JWT accepted" validate_jwt_file "$tmp/valid.jwt"
 
 # 2. Expired token (exp 10m ago > 5m clock skew)
 make_jwt "{\"sub\":\"12345\",\"exp\":$((now - 600))}" > "$tmp/expired.jwt"
-t "expired JWT rejected" sh -c "! validate_jwt_file '$tmp/expired.jwt'"
+t "expired JWT rejected" reject validate_jwt_file '$tmp/expired.jwt'\'
 
 # 3. NBF in future (nbf 10m future > 5m clock skew)
 make_jwt "{\"sub\":\"12345\",\"nbf\":$((now + 600)),\"exp\":$((now + 3600))}" > "$tmp/nbf_future.jwt"
-t "nbf-in-future JWT rejected" sh -c "! validate_jwt_file '$tmp/nbf_future.jwt'"
+t "nbf-in-future JWT rejected" reject validate_jwt_file '$tmp/nbf_future.jwt'\'
 
 # 4. Within skew (exp 2m ago <= 5m clock skew)
 make_jwt "{\"sub\":\"12345\",\"exp\":$((now - 120))}" > "$tmp/skew_exp.jwt"
@@ -61,28 +66,28 @@ t "within-skew nbf (2m future) accepted" validate_jwt_file "$tmp/skew_nbf.jwt"
 
 # 6. Malformed tests
 : > "$tmp/empty.jwt"
-t "malformed: empty file rejected" sh -c "! validate_jwt_file '$tmp/empty.jwt'"
+t "malformed: empty file rejected" reject validate_jwt_file '$tmp/empty.jwt'\'
 
 printf "not-a-jwt-token" > "$tmp/garbage.jwt"
-t "malformed: arbitrary text rejected" sh -c "! validate_jwt_file '$tmp/garbage.jwt'"
+t "malformed: arbitrary text rejected" reject validate_jwt_file '$tmp/garbage.jwt'\'
 
 printf "part1.part2" > "$tmp/two_parts.jwt"
-t "malformed: two parts rejected" sh -c "! validate_jwt_file '$tmp/two_parts.jwt'"
+t "malformed: two parts rejected" reject validate_jwt_file '$tmp/two_parts.jwt'\'
 
 printf "p1.p2.p3.p4" > "$tmp/four_parts.jwt"
-t "malformed: four parts rejected" sh -c "! validate_jwt_file '$tmp/four_parts.jwt'"
+t "malformed: four parts rejected" reject validate_jwt_file '$tmp/four_parts.jwt'\'
 
 printf "eyJhbGciOiJIUzI1NiJ9.!!!invalid-base64!!!.sig" > "$tmp/bad_b64.jwt"
-t "malformed: invalid base64 rejected" sh -c "! validate_jwt_file '$tmp/bad_b64.jwt'"
+t "malformed: invalid base64 rejected" reject validate_jwt_file '$tmp/bad_b64.jwt'\'
 
 make_jwt "this is not json" > "$tmp/bad_json.jwt"
-t "malformed: non-JSON payload rejected" sh -c "! validate_jwt_file '$tmp/bad_json.jwt'"
+t "malformed: non-JSON payload rejected" reject validate_jwt_file '$tmp/bad_json.jwt'\'
 
 make_jwt "{\"exp\":\"not-a-number\"}" > "$tmp/bad_exp.jwt"
-t "malformed: non-numeric exp rejected" sh -c "! validate_jwt_file '$tmp/bad_exp.jwt'"
+t "malformed: non-numeric exp rejected" reject validate_jwt_file '$tmp/bad_exp.jwt'\'
 
 make_jwt "{\"nbf\":\"not-a-number\"}" > "$tmp/bad_nbf.jwt"
-t "malformed: non-numeric nbf rejected" sh -c "! validate_jwt_file '$tmp/bad_nbf.jwt'"
+t "malformed: non-numeric nbf rejected" reject validate_jwt_file '$tmp/bad_nbf.jwt'\'
 
 # 7. Entrypoint integration & validation tests
 ep_out=""

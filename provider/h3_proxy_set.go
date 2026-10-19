@@ -268,7 +268,7 @@ func (r *ProxyReloader) relaunchH3Proxies(ctx context.Context, setting h3Setting
 				return
 			case <-time.After(h3RelaunchInterval):
 			}
-			if relaunched%8 == 0 {
+			if 0 < relaunched && relaunched%8 == 0 {
 				triggerProxyReload()
 			}
 		}

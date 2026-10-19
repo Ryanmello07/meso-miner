@@ -115,7 +115,31 @@ func writeNetworkConfig(apiUrl, connectUrl string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, b, 0600)
+	// A torn write here is an unreadable network config, which the provider
+	// treats as fatal at startup. Write a sibling temp file and rename it into
+	// place so a crash or a full disk leaves either the old file or the new one.
+	tmp, err := os.CreateTemp(filepath.Dir(p), ".network-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, p)
 }
 
 // resetNetworkConfig removes ~/.urnetwork/network.json. Removing a
