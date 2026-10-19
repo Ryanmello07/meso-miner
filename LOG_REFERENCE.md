@@ -1189,9 +1189,17 @@ Only on a unit that sets `WatchdogSec=` (see [Configuration](docs/Configuration.
 | `[thrash] swap is N% full` | Swap passed 95% used: out-of-memory is close. Logged once per episode, re-armed when swap falls below 90%. |
 | `✅ [memory] Thrash cleared` | The state left `thrashing` for a calmer one. Free RAM, swap in use and the stall share follow. |
 | `✅ [memory] Thrash cleared by the restart` | After a watchdog restart, the first calm reading five minutes or more after start. Logged once per process life. |
+| `no progress for 10m0s: withholding the systemd watchdog ping` | The pressure monitor has not ticked for 10 minutes, so the process is alive but not making progress. The ping stops and systemd restarts the unit once `WatchdogSec` runs out. Once per episode. |
+| `the next start is capped at N proxies` | Written at the same moment, so the restart begins with about 60% of what was running instead of the same load. It counts in the thrash restart ring (3 per 24 hours). |
+| `progress resumed` | The monitor ticked again before systemd acted (a very long pause, not a stall). Pings resume and the lean start cap written at the stall is removed again (`the lean start cap was removed again`). |
+| `but self-heal is off, so the systemd watchdog is still being fed` | The same stall with self-heal off: nothing is withheld or recorded, so systemd does not restart the provider. Turn self-heal on to let the watchdog act. |
+| `but the restart budget is spent (...), so the systemd watchdog is still being fed` | The same stall inside the thrash restart ring's limits (3 per 24 hours, with a 30 minute and a 2 hour re-arm wait): nothing is withheld, so systemd does not restart the provider again yet. |
+| `WATCHDOG_USEC is set but NOTIFY_SOCKET is not` | The unit sets `WatchdogSec=` without a notify socket (`NotifyAccess=none`), so no ping can reach systemd and it will restart the provider every interval whatever it does. Fix the unit. |
 
 > [!NOTE]
 > The watchdog itself is switched by the self-heal switch. With self-heal off it senses and logs but never restarts anything. The current state is also written to `~/.urnetwork/thrash_status`, and every restart or refusal is appended to `~/.urnetwork/autopilot.jsonl`.
+
+The thrash watchdog also has a heap rule: a heap at least 1.4 times its soft limit on a box with little free RAM counts as severe after 90 seconds even while PSI reads calm. It shows up as the usual `[thrash]` and `[memory]` lines.
 
 ---
 
@@ -1213,14 +1221,21 @@ A provider keeps one client login per proxy in `~/.urnetwork/.client_jwts.json` 
 🛑 [jwt-store] identity for 203.0.113.9:1080 renewed successfully — revocation watcher standing down
 ⚠️ [jwt-renew] proxy[7] 203.0.113.9:1080: cannot read account JWT: <error>
 [proxy][identity] 203.0.113.9:1080 split into 3 identities on adoption; 203.0.113.9:1080 (user us***rA) kept id=7 and history, the rest start fresh
-| `no progress for 10m0s: withholding the systemd watchdog ping` | The pressure monitor has not ticked for 10 minutes, so the process is alive but not making progress. The ping stops and systemd restarts the unit once `WatchdogSec` runs out. Once per episode. |
-| `the next start is capped at N proxies` | Written at the same moment, so the restart begins with about 60% of what was running instead of the same load. It counts in the thrash restart ring (3 per 24 hours). |
-| `progress resumed` | The monitor ticked again before systemd acted (a very long pause, not a stall). Pings resume and the lean start cap written at the stall is removed again (`the lean start cap was removed again`). |
-| `but self-heal is off, so the systemd watchdog is still being fed` | The same stall with self-heal off: nothing is withheld or recorded, so systemd does not restart the provider. Turn self-heal on to let the watchdog act. |
-| `but the restart budget is spent (...), so the systemd watchdog is still being fed` | The same stall inside the thrash restart ring's limits (3 per 24 hours, with a 30 minute and a 2 hour re-arm wait): nothing is withheld, so systemd does not restart the provider again yet. |
-| `WATCHDOG_USEC is set but NOTIFY_SOCKET is not` | The unit sets `WatchdogSec=` without a notify socket (`NotifyAccess=none`), so no ping can reach systemd and it will restart the provider every interval whatever it does. Fix the unit. |
+```
 
-The thrash watchdog also has a heap rule: a heap at least 1.4 times its soft limit on a box with little free RAM counts as severe after 90 seconds even while PSI reads calm. It shows up as the usual `[thrash]` and `[memory]` lines.
+| Message | Meaning |
+|---|---|
+| `[hot-restart] loaded N stored identities` | Once at start. `carrying forward` is how many will be reused. Entries for proxies that have not reconnected in 30 days are pruned and counted. |
+| `[hot-restart] no stored client identities found` | An empty store: every proxy mints a fresh identity on its first sign-in. Expected on a first start, a warning after a restart. |
+| `[hot-restart] <key>: stored client JWT expired, renewed identity <id>` | The saved login had aged out and was renewed under the same client id. The identity and its history survive. |
+| `[hot-restart] <key>: network_id mismatch ... minting fresh` | The saved login belongs to a different network (for example after switching accounts), so it is not reused. |
+| `[jwt-store] corrupt ..., starting fresh` | The store file could not be read. A snapshot of the unreadable bytes is taken first (the `snapshot saved` line), then every proxy mints fresh. |
+| `[jwt-store] snapshot saved` / `snapshot ... failed` / `failed to prune old backup` | Pre-restart copies of the store. Failures are warnings only and do not stop the provider. At most 10 snapshots are kept. |
+| `[jwt-store] reused client identity ... never authenticated ... evicted` | A reused login drew 5 refusals that count — `ProxyAuthRejectionCount` reaches 5, so only transport-authentication refusals, not timeouts — without ever coming up, which is how a revoked identity looks. Eviction is off unless `URNETWORK_EVICT_REVOKED_IDENTITIES=1`, and it never runs while the backend is degraded: a timeout or an overloaded gateway says nothing about the identity. When it is on, the login is removed so the next attempt mints a fresh one. |
+| `[jwt-store] identity ... renewed successfully — revocation watcher standing down` | The eviction watch ended because the login renewed fine: no eviction. |
+| `[jwt-store] failed to evict possibly-revoked identity` | The eviction itself failed (disk error). The login stays and is retried. |
+| `[jwt-renew] ... cannot read account JWT` | A renewal could not run because the account token in `~/.urnetwork/jwt` is unreadable. Run `provider auth` again. |
+| `[proxy][identity] ... split into N identities on adoption` | Older state was stored under a bare address, and several proxy accounts now share that address. Exactly one identity (the smallest key) inherits the history; the others start fresh. Earnings and slow-retry state use the same rule, with `earnings for ...` or `slow-retry state for ...` in the line. |
 
 ---
 
@@ -1237,17 +1252,8 @@ Goroutine and heap profiles taken on the way into a stall (see [Configuration](d
 
 | Message | Meaning |
 |---|---|
-| `[hot-restart] loaded N stored identities` | Once at start. `carrying forward` is how many will be reused. Entries for proxies that have not reconnected in 30 days are pruned and counted. |
-| `[hot-restart] no stored client identities found` | An empty store: every proxy mints a fresh identity on its first sign-in. Expected on a first start, a warning after a restart. |
-| `[hot-restart] <key>: stored client JWT expired, renewed identity <id>` | The saved login had aged out and was renewed under the same client id. The identity and its history survive. |
-| `[hot-restart] <key>: network_id mismatch ... minting fresh` | The saved login belongs to a different network (for example after switching accounts), so it is not reused. |
-| `[jwt-store] corrupt ..., starting fresh` | The store file could not be read. A snapshot of the unreadable bytes is taken first (the `snapshot saved` line), then every proxy mints fresh. |
-| `[jwt-store] snapshot saved` / `snapshot ... failed` / `failed to prune old backup` | Pre-restart copies of the store. Failures are warnings only and do not stop the provider. At most 10 snapshots are kept. |
-| `[jwt-store] reused client identity ... never authenticated ... evicted` | A reused login failed transport authentication repeatedly without ever succeeding, which is how a revoked identity looks. It is removed so the next attempt mints a fresh one. |
-| `[jwt-store] identity ... renewed successfully — revocation watcher standing down` | The eviction watch ended because the login renewed fine: no eviction. |
-| `[jwt-store] failed to evict possibly-revoked identity` | The eviction itself failed (disk error). The login stays and is retried. |
-| `[jwt-renew] ... cannot read account JWT` | A renewal could not run because the account token in `~/.urnetwork/jwt` is unreadable. Run `provider auth` again. |
-| `[proxy][identity] ... split into N identities on adoption` | Older state was stored under a bare address, and several proxy accounts now share that address. Exactly one identity (the smallest key) inherits the history; the others start fresh. Earnings and slow-retry state use the same rule, with `earnings for ...` or `slow-retry state for ...` in the line. |
+| `<trigger>: N goroutines, heap at P% of its limit; profiles in <dir>` | The build-up showed, and the profiles were written to `<dir>`. Open `summary.txt` first: the stack with the most goroutines is what piled up. A `heap-over-limit` capture is the exception: it skips `goroutines.txt` and `summary.txt`, because the goroutine profile allocates a record per goroutine and stops the world, and a box already past its heap limit cannot afford that. It writes `heap.pb.gz` and `meta.txt` only, and `meta.txt` carries `goroutine_profile=skipped` to say so. |
+| `capture for <trigger> failed` | The profiles could not be written (disk full, read-only state directory). The provider carries on. |
 
 ---
 
@@ -1418,5 +1424,3 @@ These explain a proxy that is not signing in. Per-attempt `[t]auth error` lines 
 | `client_limit_hold.json is not valid JSON, replacing it` | The saved holds were unreadable and are replaced. At worst one more kick per client. |
 
 An older platform never sends the close, so these lines never appear against it. `URNETWORK_PROVIDE_INTENT=0` stops the provider declaring an intent; a kick is still held.
-| `<trigger>: N goroutines, heap at P% of its limit; profiles in <dir>` | The build-up showed, and `summary.txt`, `goroutines.txt`, `heap.pb.gz` and `meta.txt` were written to `<dir>`. Open `summary.txt` first: the stack with the most goroutines is what piled up. |
-| `capture for <trigger> failed` | The profiles could not be written (disk full, read-only state directory). The provider carries on. |
