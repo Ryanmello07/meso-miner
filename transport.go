@@ -288,6 +288,23 @@ type PlatformTransportSettings struct {
 	// it smoothes out the h3 transition to not start/stop h1 if h3 connects in this time
 	ModeInitialDelay time.Duration
 
+	// PlatformTransportBudget, H1BudgetByteCount, H3BudgetByteCount, and
+	// ModePreferences are the settings-only surface this generation adopts for
+	// PlatformTransportAutoEligibility (platform_transport_status.go) and the
+	// per-owner settings constructor (DefaultPlatformTransportSettingsWithMemoryTarget).
+	// The pinned v2026 engine also admits the transport against these; in this
+	// generation the transport swap that wires the reservations is a later
+	// slice, so nothing below the status view reads them yet.
+	PlatformTransportBudget *PlatformTransportBudget
+	// Non-positive carrier byte counts resolve to the memory-scaled defaults,
+	// like the pinned engine (H1MemoryReservationByteCount / defaultH3BudgetByteCount).
+	H1BudgetByteCount ByteCount
+	H3BudgetByteCount ByteCount
+	// ModePreferences configures which Auto modes the settings view considers
+	// enabled, and their priorities. Lower values are preferred. Nil selects
+	// DefaultTransportModePreferences.
+	ModePreferences map[TransportMode]int
+
 	// MinConnectDelay time.Duration
 	// MaxConnectDelay time.Duration
 
@@ -347,6 +364,15 @@ func DefaultPlatformTransportSettings() *PlatformTransportSettings {
 		TransportBufferSize:  16,
 		InactiveDrainTimeout: 30 * time.Second,
 		ModeInitialDelay:     2 * time.Second,
+		// Port note (v2026 engine -> 3.23 generation): the Auto policy and the
+		// carrier budget defaults are the pinned engine's. Only the status view
+		// reads them so far; the transport swap wires admission later. Without
+		// them a default settings value would report every Auto mode eligible
+		// for lack of a budget rather than because one fits.
+		ModePreferences:         DefaultTransportModePreferences(),
+		PlatformTransportBudget: DefaultPlatformTransportBudget(),
+		H1BudgetByteCount:       MemoryScaledByteCount(kib(512), kib(256)),
+		H3BudgetByteCount:       defaultH3BudgetByteCount(),
 		// MinConnectDelay:      0,
 		// MaxConnectDelay:      1 * time.Second,
 		ProtocolVersion: DefaultProtocolVersion,
@@ -378,6 +404,12 @@ type PlatformTransport struct {
 	auth atomic.Pointer[ClientAuth]
 
 	settings *PlatformTransportSettings
+
+	// modePreferences is the Auto policy this transport was constructed with,
+	// used by the status view (platform_transport_status.go) exactly as the
+	// pinned engine uses it. Nil (the default for a zero-value transport) means
+	// no DNS-family mode is configured.
+	modePreferences map[TransportMode]int
 
 	stateLock sync.Mutex
 	// notified when availableModes changes. availableModes is a map, so it
@@ -2370,4 +2402,62 @@ func pumpHost(platformUrl string, tld []byte) (string, error) {
 	baseHost := strings.SplitN(host, ".", 2)[1]
 	pumpHost := fmt.Sprintf("zone-%s.%s", strings.ReplaceAll(string(tld), ".", "-"), baseHost)
 	return pumpHost, nil
+}
+
+// DefaultTransportModePreferences is the Auto ordering: H1 first with H3 as
+// the parallel/backup carrier, then the DNS fallbacks.
+func DefaultTransportModePreferences() map[TransportMode]int {
+	return map[TransportMode]int{
+		TransportModeH1: 1,
+		TransportModeH3: 2,
+
+		TransportModeH3Dns:     3,
+		TransportModeH3DnsPump: 4,
+	}
+}
+
+func normalizeTransportModePreferences(preferences map[TransportMode]int) map[TransportMode]int {
+	if preferences == nil {
+		return DefaultTransportModePreferences()
+	}
+	normalized := map[TransportMode]int{}
+	for mode, priority := range preferences {
+		switch mode {
+		case TransportModeH3, TransportModeH1, TransportModeH3Dns, TransportModeH3DnsPump:
+			if 0 < priority {
+				normalized[mode] = priority
+			}
+		}
+	}
+	if len(normalized) == 0 {
+		return DefaultTransportModePreferences()
+	}
+	return normalized
+}
+
+const h3BudgetShareDivisor = 8
+
+const (
+	h3StreamReceiveWindowShareNumerator     = 6
+	h3ConnectionReceiveWindowShareNumerator = 8
+	h3ReceiveWindowShareDenominator         = 8
+)
+
+func h3BudgetShareByteCount(memoryTargetByteCount ByteCount) ByteCount {
+	if memoryTargetByteCount <= 0 {
+		return 0
+	}
+	return memoryTargetByteCount / h3BudgetShareDivisor
+}
+
+func h3BudgetByteCountForMemoryTarget(memoryTargetByteCount ByteCount) ByteCount {
+	share := h3BudgetShareByteCount(memoryTargetByteCount)
+	if share <= 0 {
+		return MemoryTargetScaledByteCount(memoryTargetByteCount, mib(8), mib(3))
+	}
+	return max(mib(3), share)
+}
+
+func defaultH3BudgetByteCount() ByteCount {
+	return h3BudgetByteCountForMemoryTarget(MemoryBudget())
 }

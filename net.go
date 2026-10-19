@@ -3,6 +3,7 @@ package connect
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -514,6 +515,31 @@ func SplitProxyKey(key string) (address, user string) {
 	return address, user
 }
 
+// proxyDialError marks a failure that happened on a proxied dial. It is
+// returned by ProxySettings.NewDialContext and exists for exactly one reader:
+// recordControlFamilyStrike (control_family.go). A proxied control dial
+// connects to the proxy first, so the family of that socket is the PROXY's
+// family, not the destination's (the NY5 demotion bug).
+type proxyDialError struct {
+	index int
+	err   error
+}
+
+func (self *proxyDialError) Error() string { return self.err.Error() }
+func (self *proxyDialError) Unwrap() error { return self.err }
+
+func (self *proxyDialError) Timeout() bool {
+	var netErr net.Error
+	return errors.As(self.err, &netErr) && netErr.Timeout()
+}
+
+func (self *proxyDialError) Temporary() bool {
+	var netErr net.Error
+	return errors.As(self.err, &netErr) && netErr.Temporary()
+}
+
+func (self *proxyDialError) proxyIndex() int { return self.index }
+
 // proxySOCKS5DialTimeout is the maximum time a single SOCKS5 dial (TCP
 // connect + greeting + CONNECT) is allowed to take through a proxy. Paths
 // that already carry a context deadline (e.g. serialEval with its 15s
@@ -554,7 +580,7 @@ func (self *ProxySettings) NewDialContext(ctx context.Context, forward proxy.Dia
 			forward,
 		)
 		if err != nil {
-			return nil, err
+			return nil, &proxyDialError{index: self.Index, err: err}
 		}
 
 		dialCtx := ctx
@@ -571,7 +597,7 @@ func (self *ProxySettings) NewDialContext(ctx context.Context, forward proxy.Dia
 			conn, err = proxyDialer.Dial(network, addr)
 		}
 		if err != nil {
-			return nil, err
+			return nil, &proxyDialError{index: self.Index, err: err}
 		}
 		if attempt != nil && targetHost != "" {
 			// the proxy reached the address: a stall from here on is about it
