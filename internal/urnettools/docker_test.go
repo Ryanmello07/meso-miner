@@ -16,7 +16,7 @@ func TestIsDockerCandidate(t *testing.T) {
 		want  bool
 	}{
 		{"ghcr.io/urfoundation/meso-miner:latest", "urnet", true},
-		{"urnetwork-3.23-fix:stable", "provider1", true},
+		{"meso-miner:stable", "provider1", true},
 		{"nginx:latest", "web", false},
 		{"redis:7", "cache", false},
 		{"ghcr.io/urfoundation/meso-miner:latest", "anything", true},

@@ -27,6 +27,10 @@ urnetwork-3.23-fix/
 │   ├── claim_credential.go           # `provider claim` credential choice (store client, client jwt file, legacy coldkey)
 │   ├── sn.go                         # Subnet commands (wallet set + unsigned-request gate, claim, bind-head)
 │   ├── thrash_watchdog.go            # Swap-thrash watchdog, supervised exit-75 restart, container opt-in
+│   ├── family_transport.go           # Dual-stack platform transport for the direct identity (v4/v6 pins + standby, `ip_version`)
+│   ├── network_refresh.go            # Network JWT renewal at POST /auth/network-refresh, with the code-create fallback
+│   ├── proxy_udp_check.go            # Per-proxy SOCKS5 UDP relay check, and TCP/UDP exit-address comparison
+│   ├── socks5_udp.go                 # SOCKS5 UDP relay packet conn, so a proxied identity's H3 exits through its proxy
 │   ├── doh_cache.go                  # Persistent DNS-over-HTTPS cache with server-score persistence
 │   ├── net_http_doh.go               # DNS-over-HTTPS resolver (server scoring, serve-stale)
 │   ├── bandwidth_reporter.go         # Pushes periodic JSON telemetry to the Hub
@@ -75,7 +79,12 @@ urnetwork-3.23-fix/
 │   └── store_db.go                   # SQLite persistence for node/proxy history and snapshots
 │
 ├── docker/
-│   └── scripts/                      # Docker helper scripts (entrypoint, start_*, urnet-tools, proxy-*)
+│   └── scripts/
+│       ├── entrypoint.sh             # BUILD selector; execs start_stable/start_nightly/start_jwt
+│       ├── provider_common.sh        # Shared startup: bootstrap, proxy setup, arch detect, identity, IP checker
+│       ├── provider_env.sh           # v33 operator env vars -> `provider provide` flags
+│       ├── start_*.sh                # Thin wrappers: set the mode and binary flavour, then source provider_common.sh
+│       └── ...                       # urnet-tools, proxy-*, update_verify, pelican and jwt helpers
 │
 ├── Dockerfile                        # Alpine-based, multi-stage, multi-arch build with vnStat
 ├── CHANGELOG.md                      # Human-readable release changelog
@@ -88,11 +97,33 @@ urnetwork-3.23-fix/
 ├── net.go                            # TCP/TLS dialing with SOCKS5 proxy support (trackedConn)
 ├── net_http.go                       # Control-plane dialing & ClientStrategy
 ├── net_http_doh.go                   # DNS-over-HTTPS resolver with caching
+├── net_http_internal_doh.go          # In-process DoH name path for the protected network-space domains
+├── net_dial_udp_candidates.go        # Progressive UDP dial candidates: first usable family wins, later answers retained
+├── egress_dial.go                    # Egress-bound name resolution, so a control dial stays outside the tunnel it builds
+├── egress_darwin.go                  # macOS socket interface pinning (IP_BOUND_IF / IPV6_BOUND_IF)
+├── control_family.go                 # Control-plane address-family policy and the demotion ledger
+├── control_family_dial.go            # Family-aware control dial: one cross-family retry on a handshake timeout
 ├── transport.go                      # PlatformTransport: WebSocket (H1) + QUIC/H3 + DNS PT
+├── transport_family.go               # Family-pinned v4/v6 platform transports and the dual-stack group
+├── transport_family_stats.go         # Per-family attempts, connects, failures, drops by cause, session lifetimes
+├── transport_h1plus.go               # H1+ writer: drains the H1 lanes and limits through the shared framer
+├── http_upgrade.go                   # H1 -> framed carrier upgrade (h1_plus), with a plain websocket fallback
+├── framed_message_conn.go            # Binary-message conn the upgraded carrier is spoken on
+├── message_framer_xl.go              # urnetwork-framerxl/1 wire format (uint32 length header, batched writes)
+├── transport_sessions.go             # Platform transport session lifetimes and close cause
+├── transport_authorization.go        # Authorization close codes -> transport close reason
+├── transport_credential_refusal.go   # Held dials after the platform definitively refuses a credential
+├── stream_metrics.go                 # Stream and transport counters: kind, lifetime, end reason, open-request outcome
+├── platform_transport_budget.go      # Aggregate transport budget: exact claims, make-before-break pairing
 ├── transport_p2p.go / _webrtc.go     # P2P WebRTC transport
+├── ice_resolve_net.go                # Peer-generation-scoped ICE (STUN/TURN) address resolution
 ├── transport_pt.go                   # Pluggable transport: DNS packet translation
 ├── transfer*.go                      # Client state machine, contracts, encryption, routing
+├── transfer_memory_budget.go         # Composable byte budget shared by transfer queues across sequences
+├── routing_class.go                  # Traffic-class vocabulary for flow classification
+├── routing_classifier_light.go       # Light flow classifier (inert: no consumer installed)
 ├── ip.go / ip_security*.go           # IP-layer NAT, security policy, DPI classification
+├── ip_udp_socket_poller*.go          # Shared UDP socket lifecycle with epoll/kqueue/unsupported backends
 ├── tuning.go                         # System auto-profiling (Tier1/Tier2/Tier3) by cgroup RAM
 ├── audit.go                          # Passive host kernel setting validator
 ├── message_pool.go                   # Dynamic allocation pool for relay payloads
@@ -110,3 +141,6 @@ A custom, zero-dependency Go binary for fleet observability without a full Prome
 
 ### urnet-tools (`cmd/urnet-tools` + `internal/urnettools/`)
 The operator's management utility, rewritten from a shell script into a Go binary. It discovers providers across systemd units, user sessions, and containers; manages their lifecycle and drop-ins; updates provider and tool binaries with digest verification; and exposes proxy, session, self-heal, and hub management commands. It is the fork's control plane and the primary subject of the 30.9 security audit remediation.
+
+### The platform transport generation (`transport_family.go` + `provider/family_transport.go`)
+The platform transport is no longer one connection. `transport_family.go` runs a family-pinned v4 transport, a family-pinned v6 transport and a family-agnostic standby as a single group, so the platform can categorize a provider as dual-stack; `provider/family_transport.go` decides once per identity launch whether the direct identity gets that group (a proxied identity never does, because a pin dials from the host), and the `ip_version` control key re-pins it live. On top of the group sit H1+ (`http_upgrade.go`, `framed_message_conn.go`, `message_framer_xl.go`, `transport_h1plus.go`), session lifetime and close-cause accounting (`transport_sessions.go`, `transport_authorization.go`, `transport_credential_refusal.go`) and the operator counters (`transport_family_stats.go`, `stream_metrics.go`). `control_family.go` and `control_family_dial.go` steer only the control-plane dials and never the tunnelled data plane, and `platform_transport_budget.go` admits the whole group against one aggregate budget. Three pieces are ported but inert: the shared UDP socket lifecycle (`ip_udp_socket_poller*.go`) needs `SocketReadShardCount`, `transfer_memory_budget.go` needs a queue budget setting, and the light classifier (`routing_class.go`, `routing_classifier_light.go`) has no consumer installed.

@@ -1,6 +1,7 @@
 package connect
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -36,5 +37,23 @@ func TestHttpErrorFromResponse_PlainBodyPreserved(t *testing.T) {
 	want := `400 Bad Request: {"error":"invalid token"}`
 	if err.Error() != want {
 		t.Fatalf("got %q, want %q", err.Error(), want)
+	}
+}
+
+// The error carries the status code for a caller that must tell a confirmed
+// rejection from a transport error, with the exact text it always had.
+func TestHttpErrorFromResponse_CarriesTheStatusCode(t *testing.T) {
+	err := httpErrorFromResponse("401 Unauthorized", []byte("the network JWT is required"))
+	var status *HttpStatusError
+	if !errors.As(err, &status) || status.StatusCode != 401 {
+		t.Fatalf("status error = %#v", err)
+	}
+	if want := "401 Unauthorized: the network JWT is required"; err.Error() != want {
+		t.Fatalf("got %q, want %q", err.Error(), want)
+	}
+	html := []byte("<html>denied</html>")
+	htmlErr := httpErrorFromResponse("503 Service Unavailable", html)
+	if want := "503 Service Unavailable: <html error page, 19 bytes>"; htmlErr.Error() != want {
+		t.Fatalf("html got %q, want %q", htmlErr.Error(), want)
 	}
 }

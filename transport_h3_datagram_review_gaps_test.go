@@ -2,7 +2,6 @@ package connect
 
 import (
 	"bytes"
-	"context"
 	"testing"
 	"time"
 
@@ -62,9 +61,10 @@ func TestH3HybridStreamWriteErrorDoesNotStallTheGeneration(t *testing.T) {
 	// Before the ordering was fixed the drain waited on a channel that only the
 	// dispatcher closes after it sees the cancel that the same drain was holding
 	// up, so the generation stalled and never re-dialed.
-	harness.stream.CancelRead(0)
+	harness.serverStream(t).CancelRead(0)
 	select {
-	case route <- MessagePoolCopy(bytes.Repeat([]byte("w"), 200)):
+	// large enough to take the reliable stream lane, which is the write that fails
+	case route <- MessagePoolCopy(bytes.Repeat([]byte("w"), 3000)):
 	case <-time.After(2 * time.Second):
 	}
 
@@ -90,8 +90,8 @@ func TestH3HybridSendDatagramSubHeaderMTUFallsBackToStream(t *testing.T) {
 	}
 
 	belowHeader := H3DatagramHeaderByteCount - 8
-	useStream, _, err := fragmenter.SendHybrid(context.Background(), message, settings.TargetDatagramByteCount,
-		func(context.Context, []byte) error {
+	useStream, _, err := fragmenter.SendHybrid(message, settings.TargetDatagramByteCount,
+		func([]byte) error {
 			return &quic.DatagramTooLargeError{MaxDatagramPayloadSize: int64(belowHeader)}
 		})
 	if err != nil {

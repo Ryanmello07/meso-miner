@@ -15,23 +15,22 @@ import (
 // pointed at another fork, the timer would replace the meso provider and
 // tool with that fork's build.
 const (
-	mesoAPIPrefix      = "https://api.github.com/repos/urfoundation/meso-miner/releases/"
+	mesoAPIPrefix      = "https://api.github.com/repos/urfoundation/meso-miner"
 	mesoDownloadPrefix = "https://github.com/urfoundation/meso-miner/releases/download/"
 )
 
 func TestReleaseURLBuildersUseMesoRepo(t *testing.T) {
-	tag := "v2026.9.22-1052862940-meso"
+	tag := "v2026.10.20-1076956260-meso"
+	if repoAPIBase != mesoAPIPrefix {
+		t.Errorf("repoAPIBase = %q, want %q", repoAPIBase, mesoAPIPrefix)
+	}
 	cases := map[string]string{
-		"releaseLatestAPIURL": releaseLatestAPIURL(),
-		"releaseTagAPIURL":    releaseTagAPIURL(tag),
-		"providerTarballURL":  providerTarballURL(tag),
-		"toolAssetURL":        toolAssetURL(tag, "urnet-tools-linux-amd64"),
+		"providerTarballURL": providerTarballURL(tag),
+		"toolAssetURL":       toolAssetURL(tag, "urnet-tools-linux-amd64"),
 	}
 	want := map[string]string{
-		"releaseLatestAPIURL": mesoAPIPrefix + "latest",
-		"releaseTagAPIURL":    mesoAPIPrefix + "tags/" + tag,
-		"providerTarballURL":  mesoDownloadPrefix + tag + "/urnetwork-provider-" + tag + ".tar.gz",
-		"toolAssetURL":        mesoDownloadPrefix + tag + "/urnet-tools-linux-amd64",
+		"providerTarballURL": mesoDownloadPrefix + tag + "/urnetwork-provider-" + tag + ".tar.gz",
+		"toolAssetURL":       mesoDownloadPrefix + tag + "/urnet-tools-linux-amd64",
 	}
 	for name, got := range cases {
 		if got != want[name] {
@@ -71,14 +70,17 @@ func withRecordingTransport(t *testing.T, body string) *recordingTransport {
 }
 
 func TestFetchLatestReleaseUsesMesoRepo(t *testing.T) {
-	tag := "v2026.9.22-1052862940-meso"
-	rt := withRecordingTransport(t, `{"tag_name":"`+tag+`","assets":[{"name":"urnetwork-provider-`+tag+`.tar.gz","digest":"sha256:abc"}]}`)
+	tag := "v2026.10.20-1076956260-meso"
+	// fetchLatestRelease walks the releases listing, so the canned body is a
+	// JSON array (one page) rather than a single release object.
+	rt := withRecordingTransport(t, `[{"tag_name":"`+tag+`","assets":[{"name":"urnetwork-provider-`+tag+`.tar.gz","digest":"sha256:abc"}]}]`)
 	info, err := fetchLatestRelease()
 	if err != nil {
 		t.Fatalf("fetchLatestRelease: %v", err)
 	}
-	if len(rt.urls) != 1 || rt.urls[0] != mesoAPIPrefix+"latest" {
-		t.Errorf("requested %v, want [%s]", rt.urls, mesoAPIPrefix+"latest")
+	wantURL := mesoAPIPrefix + "/releases?per_page=100&page=1"
+	if len(rt.urls) != 1 || rt.urls[0] != wantURL {
+		t.Errorf("requested %v, want [%s]", rt.urls, wantURL)
 	}
 	if !strings.HasPrefix(info.URL, mesoDownloadPrefix) {
 		t.Errorf("download URL %q is not under %s", info.URL, mesoDownloadPrefix)
@@ -86,14 +88,15 @@ func TestFetchLatestReleaseUsesMesoRepo(t *testing.T) {
 }
 
 func TestFetchReleaseByTagUsesMesoRepo(t *testing.T) {
-	tag := "v2026.9.22-1052862940-meso"
+	tag := "v2026.10.20-1076956260-meso"
 	rt := withRecordingTransport(t, `{"tag_name":"`+tag+`","assets":[{"name":"urnetwork-provider-`+tag+`.tar.gz","digest":"sha256:abc"}]}`)
 	info, err := fetchReleaseByTag(tag)
 	if err != nil {
 		t.Fatalf("fetchReleaseByTag: %v", err)
 	}
-	if len(rt.urls) != 1 || rt.urls[0] != mesoAPIPrefix+"tags/"+tag {
-		t.Errorf("requested %v, want [%s]", rt.urls, mesoAPIPrefix+"tags/"+tag)
+	wantURL := mesoAPIPrefix + "/releases/tags/" + tag
+	if len(rt.urls) != 1 || rt.urls[0] != wantURL {
+		t.Errorf("requested %v, want [%s]", rt.urls, wantURL)
 	}
 	if !strings.HasPrefix(info.URL, mesoDownloadPrefix) {
 		t.Errorf("download URL %q is not under %s", info.URL, mesoDownloadPrefix)

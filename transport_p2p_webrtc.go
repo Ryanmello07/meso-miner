@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	mathrand "math/rand"
 	"net"
 	"os"
 	"sync"
@@ -427,16 +428,16 @@ func DefaultWebRtcSettings() *WebRtcSettings {
 		UdpSocketBufferByteCount: mib(4),
 
 		DataChannelLabel: "data",
-		IceServerUrls: []string{
-			"stun:openrelay.metered.ca:80",
-			"stun:openrelay.metered.ca:443",
-			"stun:stun.stunprotocol.org:3478",
-			"stun:stun.l.google.com:19302",
-			"stun:stun1.l.google.com:19302",
-			"stun:stun2.l.google.com:19302",
-			"stun:stun3.l.google.com:19302",
-			"stun:stun4.l.google.com:19302",
-		},
+		// Offer a fresh random subset of the pool per session. The fork's former
+		// fixed list carried stun:openrelay.metered.ca (times out on both ports)
+		// and stun:stun.stunprotocol.org (no longer resolves): every ICE gather
+		// waited on them (measured 2026-10-15: 3,200 openrelay timeouts in one
+		// 5 MB log window on a 1-CPU node). Upstream dropped both on 2026-07-25
+		// and moved to a sampled pool on 2026-10-07. A dead pool entry now costs at
+		// most one StunGatherTimeout, and only IceServerSampleCount are drawn.
+		IceServerPoolUrls:    defaultStunServerUrls,
+		IceServerSampleCount: defaultIceServerSampleCount,
+		StunGatherTimeout:    2 * time.Second,
 	}
 }
 
@@ -466,10 +467,35 @@ type WebRtcSettings struct {
 	// receive buffer of every ICE UDP socket (clamped to rmem_max/wmem_max).
 	UdpSocketBufferByteCount ByteCount
 
+	// StunGatherTimeout, when positive, bounds ICE server gathering: it is
+	// passed to Pion's SettingEngine.SetSTUNGatherTimeout and used as the
+	// operation timeout of the per-peer ICE name resolver
+	// (ice_resolve_net.go). Zero keeps Pion's own gather default and leaves a
+	// name lookup bounded only by the peer generation's lifetime.
+	StunGatherTimeout time.Duration
+
 	DataChannelLabel string
 
 	// add stun:xxx urls here
+	// IceServerUrls, when non-empty, pins the exact ICE/STUN servers offered and
+	// overrides the pool. Leave it empty in production to get a per-session
+	// random subset; set it to pin servers (operator override, or a test).
 	IceServerUrls []string
+	// IceServerPoolUrls is the pool a per-session subset is drawn from when
+	// IceServerUrls is empty. See defaultStunServerUrls.
+	IceServerPoolUrls []string
+	// IceServerSampleCount is how many pool servers to offer per session. 0 or a
+	// value past the pool size offers the whole pool.
+	IceServerSampleCount int
+	// Nil in production; tests inject a seeded source so the per-session subset
+	// is deterministic (see selectIceServerUrls).
+	iceServerRandForTest *mathrand.Rand
+
+	// iceResolverForTest, when set, is the resolver the per-peer ICE name
+	// resolver wraps (ice_resolve_net.go). Nil in production; tests provide a
+	// context-aware DNS boundary without depending on the host resolver or
+	// packet timing.
+	iceResolverForTest *net.Resolver
 }
 
 // pionLoggerFactory routes pion logs through a Logger, so the webrtc stack
@@ -696,15 +722,24 @@ type peerConn struct {
 
 	outboundProgress  chan struct{}
 	progressWatchOnce sync.Once
+
+	// cancelIceResolve ends the peer generation's cancelable ICE name
+	// resolver (ice_resolve_net.go). Run's deferred teardown calls it before
+	// PeerConnection.Close joins the ICE gatherer.
+	cancelIceResolve context.CancelFunc
 }
 
 func newPeerConn(ctx context.Context, key peerConnKey, sourceId Id, active bool, signalSender SignalSender, settings *WebRtcSettings) (*peerConn, error) {
-	pc, err := createWebRtcPeerConnection(ctx, active, settings)
+	// The generation's own context exists before its socket network is built,
+	// so retiring the generation also cancels any ICE name lookup still parked
+	// for it (ice_resolve_net.go).
+	cancelCtx, cancel := context.WithCancel(ctx)
+
+	pc, cancelIceResolve, err := createWebRtcPeerConnection(cancelCtx, active, settings)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
-
-	cancelCtx, cancel := context.WithCancel(ctx)
 
 	conn := &peerConn{
 		ctx:          cancelCtx,
@@ -720,6 +755,7 @@ func newPeerConn(ctx context.Context, key peerConnKey, sourceId Id, active bool,
 		connectedCallbacks: NewCallbackList[func(connected bool)](),
 		connMonitor:        NewMonitor(),
 		outboundProgress:   make(chan struct{}, 1),
+		cancelIceResolve:   cancelIceResolve,
 	}
 	return conn, nil
 }
@@ -727,6 +763,13 @@ func newPeerConn(ctx context.Context, key peerConnKey, sourceId Id, active bool,
 func (self *peerConn) Run() {
 	defer func() {
 		self.cancel()
+
+		// Cancel ICE name resolution before PeerConnection.Close joins the
+		// ICE gatherer: a lookup parked for this generation would otherwise
+		// hold the join open (ice_resolve_net.go).
+		if self.cancelIceResolve != nil {
+			self.cancelIceResolve()
+		}
 
 		self.stateLock.Lock()
 		conn := self.conn

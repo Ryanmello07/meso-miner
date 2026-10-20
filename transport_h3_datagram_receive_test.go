@@ -34,10 +34,6 @@ type h3TestSession struct {
 type h3TestServer struct {
 	port     int
 	sessions chan h3TestSession
-	// beforeAuthReply, when set, runs after the auth frame is read and before the
-	// reply is written, so a test can hold the dial in flight. Set it before the
-	// client dials; it is read once per connection.
-	beforeAuthReply func()
 }
 
 // startH3TestServer listens on loopback. accept says whether it takes a
@@ -105,9 +101,6 @@ func startH3TestServer(
 			if err != nil {
 				return
 			}
-			if server.beforeAuthReply != nil {
-				server.beforeAuthReply()
-			}
 			err = framer.Write(stream, responseBytes)
 			MessagePoolReturn(responseBytes)
 			if err != nil {
@@ -138,6 +131,9 @@ func startH3TestServer(
 // the loopback server, with a route manager so it can register routes.
 func newH3DatagramTestTransport(ctx context.Context, cancel context.CancelFunc, port int) *PlatformTransport {
 	settings := DefaultPlatformTransportSettings()
+	// these tests exercise the operator gates, which decide the offer when the
+	// explicit setting is off (the setting itself defaults on, as upstream)
+	settings.EnableH3Datagrams = false
 	settings.EnableH3 = true
 	settings.H3Port = port
 	settings.FramerSettings = DefaultFramerSettings(int(DefaultClientSettings().MinimumMessageLenLimit()))
@@ -162,7 +158,8 @@ func newH3DatagramTestTransport(ctx context.Context, cancel context.CancelFunc, 
 		targetMode:           TransportModeAuto,
 		mode:                 NewMonitorValue[TransportMode](TransportModeNone),
 	}
-	transport.auth.Store(&ClientAuth{ByJwt: "testing", InstanceId: NewId(), AppVersion: "testing"})
+	transport.auth = &ClientAuth{ByJwt: "testing", InstanceId: NewId(), AppVersion: "testing"}
+	completeTestTransport(transport)
 	return transport
 }
 
@@ -200,7 +197,7 @@ func sendSmallDatagramMessage(t *testing.T, conn *quic.Conn, message []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fragmenter.Send(context.Background(), message, settings.TargetDatagramByteCount, func(_ context.Context, datagram []byte) error { return conn.SendDatagram(datagram) }); err != nil {
+	if _, err := fragmenter.Send(message, settings.TargetDatagramByteCount, func(datagram []byte) error { return conn.SendDatagram(datagram) }); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -229,13 +226,22 @@ func TestH3DatagramAcceptedDeliversBothLanes(t *testing.T) {
 	transportCtx, transportCancel := context.WithCancel(ctx)
 	transport := newH3DatagramTestTransport(transportCtx, transportCancel, server.port)
 	done := make(chan struct{})
-	go func() { defer close(done); transport.runH3(TransportModeH3, 0, 1) }()
+	go func() { defer close(done); transport.runH3(transport.ctx, TransportModeH3, 0, 1) }()
 	defer func() { transportCancel(); <-done }()
 
 	session := waitForSession(t, server)
 	if session.offerVersion != H3DatagramProtocolVersion || !session.accepted {
 		t.Fatalf("server saw offer=%d accepted=%v", session.offerVersion, session.accepted)
 	}
+	// With DATAGRAM the reliable stream lane applies backpressure to its route
+	// (the reader retains one frame until the route accepts it), so the route
+	// needs a consumer for the stream frame to count as delivered.
+	reader := transport.routeManager.OpenMultiRouteReader(DestinationId(NewId()))
+	go func() {
+		for ctx.Err() == nil {
+			reader.Read(ctx, 100*time.Millisecond)
+		}
+	}()
 	waitFor(t, "both lanes delivered", func() bool {
 		return TransportModeStats().H3FramesRx >= before.H3FramesRx+2
 	})
@@ -273,7 +279,7 @@ func TestH3DatagramOfferToAnOldServerFallsBackToTheStream(t *testing.T) {
 	transportCtx, transportCancel := context.WithCancel(ctx)
 	transport := newH3DatagramTestTransport(transportCtx, transportCancel, server.port)
 	done := make(chan struct{})
-	go func() { defer close(done); transport.runH3(TransportModeH3, 0, 1) }()
+	go func() { defer close(done); transport.runH3(transport.ctx, TransportModeH3, 0, 1) }()
 	defer func() { transportCancel(); <-done }()
 
 	session := waitForSession(t, server)
@@ -305,7 +311,7 @@ func TestH3DatagramGateOffMakesNoOffer(t *testing.T) {
 	transportCtx, transportCancel := context.WithCancel(ctx)
 	transport := newH3DatagramTestTransport(transportCtx, transportCancel, server.port)
 	done := make(chan struct{})
-	go func() { defer close(done); transport.runH3(TransportModeH3, 0, 1) }()
+	go func() { defer close(done); transport.runH3(transport.ctx, TransportModeH3, 0, 1) }()
 	defer func() { transportCancel(); <-done }()
 
 	session := waitForSession(t, server)
@@ -337,7 +343,7 @@ func TestH3DatagramShutdownWhileDatagramsFlowDoesNotPanic(t *testing.T) {
 				}
 				message := bytes.Repeat([]byte("f"), 300)
 				for ctx.Err() == nil {
-					if _, err := fragmenter.Send(context.Background(), message, settings.TargetDatagramByteCount, func(_ context.Context, datagram []byte) error { return conn.SendDatagram(datagram) }); err != nil {
+					if _, err := fragmenter.Send(message, settings.TargetDatagramByteCount, func(datagram []byte) error { return conn.SendDatagram(datagram) }); err != nil {
 						return
 					}
 					sent.Add(1)
@@ -346,7 +352,7 @@ func TestH3DatagramShutdownWhileDatagramsFlowDoesNotPanic(t *testing.T) {
 			transportCtx, transportCancel := context.WithCancel(ctx)
 			transport := newH3DatagramTestTransport(transportCtx, transportCancel, server.port)
 			done := make(chan struct{})
-			go func() { defer close(done); transport.runH3(TransportModeH3, 0, 1) }()
+			go func() { defer close(done); transport.runH3(transport.ctx, TransportModeH3, 0, 1) }()
 
 			waitForSession(t, server)
 			waitFor(t, "datagrams flowing", func() bool { return 50 <= sent.Load() })
@@ -374,7 +380,7 @@ func TestH3DatagramGateChangeReconnectsWithoutCountingADrop(t *testing.T) {
 	transportCtx, transportCancel := context.WithCancel(ctx)
 	transport := newH3DatagramTestTransport(transportCtx, transportCancel, server.port)
 	done := make(chan struct{})
-	go func() { defer close(done); transport.runH3(TransportModeH3, 0, 1) }()
+	go func() { defer close(done); transport.runH3(transport.ctx, TransportModeH3, 0, 1) }()
 	defer func() { transportCancel(); <-done }()
 
 	first := waitForSession(t, server)

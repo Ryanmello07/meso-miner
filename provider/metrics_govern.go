@@ -57,7 +57,16 @@ func writeGovernMetrics(b *strings.Builder) {
 		fmt.Fprintf(b, "urnet_dead_client_recovered_silence_seconds_bucket{le=\"%g\"} %d\n", bound, cumulative[i])
 	}
 	fmt.Fprintf(b, "urnet_dead_client_recovered_silence_seconds_bucket{le=\"+Inf\"} %d\nurnet_dead_client_recovered_silence_seconds_count %d\n", cumulative[len(cumulative)-1], cumulative[len(cumulative)-1])
+	mx := connect.TransferMoreStatsNow()
 	fmt.Fprintf(b, "# HELP urnet_transfer_acked_bytes_total Frame bytes the far end acknowledged. Divide its rate by the send rates for the ack yield.\n# TYPE urnet_transfer_acked_bytes_total counter\nurnet_transfer_acked_bytes_total %d\n", xs.BudgetEarnedBytes)
+	fmt.Fprintf(b, "# HELP urnet_transfer_ack_sent_total Acknowledgement frames this node wrote to peers.\n# TYPE urnet_transfer_ack_sent_total counter\nurnet_transfer_ack_sent_total{unit=\"frames\"} %d\nurnet_transfer_ack_sent_total{unit=\"bytes\"} %d\n", mx.AckFrames, mx.AckBytes)
+	fmt.Fprintf(b, "# HELP urnet_transfer_destination_sent_total Frames that reached a carrier, first sends and resends, by destination class.\n# TYPE urnet_transfer_destination_sent_total counter\nurnet_transfer_destination_sent_total{dest=\"client\",unit=\"frames\"} %d\nurnet_transfer_destination_sent_total{dest=\"client\",unit=\"bytes\"} %d\nurnet_transfer_destination_sent_total{dest=\"control\",unit=\"frames\"} %d\nurnet_transfer_destination_sent_total{dest=\"control\",unit=\"bytes\"} %d\n", mx.ClientSentFrames, mx.ClientSentBytes, mx.ControlSentFrames, mx.ControlSentBytes)
+	fmt.Fprintf(b, "# HELP urnet_transfer_sequence_exits_total Send sequences that ended, by why.\n# TYPE urnet_transfer_sequence_exits_total counter\n")
+	for _, reason := range connect.SendSequenceExitReasons() {
+		fmt.Fprintf(b, "urnet_transfer_sequence_exits_total{reason=\"%s\"} %d\n", reason, mx.SequenceExits[reason])
+	}
+	fmt.Fprintf(b, "# HELP urnet_transfer_retained_bytes Undelivered provider return bytes held for retry right now across all send sequences.\n# TYPE urnet_transfer_retained_bytes gauge\nurnet_transfer_retained_bytes %d\n", mx.RetainedBytes)
+	fmt.Fprintf(b, "# HELP urnet_dead_client_released_held_bytes_total Undelivered bytes held for clients at the moment they were released, or in shadow would have been.\n# TYPE urnet_dead_client_released_held_bytes_total counter\nurnet_dead_client_released_held_bytes_total %d\n", mx.ReleasedHeldBytes)
 	for _, shadow := range []bool{false, true} {
 		mode := "enforce"
 		if shadow {
@@ -71,6 +80,45 @@ func writeGovernMetrics(b *strings.Builder) {
 			fmt.Fprintf(b, "urnet_dead_client_return_after_release_seconds_bucket{mode=\"%s\",le=\"%g\"} %d\n", mode, bound, rc[i])
 		}
 		fmt.Fprintf(b, "urnet_dead_client_return_after_release_seconds_bucket{mode=\"%s\",le=\"+Inf\"} %d\nurnet_dead_client_return_after_release_seconds_count{mode=\"%s\"} %d\n", mode, rc[len(rc)-1], mode, rc[len(rc)-1])
+	}
+	sb := connect.SocketBytesNow()
+	fmt.Fprintf(b, "# HELP urnet_socket_bytes_total Bytes on the proxy sockets by what the connection was doing: handshake (a connect attempt that had not finished, failed ones included), session (the same connection after it connected) and other (connections made outside a connect attempt).\n# TYPE urnet_socket_bytes_total counter\n")
+	for _, phase := range connect.SocketPhaseNames() {
+		fmt.Fprintf(b, "urnet_socket_bytes_total{phase=\"%s\",dir=\"rx\"} %d\nurnet_socket_bytes_total{phase=\"%s\",dir=\"tx\"} %d\n", phase, sb.Rx[phase], phase, sb.Tx[phase])
+	}
+	fmt.Fprintf(b, "# HELP urnet_connect_attempt_bytes_total Bytes spent by finished platform connect attempts, by outcome.\n# TYPE urnet_connect_attempt_bytes_total counter\n")
+	outcomes := connect.ConnectAttemptOutcomesNow()
+	for _, outcome := range outcomes {
+		fmt.Fprintf(b, "urnet_connect_attempt_bytes_total{outcome=\"%s\",dir=\"rx\"} %d\nurnet_connect_attempt_bytes_total{outcome=\"%s\",dir=\"tx\"} %d\n", outcome.Outcome, outcome.RxBytes, outcome.Outcome, outcome.TxBytes)
+	}
+	fmt.Fprintf(b, "# HELP urnet_connect_attempts_total Finished platform connect attempts, by outcome.\n# TYPE urnet_connect_attempts_total counter\n")
+	for _, outcome := range outcomes {
+		fmt.Fprintf(b, "urnet_connect_attempts_total{outcome=\"%s\"} %d\n", outcome.Outcome, outcome.Attempts)
+	}
+	pingTx, pingRx := connect.TransportPingFramesNow()
+	fmt.Fprintf(b, "# HELP urnet_transport_ping_frames_total Keepalive frames on the platform transports.\n# TYPE urnet_transport_ping_frames_total counter\nurnet_transport_ping_frames_total{dir=\"tx\"} %d\nurnet_transport_ping_frames_total{dir=\"rx\"} %d\n", pingTx, pingRx)
+	se := connect.SessionEndStatsNow()
+	fmt.Fprintf(b, "# HELP urnet_transport_session_lifetime_seconds Platform transport sessions that ended, by proxy source, how long they lived and why. Every session is a new connection and costs about 1.75 MB of platform speed tests.\n# TYPE urnet_transport_session_lifetime_seconds histogram\n")
+	for _, source := range connect.ProxySourceNames() {
+		for _, reason := range connect.SessionEndReasons() {
+			cumulative := se.Cumulative[source][reason]
+			if cumulative[len(cumulative)-1] == 0 {
+				continue
+			}
+			for i, bound := range se.BoundsSeconds {
+				fmt.Fprintf(b, "urnet_transport_session_lifetime_seconds_bucket{source=\"%s\",reason=\"%s\",le=\"%g\"} %d\n", source, reason, bound, cumulative[i])
+			}
+			fmt.Fprintf(b, "urnet_transport_session_lifetime_seconds_bucket{source=\"%s\",reason=\"%s\",le=\"+Inf\"} %d\nurnet_transport_session_lifetime_seconds_count{source=\"%s\",reason=\"%s\"} %d\n", source, reason, cumulative[len(cumulative)-1], source, reason, cumulative[len(cumulative)-1])
+		}
+	}
+	bursts, largestBurst := connect.RemoteCloseBurstsNow()
+	fmt.Fprintf(b, "# HELP urnet_transport_mass_disconnects_total Bursts of 50 or more transports closed by the platform or network within 10 seconds, the signature of a platform rollout cycling connections.\n# TYPE urnet_transport_mass_disconnects_total counter\nurnet_transport_mass_disconnects_total %d\n# HELP urnet_transport_mass_disconnect_largest The most transports closed within one 10 second window.\n# TYPE urnet_transport_mass_disconnect_largest gauge\nurnet_transport_mass_disconnect_largest %d\n", bursts, largestBurst)
+	fmt.Fprintf(b, "# HELP urnet_transport_close_cause_total Platform transport read and write errors by cause: a websocket close code from the platform, a timeout, a reset, an EOF, or our own teardown.\n# TYPE urnet_transport_close_cause_total counter\n")
+	for _, cause := range connect.TransportCloseCausesNow() {
+		if cause.Count == 0 {
+			continue
+		}
+		fmt.Fprintf(b, "urnet_transport_close_cause_total{source=\"%s\",mode=\"%s\",side=\"%s\",cause=\"%s\"} %d\n", cause.Source, cause.Mode, cause.Side, cause.Cause, cause.Count)
 	}
 	fmt.Fprintf(b, "# HELP urnet_transfer_resend_depth_total Resends by how many times the item had already been sent.\n# TYPE urnet_transfer_resend_depth_total counter\n")
 	for i, label := range []string{"2", "3-4", "5-8", "9+"} {

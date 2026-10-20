@@ -263,11 +263,6 @@ func TestWithTempHomeStartsWithAnEmptyDeferredCritQueue(t *testing.T) {
 	}
 }
 
-// The URL launch line goes through reload's logImportant like the trim
-// receipts: its events.log copy is written after r.mu is released, in reload
-// order, and with exactly one newline. Writing it with importantLogf("%s\n")
-// did the file I/O while reload held r.mu and the proxy lock, and left a blank
-// line after it in events.log.
 func TestURLLaunchLineWritesEventsLogOutsideTheReloaderLockWithoutBlankLines(t *testing.T) {
 	withTempHome(t)
 	cache := map[string]ProxyURLEntry{}

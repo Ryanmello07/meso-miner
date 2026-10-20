@@ -40,6 +40,10 @@ meso-miner/
 │   ├── metrics_provider.go       # Provider-specific metrics registration
 │   ├── contract_metrics.go       # Per-contract Prometheus counters
 │   ├── lifetime_metrics.go       # Provider lifetime Prometheus gauges
+│   ├── family_transport.go       # Dual-stack group for the direct identity (`ip_version`: dual/ipv4/ipv6/legacy)
+│   ├── network_refresh.go        # Network JWT renewal at POST /auth/network-refresh, legacy flow as fallback
+│   ├── proxy_udp_check.go        # Per-proxy SOCKS5 UDP relay check and TCP/UDP exit comparison
+│   ├── socks5_udp.go             # SOCKS5 UDP relay packet conn so a proxied H3 exits through its proxy
 │   └── Makefile                  # Cross-compile targets (amd64, arm64, darwin)
 │
 ├── hub/                          # [REMOVED v31.3+] Fleet bandwidth dashboard server (deprecated)
@@ -60,7 +64,7 @@ meso-miner/
 │   └── test.sh
 │
 ├── docker/                       # Docker startup scripts
-│   ├── scripts/                  # start_jwt.sh, start_stable.sh, start_nightly.sh, urnet-tools.sh
+│   ├── scripts/                  # entrypoint.sh + provider_common.sh/provider_env.sh; start_* wrappers, urnet-tools
 │   └── ...                       # Selected by BUILD env var at container start
 │
 ├── pelican/                      # Pelican game-server panel egg
@@ -132,17 +136,39 @@ meso-miner/
     ├── ip.go                     # IP packet relay core (81 KB)
     ├── ip_remote_multi_client.go # Multi-client relay coordinator
     ├── ip_security.go            # Pre-compiled IP blocklist (2.3 MB)
+    ├── ip_udp_socket_poller*.go  # Shared UDP socket lifecycle: epoll/kqueue/unsupported backends
     ├── transfer.go               # Contract-based bandwidth allocation
     ├── transfer_contract_manager.go  # Per-proxy contract lifecycle
     ├── transfer_route_manager.go     # Adaptive routing with RTT tracking
     ├── transfer_rtt.go           # RTT window measurement
     ├── transfer_encrypt.go       # Per-contract encryption
     ├── transfer_queue.go         # Backpressure queue
+    ├── transfer_memory_budget.go # Composable byte budget shared across queue sequences
+    ├── routing_class.go          # Traffic-class vocabulary (latency, streaming, bulk, ...)
+    ├── routing_classifier_light.go  # Light flow classifier (inert: no consumer installed)
     ├── transport.go              # Transport abstraction layer
+    ├── transport_family.go       # Family-pinned v4/v6 transports and the dual-stack group
+    ├── transport_family_stats.go # Per-family counts, drops by cause, session lifetimes
+    ├── transport_h1plus.go       # H1+ ready-batch writer over the framed carrier
+    ├── http_upgrade.go           # H1 -> framed carrier upgrade (h1_plus), plain WS fallback
+    ├── framed_message_conn.go    # Binary-message conn the upgraded carrier is spoken on
+    ├── message_framer_xl.go      # urnetwork-framerxl/1 wire format (uint32 header, batched writes)
+    ├── transport_sessions.go     # Session lifetime buckets and close cause
+    ├── transport_authorization.go  # Authorization close codes -> close reason
+    ├── transport_credential_refusal.go  # Dials held after a definitively refused credential
+    ├── stream_metrics.go         # Stream/transport counters: kind, lifetime, end reason
+    ├── platform_transport_budget.go  # Aggregate transport budget, make-before-break pairing
     ├── transport_p2p_webrtc.go   # WebRTC P2P transport
+    ├── ice_resolve_net.go        # Peer-generation-scoped ICE address resolution
     ├── transport_pt.go           # Pluggable tunnel transport
     ├── net_http.go               # HTTP proxy with chunked encoding
     ├── net_http_doh.go           # DNS-over-HTTPS resolver
+    ├── net_http_internal_doh.go  # In-process DoH name path for protected domains
+    ├── net_dial_udp_candidates.go  # Progressive UDP dial candidates (first usable family wins)
+    ├── egress_dial.go            # Egress-bound name resolution for control dials
+    ├── egress_darwin.go          # macOS socket interface pinning
+    ├── control_family.go         # Control-plane family policy and demotion ledger
+    ├── control_family_dial.go    # Family-aware control dial, one cross-family retry
     ├── net_resilient.go          # Platform-aware resilient connections
     ├── message_pool.go           # GC-reducing byte buffer pool
     ├── proxy_health.go           # Proxy health scoring

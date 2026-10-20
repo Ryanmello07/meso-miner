@@ -22,6 +22,8 @@ func registerScoutSource(key, source string) {
 		return
 	}
 	scoutSources.Store(key, source)
+	// the connect package labels its transport churn counters by the same source
+	connect.SetProxySource(key, source)
 }
 
 func scoutSourceOf(key string) string {

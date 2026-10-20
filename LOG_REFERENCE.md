@@ -803,15 +803,17 @@ Two triggers (OR logic — either fires a refresh):
 1. **Periodic (7-day)**: Has it been ≥7 days since the last successful refresh? Primary mechanism. Guarantees the token is rotated on a fixed cadence.
 2. **Expiry fallback (48h)**: Is the token within 48 hours of expiring? Safety net if the periodic refresh failed repeatedly.
 
-The refresher uses `/auth/code-create → /auth/code-login` (same flow as initial login). Before overwriting the on-disk JWT, it verifies the new token against `GET /transfer/stats`. A regression guard rejects any response containing a `client_id` claim (catches future regressions).
+The refresher tries `POST /auth/network-refresh` first, which renews the presented network token in one call, and falls back to `/auth/code-create → /auth/code-login` (same flow as initial login) when the route is missing (404, 405, 501) or the server refuses the request. **A 401 is terminal**: it is not a missing route, and the legacy flow would present the same dead token, fail the same way, and mask the real error, so a 401 ends the refresh instead of falling back. A 403 and the other 4xx refusals (except 408, 425 and 429) keep the existing fallback. A 408, 425, 429, a 5xx or a transport error stays an error. Before overwriting the on-disk JWT, both success paths verify the new token against `GET /transfer/stats`. A regression guard rejects any response containing a `client_id` claim (catches future regressions).
 
 | Message | Meaning |
 |---|---|
+| `network-refresh` | Renewing the network JWT at `POST /auth/network-refresh` in one call. |
+| `network-refresh unavailable (...); falling back` | The one-call route was missing or refused, so the three-step flow runs. A 401 never reaches this line. |
 | `step 1/3` | Requesting an auth code from the API. |
 | `step 2/3` | Exchanging the auth code for a fresh network JWT. |
 | `step 3/3` | Verifying the new token works via a read-only stats endpoint. |
 | `refresh OK` | New network JWT written to disk successfully. |
-| `refresh FAILED: ... — keeping existing JWT` | Refresh failed at any step. The existing JWT is preserved. Will retry in 1h. |
+| `refresh FAILED: ... — keeping existing JWT` | Refresh failed at any step. The existing JWT is preserved. Will retry in 1h. A 401 from `network-refresh` lands here, with no `step 1/3` lines after it. |
 
 ## 🔑 JWT Startup Health
 
@@ -895,6 +897,31 @@ Rate-limited to 1 per 5 minutes globally. Escalates to 🚨 when failures exceed
 | `🚨 N failures` | Over 100 failures in 5 minutes — likely DNS outage. |
 
 ---
+
+## 🌐 Dual-Stack Platform Transports (`[ipv6]`, `[h1plus]`, `[h3] auto`)
+
+These lines describe the native direct identity's transport group and the H1+/H3 policy. They are informational; no operator action is implied.
+
+```
+[ipv6] direct identity platform transports: dualstack group
+[ipv6] family transports v4=up v6=sleeping standby=down active=false
+[ipv6] dual-stack group at launch; the v6 pin holds until a global v6 address appears (probe: no global v6 address)
+[ipv6] ip-version dual -> ipv4 (ipv4 transport true, ipv6 transport false, family-agnostic transport: held)
+[ipv6] v4 h1 connected carrier=websocket remote=...
+[ipv6] v6 h1 session ended lived=...
+[h3] auto: 4 -> 8 proxies get the fallback transports (memory pressure 0.22, capacity 8)
+[h1plus] last 10m: attempts=330 accepted=328 websocket=2 fallbacks(rejected=2 invalid=0 io=0 proxy=0) handshake_failures=0 auth_failures=0 avg_handshake=186ms messages=48210 bytes=61MiB flushes=9012 errors(read=3 write=1) largest_message=15999B
+```
+
+| Message | Meaning |
+|---|---|
+| `direct identity platform transports: dualstack group` | The native direct identity launched with the v4 pin, the v6 pin and the family-agnostic standby. The alternative is `legacy single (reason=...)`. |
+| `family transports v4=... v6=... standby=... active=...` | The state tuple changed. `active=true` means the standby is dialing because no pinned transport is connected. |
+| `dual-stack group at launch; the v6 pin holds ...` | The host has no usable global IPv6. The v6 pin sleeps and wakes on a network change instead of spinning through failed dials. |
+| `ip-version <old> -> <new>` | The operator changed `ip_version`; the group is re-pinning break-before-make. |
+| `[ipv6] v4\|v6 h1 connected ...` / `session ended ...` | Per-family platform session lifecycle, with the carrier, remote address and close cause. |
+| `[h3] auto: ...` | The auto controller changed how many proxies get the fallback transports, with the memory pressure and capacity that decided it. |
+| `[h1plus] last 10m: ...` | Ten-minute summary of H1 dials: upgrades accepted, websocket fallbacks and their reasons, handshake and auth failures, messages, bytes, flushes and read/write errors. |
 
 ## 🐌 Proxy Startup Pace Monitor
 
