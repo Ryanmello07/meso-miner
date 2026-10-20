@@ -243,7 +243,34 @@ func insecureNetworkWarning(apiUrl, connectUrl string) string {
 	)
 }
 
-func networkSwitchNotice(dir string) string {
+// apiUrlChanged reports whether selecting newApiUrl changes the network the
+// provider talks to. With no saved config the provider is already on
+// DefaultApiUrl, so writing the default back (or resetting to it) is not a
+// switch. An unreadable config cannot be compared, so it counts as a change:
+// better a superfluous warning than a jwt silently pointed at another network.
+func apiUrlChanged(newApiUrl string) bool {
+	cfg, ok, err := readNetworkConfig()
+	if err != nil {
+		return true
+	}
+	if !ok {
+		return newApiUrl != DefaultApiUrl
+	}
+	return newApiUrl != cfg.ApiUrl
+}
+
+// networkSwitchNotice warns that the credentials already in dir belong to
+// the previously selected network, or returns "" when there are none or when
+// the effective network did not move.
+//
+// changed is the caller's comparison of the effective api_url before and
+// after the command. A save or reset that leaves the network where it was is
+// not a switch — the jwt still belongs to the selected network — and the
+// notice costs a single-use auth code when followed, so it must stay quiet.
+func networkSwitchNotice(dir string, changed bool) string {
+	if !changed {
+		return ""
+	}
 	if _, err := os.Stat(filepath.Join(dir, "jwt")); err != nil {
 		return ""
 	}
@@ -279,12 +306,15 @@ func networkShowText() (string, error) {
 	return text, nil
 }
 
-func networkSwitchNoticeForState() string {
+// networkSwitchNoticeForState is networkSwitchNotice for the provider state
+// directory that holds network.json. changed must say whether the command
+// moved the effective network.
+func networkSwitchNoticeForState(changed bool) string {
 	p, err := networkConfigPath()
 	if err != nil {
 		return ""
 	}
-	return networkSwitchNotice(filepath.Dir(p))
+	return networkSwitchNotice(filepath.Dir(p), changed)
 }
 
 func urlScheme(rawUrl string) string {
