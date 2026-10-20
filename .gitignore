@@ -35,3 +35,5 @@ review-egg-dsflash-v2.md
 fake-provider
 cov.html
 cov.out
+__pycache__/
+*.pyc
