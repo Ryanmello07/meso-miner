@@ -9,7 +9,7 @@ name: Portable core (cross-OS)
 
 on:
   push:
-    branches: [main, 'feat/v33*']
+    branches: [main]
   pull_request:
     paths-ignore:
       - '**/*.md'

@@ -41,22 +41,18 @@ func chooseNetworkCmd(opts docopt.Opts) {
 	}
 
 	// The switch notice is about credentials issued by a DIFFERENT network, so
-	// it only belongs on a command that changes the effective pair.
-	previous, hadPrevious, _ := readNetworkConfig()
-	networkChanged := func(apiUrl, connectUrl string) bool {
-		return !hadPrevious || previous.ApiUrl != apiUrl || previous.ConnectUrl != connectUrl
-	}
-
+	// it only belongs on a command that changes the effective pair: a reset with
+	// nothing saved, or re-saving the same pair, leaves the selection alone and
+	// a false notice costs a single-use auth code.
 	if reset, _ := opts.Bool("--reset"); reset {
+		changed := apiUrlChanged(DefaultApiUrl)
 		if err := resetNetworkConfig(); err != nil {
 			fmt.Printf("failed to reset network: %s\n", err)
 			os.Exit(1)
 		}
 		fmt.Println("network reset to the main network")
-		if hadPrevious {
-			if notice := networkSwitchNoticeForState(); notice != "" {
-				fmt.Println(notice)
-			}
+		if notice := networkSwitchNoticeForState(changed); notice != "" {
+			fmt.Println(notice)
 		}
 		return
 	}
@@ -81,11 +77,10 @@ func chooseNetworkCmd(opts docopt.Opts) {
 			fmt.Printf("network not saved: %s\n", err)
 			os.Exit(1)
 		}
+		changed := apiUrlChanged(apiUrl)
 		fmt.Printf("network saved (preset): api_url=%s connect_url=%s\n", apiUrl, connectUrl)
-		if networkChanged(apiUrl, connectUrl) {
-			if notice := networkSwitchNoticeForState(); notice != "" {
-				fmt.Println(notice)
-			}
+		if notice := networkSwitchNoticeForState(changed); notice != "" {
+			fmt.Println(notice)
 		}
 		return
 	}
@@ -101,6 +96,7 @@ func chooseNetworkCmd(opts docopt.Opts) {
 		os.Exit(1)
 	}
 
+	changed := apiUrlChanged(apiUrl)
 	if err := writeNetworkConfig(apiUrl, connectUrl); err != nil {
 		fmt.Printf("network not saved: %s\n", err)
 		os.Exit(1)
@@ -109,9 +105,7 @@ func chooseNetworkCmd(opts docopt.Opts) {
 	if warning := insecureNetworkWarning(apiUrl, connectUrl); warning != "" {
 		fmt.Println(warning)
 	}
-	if networkChanged(apiUrl, connectUrl) {
-		if notice := networkSwitchNoticeForState(); notice != "" {
-			fmt.Println(notice)
-		}
+	if notice := networkSwitchNoticeForState(changed); notice != "" {
+		fmt.Println(notice)
 	}
 }

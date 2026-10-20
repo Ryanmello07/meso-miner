@@ -246,7 +246,21 @@ func insecureNetworkWarning(apiUrl, connectUrl string) string {
 // The jwt is minted by one network's api and means nothing to another, so
 // after a switch `provider provide` fails with an auth error whose cause is
 // several steps removed from the message.
-func networkSwitchNotice(dir string) string {
+func apiUrlChanged(newApiUrl string) bool {
+	cfg, ok, err := readNetworkConfig()
+	if err != nil {
+		return true
+	}
+	if !ok {
+		return newApiUrl != DefaultApiUrl
+	}
+	return newApiUrl != cfg.ApiUrl
+}
+
+func networkSwitchNotice(dir string, changed bool) string {
+	if !changed {
+		return ""
+	}
 	if _, err := os.Stat(filepath.Join(dir, "jwt")); err != nil {
 		return ""
 	}
@@ -287,10 +301,10 @@ func networkShowText() (string, error) {
 
 // networkSwitchNoticeForState is networkSwitchNotice for the provider state
 // directory that holds network.json.
-func networkSwitchNoticeForState() string {
+func networkSwitchNoticeForState(changed bool) string {
 	p, err := networkConfigPath()
 	if err != nil {
 		return ""
 	}
-	return networkSwitchNotice(filepath.Dir(p))
+	return networkSwitchNotice(filepath.Dir(p), changed)
 }
