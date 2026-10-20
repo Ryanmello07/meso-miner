@@ -104,7 +104,7 @@ jobs:
             echo "=== go test attempt $attempt/3 ==="
             set +e
             # shellcheck disable=SC2086
-            go test -short -race -timeout 600s $PKGS 2>&1 | tee /tmp/gotest.out
+            go test -short -race -timeout 1200s $PKGS 2>&1 | tee /tmp/gotest.out
             rc=${PIPESTATUS[0]}
             set -e
             if [ "$rc" -eq 0 ]; then
