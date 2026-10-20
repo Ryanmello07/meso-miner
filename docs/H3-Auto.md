@@ -1,9 +1,9 @@
 # H3 Auto
 
 > [!NOTE]
-> **Status: v33.1, unreleased.** `h3 auto` is not in a tagged release yet. Nothing changes unless you set the `h3` control key. This page describes the batch branch, not behavior in a shipped build.
+> **Status: ships in the v34 parity release** (the next meso release, 2026-10-20). `h3 auto` is opt-in: nothing in this page changes anything unless the `h3` control key is set to `auto`. The same release also turns plain H3 on by default for a settled direct-only node (mode `on`), but that is not `auto` and it does not run the sizing controller described here.
 
-`h3 auto` is a value for the existing [`h3`](Configuration.md#-control-socket--runtime-settings) control key. It chooses how many proxies get the H3, H3-over-DNS and DNS-pump fallback policy from the provider's memory limit and its existing memory pressure signal. It does not add a new sensor, a new goroutine or a new metric series.
+`h3 auto` is a value for the existing [`h3`](Configuration.md#-control-socket--runtime-settings) control key. It chooses how many proxies get the H3, H3-over-DNS and DNS-pump fallback policy from the provider's memory limit and its existing memory pressure signal. It does not add a sensor, a background loop or a metric series.
 
 ## What it sizes
 
@@ -17,7 +17,7 @@ urnet-tools set h3 direct  # back to the default, direct identity only
 urnet-tools set h3 off     # H1 only
 ```
 
-The setting is live and persisted. Clearing the key hands the decision back to `URNETWORK_H3` and the startup default. There is no environment variable for `auto`.
+The setting is live and persisted. Clearing the key hands the decision back to the startup default: `URNETWORK_H3` if it is set, otherwise `direct`; a settled direct-only node resolves to `on` at startup. There is no environment variable for `auto`.
 
 Entering `auto` starts the target at zero and widens from there. Leaving it resets the controller, so a later re-entry starts conservatively instead of resuming an old count.
 
@@ -67,7 +67,7 @@ The usual H3 signals still apply: the `[health]` fields (`h3_up`, `h3_tx_share`,
 
 ## Default and compatibility
 
-- Default is off. With no `h3` key, the provider behaves as it does on v33.
+- The built-in default is `direct`, not `auto`; a settled direct-only node resolves the default to `on`. Neither runs the auto controller.
 - `off`, `direct`, `on`, a positive proxy count and `all` keep their existing meaning.
 - `auto` parses on both the provider control socket and the `urnet-tools` client and round-trips as `auto`.
 - A change between `direct`, a count, `all` and `auto` never restarts the direct identity, because the direct policy stays `direct`. A change to or from `on` does, as today.
