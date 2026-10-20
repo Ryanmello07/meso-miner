@@ -1,0 +1,396 @@
+//go:build linux || darwin
+
+package durablehead
+
+// The publication window: a cancel or kill after the create marker exists must
+// leave a head that reopens. Reconcile clears the pair the marker names; a
+// temporary with no marker is unknown and stays refused.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
+
+	"github.com/urnetwork/connect/durablevolume"
+	"github.com/urnetwork/connect/internal/durablepath"
+)
+
+var publishCancelBoundaries = []string{
+	"temporary-created",
+	"pending-written",
+	"pending-synced",
+	"temporary-written",
+	"temporary-synced",
+	"snapshot-renamed",
+	"snapshot-directory-synced",
+	"predecessor-removed",
+}
+
+// Boundaries after the next bytes are complete and the checkpoint names them
+// finish on reconcile; earlier ones abandon the uncommitted publication.
+var publishCancelCompletes = map[string]bool{
+	"temporary-written":         true,
+	"temporary-synced":          true,
+	"snapshot-renamed":          true,
+	"snapshot-directory-synced": true,
+	"predecessor-removed":       true,
+}
+
+func tryOpenOwner(t *testing.T, root string, ctx context.Context) (*durablepath.Directory, *os.File, *Owner, error) {
+	t.Helper()
+	directory, err := durablepath.Open(ctx, root, durablevolume.ReadWrite, false)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	lock, err := os.OpenFile(filepath.Join(root, testSpec.LockName), os.O_RDWR, 0)
+	if err != nil {
+		directory.Close()
+		return nil, nil, nil, err
+	}
+	owner, err := Open(ctx, directory, lock, testSpec)
+	if err != nil {
+		lock.Close()
+		directory.Close()
+		return nil, nil, nil, err
+	}
+	return directory, lock, owner, nil
+}
+
+func tryReconcileOwner(t *testing.T, root string, ctx context.Context) (*durablepath.Directory, *os.File, *Owner, error) {
+	t.Helper()
+	directory, err := durablepath.Open(ctx, root, durablevolume.ReadWrite, false)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	lock, err := os.OpenFile(filepath.Join(root, testSpec.LockName), os.O_RDWR, 0)
+	if err != nil {
+		directory.Close()
+		return nil, nil, nil, err
+	}
+	owner, err := Reconcile(ctx, directory, lock, testSpec)
+	if err != nil {
+		lock.Close()
+		directory.Close()
+		return nil, nil, nil, err
+	}
+	return directory, lock, owner, nil
+}
+
+func closeOwner(t *testing.T, directory *durablepath.Directory, lock *os.File, owner *Owner) {
+	t.Helper()
+	if err := errors.Join(owner.Close(), lock.Close(), directory.Close()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func durableTemporaryNames(t *testing.T, root string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".durable-head-") {
+			names = append(names, entry.Name())
+		}
+	}
+	return names
+}
+
+func readOwnerValue(t *testing.T, owner *Owner) string {
+	t.Helper()
+	raw, present, err := owner.Read()
+	if err != nil || !present {
+		t.Fatalf("read committed value: %v present=%t", err, present)
+	}
+	return string(raw)
+}
+
+// Every cancel point must leave a head that reopens: either the committed
+// value with no temporary, or an anchored pending that Reconcile finishes.
+func TestPublishCancelAtEveryStepLeavesARecoverableHead(t *testing.T) {
+	for _, boundary := range publishCancelBoundaries {
+		t.Run(boundary, func(t *testing.T) {
+			self := newFixture(t)
+			if err := self.owner.Publish([]byte("committed"), nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := self.close(); err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithCancel(self.volume.Context)
+			directory, lock, owner, err := tryOpenOwner(t, self.root, ctx)
+			if err != nil {
+				cancel()
+				t.Fatal(err)
+			}
+			owner.at = func(name string) error {
+				if name == boundary {
+					cancel()
+				}
+				return nil
+			}
+			if err := owner.Publish([]byte("next"), nil); err == nil {
+				closeOwner(t, directory, lock, owner)
+				t.Fatalf("cancel at %s did not stop the publication", boundary)
+			}
+			cancel()
+			closeOwner(t, directory, lock, owner)
+
+			reopenCtx, reopenCancel := context.WithTimeout(self.volume.Context, 5*time.Second)
+			defer reopenCancel()
+			reopenDir, reopenLock, reopened, openErr := tryOpenOwner(t, self.root, reopenCtx)
+			if openErr == nil {
+				// A late cancel can land after the publication is durable.
+				value := readOwnerValue(t, reopened)
+				if value != "next" || !publishCancelCompletes[boundary] {
+					closeOwner(t, reopenDir, reopenLock, reopened)
+					t.Fatalf("plain open at %s published %q", boundary, value)
+				}
+				if names := durableTemporaryNames(t, self.root); len(names) != 0 {
+					closeOwner(t, reopenDir, reopenLock, reopened)
+					t.Fatalf("cancel at %s left %v", boundary, names)
+				}
+				closeOwner(t, reopenDir, reopenLock, reopened)
+				return
+			}
+			if !errors.Is(openErr, ErrUncertain) {
+				t.Fatalf("plain open at %s: %v", boundary, openErr)
+			}
+			reconcileDir, reconcileLock, reconciled, reconcileErr := tryReconcileOwner(t, self.root, reopenCtx)
+			if reconcileErr != nil {
+				t.Fatalf("reconcile after cancel at %s: %v", boundary, reconcileErr)
+			}
+			want := "committed"
+			if publishCancelCompletes[boundary] {
+				want = "next"
+			}
+			if value := readOwnerValue(t, reconciled); value != want {
+				closeOwner(t, reconcileDir, reconcileLock, reconciled)
+				t.Fatalf("reconcile at %s published %q, want %q", boundary, value, want)
+			}
+			if names := durableTemporaryNames(t, self.root); len(names) != 0 {
+				closeOwner(t, reconcileDir, reconcileLock, reconciled)
+				t.Fatalf("reconcile at %s left %v", boundary, names)
+			}
+			if err := reconciled.Publish([]byte("after"), nil); err != nil {
+				closeOwner(t, reconcileDir, reconcileLock, reconciled)
+				t.Fatalf("publish after reconcile at %s: %v", boundary, err)
+			}
+			closeOwner(t, reconcileDir, reconcileLock, reconciled)
+		})
+	}
+}
+
+// A kill between the create marker and the pending checkpoint leaves the pair;
+// Reconcile clears it and keeps the committed value.
+func TestReconcileClearsACrashedCreatePair(t *testing.T) {
+	self := newFixture(t)
+	if err := self.owner.Publish([]byte("committed"), nil); err != nil {
+		t.Fatal(err)
+	}
+	prefix := self.owner.prefix()
+	if err := self.close(); err != nil {
+		t.Fatal(err)
+	}
+	nonce := strings.Repeat("ab", 16)
+	if err := os.WriteFile(filepath.Join(self.root, prefix+"create-"+nonce), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(self.root, prefix+nonce), []byte("partial"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(self.volume.Context, 5*time.Second)
+	defer cancel()
+	if _, _, _, err := tryOpenOwner(t, self.root, ctx); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("plain open accepted a create pair: %v", err)
+	}
+	directory, lock, owner, err := tryReconcileOwner(t, self.root, ctx)
+	if err != nil {
+		t.Fatalf("reconcile a create pair: %v", err)
+	}
+	if names := durableTemporaryNames(t, self.root); len(names) != 0 {
+		closeOwner(t, directory, lock, owner)
+		t.Fatalf("reconcile left %v", names)
+	}
+	if value := readOwnerValue(t, owner); value != "committed" {
+		closeOwner(t, directory, lock, owner)
+		t.Fatalf("reconcile changed the committed value to %q", value)
+	}
+	if err := owner.Publish([]byte("after"), nil); err != nil {
+		closeOwner(t, directory, lock, owner)
+		t.Fatalf("publish after reconcile: %v", err)
+	}
+	closeOwner(t, directory, lock, owner)
+}
+
+// A temporary no marker names is evidence of tampering: Reconcile refuses it.
+func TestReconcileRejectsAnUnknownTemporary(t *testing.T) {
+	self := newFixture(t)
+	if err := self.owner.Publish([]byte("committed"), nil); err != nil {
+		t.Fatal(err)
+	}
+	prefix := self.owner.prefix()
+	if err := self.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(self.root, prefix+strings.Repeat("cd", 16)), []byte("planted"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(self.volume.Context, 5*time.Second)
+	defer cancel()
+	if _, _, _, err := tryReconcileOwner(t, self.root, ctx); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("reconcile accepted an unknown temporary: %v", err)
+	}
+}
+
+// A marker left by a publish whose temporary never existed names no member; a
+// plain open clears it and keeps the committed value.
+func TestStaleCreateMarkerClearsOnOpen(t *testing.T) {
+	self := newFixture(t)
+	if err := self.owner.Publish([]byte("committed"), nil); err != nil {
+		t.Fatal(err)
+	}
+	prefix := self.owner.prefix()
+	if err := self.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(self.root, prefix+"create-"+strings.Repeat("ef", 16)), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(self.volume.Context, 5*time.Second)
+	defer cancel()
+	directory, lock, owner, err := tryOpenOwner(t, self.root, ctx)
+	if err != nil {
+		t.Fatalf("plain open with a stale marker: %v", err)
+	}
+	if names := durableTemporaryNames(t, self.root); len(names) != 0 {
+		closeOwner(t, directory, lock, owner)
+		t.Fatalf("stale marker was not cleared: %v", names)
+	}
+	if value := readOwnerValue(t, owner); value != "committed" {
+		closeOwner(t, directory, lock, owner)
+		t.Fatalf("committed value = %q", value)
+	}
+	closeOwner(t, directory, lock, owner)
+}
+
+// A prefixed member that is neither a marker nor a temporary is unknown; both
+// open modes refuse it.
+func TestUnrecognizedSnapshotMemberRefused(t *testing.T) {
+	self := newFixture(t)
+	if err := self.owner.Publish([]byte("committed"), nil); err != nil {
+		t.Fatal(err)
+	}
+	prefix := self.owner.prefix()
+	if err := self.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(self.root, prefix+"junk"), []byte("planted"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(self.volume.Context, 5*time.Second)
+	defer cancel()
+	if _, _, _, err := tryOpenOwner(t, self.root, ctx); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("plain open accepted an unrecognized member: %v", err)
+	}
+	if _, _, _, err := tryReconcileOwner(t, self.root, ctx); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("reconcile accepted an unrecognized member: %v", err)
+	}
+}
+
+// A pending that names a temporary which is gone keeps its marker as evidence.
+func TestMissingPendingTemporaryKeepsEvidence(t *testing.T) {
+	self := newFixture(t)
+	if err := self.owner.Publish([]byte("committed"), nil); err != nil {
+		t.Fatal(err)
+	}
+	self.owner.at = func(stage string) error {
+		if stage == "pending-written" {
+			return unix.EIO
+		}
+		return nil
+	}
+	if err := self.owner.Publish([]byte("next"), nil); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("faulted publication = %v", err)
+	}
+	retained := make([]byte, 4096)
+	n, err := unix.Fgetxattr(int(self.lock.Fd()), Attribute(testSpec.Kind, testSpec.Name), retained)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var checkpoint Checkpoint
+	if err := json.Unmarshal(retained[:n], &checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if checkpoint.Pending == nil {
+		t.Fatal("no anchored pending after the fault")
+	}
+	pendingTemporary := checkpoint.Pending.Temporary
+	if err := os.Remove(filepath.Join(self.root, pendingTemporary)); err != nil {
+		t.Fatal(err)
+	}
+	prefix := self.owner.prefix()
+	if err := self.close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(self.volume.Context, 5*time.Second)
+	defer cancel()
+	if _, _, _, err := tryReconcileOwner(t, self.root, ctx); !errors.Is(err, ErrUncertain) {
+		t.Fatalf("reconcile accepted a missing pending temporary: %v", err)
+	}
+	found := false
+	for _, name := range durableTemporaryNames(t, self.root) {
+		if strings.HasPrefix(name, prefix+"create-") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the evidence marker was cleared")
+	}
+}
+
+// A context cancelled before the publication starts creates nothing.
+func TestPublishCancelBeforeStartingCreatesNoTemporary(t *testing.T) {
+	self := newFixture(t)
+	if err := self.owner.Publish([]byte("committed"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := self.close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(self.volume.Context)
+	directory, lock, owner, err := tryOpenOwner(t, self.root, ctx)
+	if err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	cancel()
+	if err := owner.Publish([]byte("next"), nil); err == nil {
+		t.Fatal("a cancelled context published")
+	}
+	closeOwner(t, directory, lock, owner)
+	if names := durableTemporaryNames(t, self.root); len(names) != 0 {
+		t.Fatalf("cancelled publication left temporaries %v", names)
+	}
+	reopenCtx, reopenCancel := context.WithTimeout(self.volume.Context, 5*time.Second)
+	defer reopenCancel()
+	reopenDir, reopenLock, reopened, err := tryOpenOwner(t, self.root, reopenCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value := readOwnerValue(t, reopened); value != "committed" {
+		t.Fatalf("committed value = %q", value)
+	}
+	closeOwner(t, reopenDir, reopenLock, reopened)
+}

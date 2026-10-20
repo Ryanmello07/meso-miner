@@ -2,6 +2,7 @@ package connect
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +20,22 @@ func newTestFlapGuard(stableAfter time.Duration, base time.Duration) *flapGuard 
 	g := newFlapGuard(stableAfter, base)
 	g.jitter = identityJitter
 	return g
+}
+
+// The governor keeps its counts as a 60-second sliding window, so a
+// before/after diff of connectGov.snapshot() measures "what this test added
+// minus what earlier tests recorded up to a minute ago and then aged out". In
+// a wider -run set that subtraction shows up and can even go negative, which
+// is what made TestRunH1_FeedsTheGovernor flaky. A test that diffs the window
+// clears it first, so the diff is exactly what the test recorded. The ring is
+// written by packet loops under the same mutex, so the clear is race-clean.
+func resetGovernorWindow(t *testing.T) {
+	t.Helper()
+	connectGov.mu.Lock()
+	defer connectGov.mu.Unlock()
+	for i := range connectGov.ring {
+		connectGov.ring[i] = govBucket{}
+	}
 }
 
 func TestFlapGuard_StableSessionNeedsNoExtraWait(t *testing.T) {
@@ -197,7 +214,9 @@ func TestRunH1_StableSessionReconnectsPromptly(t *testing.T) {
 	server := flapServer(300*time.Millisecond, &accepts, &stamps)
 	defer server.Close()
 
+	logger := &lockedCaptureLogger{}
 	settings := DefaultPlatformTransportSettings()
+	settings.Log = logger
 	settings.ReconnectTimeout = 20 * time.Millisecond
 	// every session below lives 300ms, which is stable by this threshold
 	settings.FlapStableAfter = 100 * time.Millisecond
@@ -215,13 +234,42 @@ func TestRunH1_StableSessionReconnectsPromptly(t *testing.T) {
 	}
 	at := stamps.snapshot()
 	for i := 1; i < 4; i++ {
-		// 300ms hold plus a prompt reconnect; a guard delay would add 20ms, 40ms,
-		// 80ms on top, so the third gap is the discriminating one
+		// 300ms hold plus the reconnect fast path, which draws an independent
+		// jitter in [0, 250ms) (NextReconnectTime), plus scheduling slack
 		gap := at[i].Sub(at[i-1])
-		if gap > 300*time.Millisecond+60*time.Millisecond {
+		if gap > 300*time.Millisecond+reconnectFastPathMaxDelay+100*time.Millisecond {
 			t.Fatalf("gap %d between connects was %s, stable sessions must reconnect promptly", i, gap)
 		}
 	}
+	// the jitter masks a guard delay of tens of milliseconds, so the guard itself
+	// is checked directly: a stable session must never log a held reconnect
+	for _, line := range logger.snapshot() {
+		if strings.Contains(line, "holding reconnect") {
+			t.Fatalf("the flap guard held a stable session: %s", line)
+		}
+	}
+}
+
+// lockedCaptureLogger records Infof lines for a test whose transport logs from
+// several goroutines.
+type lockedCaptureLogger struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *lockedCaptureLogger) Info(_ ...any) {}
+func (l *lockedCaptureLogger) Infof(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+}
+func (l *lockedCaptureLogger) Warningf(format string, args ...any) {}
+func (l *lockedCaptureLogger) Errorf(format string, args ...any)   {}
+func (l *lockedCaptureLogger) V(_ int32) Verbose                   { return nopVerbose{} }
+func (l *lockedCaptureLogger) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
 }
 
 // The loop feeds the process-wide governor: every attempt is classified, and a
@@ -235,6 +283,7 @@ func TestRunH1_FeedsTheGovernor(t *testing.T) {
 	server := flapServer(0, &accepts, &stamps)
 	defer server.Close()
 
+	resetGovernorWindow(t)
 	before := connectGov.snapshot()
 
 	settings := DefaultPlatformTransportSettings()
@@ -270,6 +319,7 @@ func TestRunH1_FailedAttemptsReachTheGovernor(t *testing.T) {
 	url := server.URL
 	server.Close() // nothing listens any more: every dial is refused
 
+	resetGovernorWindow(t)
 	before := connectGov.snapshot()
 
 	settings := DefaultPlatformTransportSettings()
@@ -310,6 +360,7 @@ func TestRunH1_LocalTeardownIsNotAnEarlyDeath(t *testing.T) {
 	settings.ReconnectTimeout = 20 * time.Millisecond
 	settings.FlapStableAfter = time.Hour // any session counts as young
 
+	resetGovernorWindow(t)
 	before := connectGov.snapshot()
 	transport := newFlapTestTransport(t, ctx, server.URL, settings)
 
@@ -356,6 +407,7 @@ func TestRunH1_ClientLimitCloseIsNotAnEarlyDeath(t *testing.T) {
 	settings.ReconnectTimeout = 20 * time.Millisecond
 	settings.FlapStableAfter = time.Hour // every session is young
 
+	resetGovernorWindow(t)
 	before := connectGov.snapshot()
 	transport := newFlapTestTransport(t, ctx, server.URL, settings)
 	defer transport.Close()
@@ -374,14 +426,53 @@ func TestRunH1_ClientLimitCloseIsNotAnEarlyDeath(t *testing.T) {
 	}
 }
 
+// The group stands the standby down the instant a pin connects, so a young
+// session can end because the owner disabled the transport. That is our own
+// teardown, not evidence about the platform, and must not feed the governor.
+func TestRunH1_DisabledTransportEndIsNotAnEarlyDeath(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var accepts atomic.Int64
+	var stamps flapStamps
+	server := flapServer(time.Hour, &accepts, &stamps) // holds the session open
+	defer server.Close()
+
+	settings := DefaultPlatformTransportSettings()
+	settings.ReconnectTimeout = 20 * time.Millisecond
+	settings.FlapStableAfter = time.Hour // any session counts as young
+
+	resetGovernorWindow(t)
+	before := connectGov.snapshot()
+	transport := newFlapTestTransport(t, ctx, server.URL, settings)
+
+	deadline := time.After(10 * time.Second)
+	for accepts.Load() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("the transport never connected")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	transport.SetEnabled(false) // the owner stands it down mid-session
+	time.Sleep(500 * time.Millisecond)
+	transport.Close()
+
+	if got := connectGov.snapshot().Early - before.Early; got != 0 {
+		t.Fatalf("a disabled transport's young session end was counted as dying young (%d)", got)
+	}
+}
+
 // The end-of-session rules are shared by the H1 and H3 loops through one helper,
 // so that the two cannot drift apart.
 func TestSessionEnd_YoungSessionIsHeldAndCountedOnce(t *testing.T) {
 	flaps := newFlapGuard(time.Minute, time.Second)
 	flaps.jitter = func(d time.Duration) time.Duration { return d }
 	ctx := context.Background()
+	resetGovernorWindow(t)
 	before := connectGov.snapshot()
-	wait := sessionEndWait(ctx, flaps, 3*time.Second, false, "c", loggerOrDefault(nil), true)
+	wait := sessionEndWait(ctx, flaps, 3*time.Second, false, "c", loggerOrDefault(nil), true, "url")
 	if wait != time.Second {
 		t.Fatalf("first young session wait = %v, want the base", wait)
 	}
@@ -392,8 +483,9 @@ func TestSessionEnd_YoungSessionIsHeldAndCountedOnce(t *testing.T) {
 
 func TestSessionEnd_StableSessionHasNoWaitAndNoEarlyDeath(t *testing.T) {
 	flaps := newFlapGuard(time.Minute, time.Second)
+	resetGovernorWindow(t)
 	before := connectGov.snapshot()
-	if wait := sessionEndWait(context.Background(), flaps, 5*time.Minute, false, "c", loggerOrDefault(nil), true); wait != 0 {
+	if wait := sessionEndWait(context.Background(), flaps, 5*time.Minute, false, "c", loggerOrDefault(nil), true, "url"); wait != 0 {
 		t.Fatalf("stable session wait = %v, want 0", wait)
 	}
 	if got := connectGov.snapshot().Early - before.Early; got != 0 {
@@ -406,10 +498,11 @@ func TestSessionEnd_LocalTeardownAndAuxiliaryAreNotEarlyDeaths(t *testing.T) {
 	flaps.jitter = func(d time.Duration) time.Duration { return d }
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
+	resetGovernorWindow(t)
 	before := connectGov.snapshot()
-	sessionEndWait(cancelled, flaps, time.Second, false, "c", loggerOrDefault(nil), true)
+	sessionEndWait(cancelled, flaps, time.Second, false, "c", loggerOrDefault(nil), true, "url")
 	// an auxiliary H3 beside H1 is never a health signal, but is still held back
-	if wait := sessionEndWait(context.Background(), flaps, time.Second, false, "c", loggerOrDefault(nil), false); wait == 0 {
+	if wait := sessionEndWait(context.Background(), flaps, time.Second, false, "c", loggerOrDefault(nil), false, "url"); wait == 0 {
 		t.Fatal("an auxiliary transport still must not redial in a tight loop")
 	}
 	if got := connectGov.snapshot().Early - before.Early; got != 0 {
@@ -420,8 +513,9 @@ func TestSessionEnd_LocalTeardownAndAuxiliaryAreNotEarlyDeaths(t *testing.T) {
 func TestSessionEnd_ClientLimitCloseIsNotAnEarlyDeath(t *testing.T) {
 	flaps := newFlapGuard(time.Minute, time.Second)
 	flaps.jitter = func(d time.Duration) time.Duration { return d }
+	resetGovernorWindow(t)
 	before := connectGov.snapshot()
-	sessionEndWait(context.Background(), flaps, time.Second, true, "c", loggerOrDefault(nil), true)
+	sessionEndWait(context.Background(), flaps, time.Second, true, "c", loggerOrDefault(nil), true, "url")
 	if got := connectGov.snapshot().Early - before.Early; got != 0 {
 		t.Fatalf("a client-limit close counted as an early death (%d)", got)
 	}

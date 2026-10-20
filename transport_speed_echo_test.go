@@ -19,7 +19,7 @@ func TestRunH1_SpeedTestIsEchoedInFullAndCounted(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	const frame = 64 << 10
+	const frame = 2 << 10 // within the platform transport read limit (the framer maximum, 4 KiB)
 	const flood = 4 << 20
 	var echoedBack atomic.Int64
 	done := make(chan struct{})

@@ -87,6 +87,10 @@ func createWebRtcPeerConnection(ctx context.Context, active bool, settings *WebR
 	)
 	s.SetNet(resolveNet)
 
+	if 0 < settings.StunGatherTimeout {
+		s.SetSTUNGatherTimeout(settings.StunGatherTimeout)
+	}
+
 	if !ipv6Available() {
 		s.SetNetworkTypes([]webrtc.NetworkType{
 			webrtc.NetworkTypeUDP4,
@@ -98,7 +102,9 @@ func createWebRtcPeerConnection(ctx context.Context, active bool, settings *WebR
 	pc, err := api.NewPeerConnection(webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			webrtc.ICEServer{
-				URLs: settings.IceServerUrls,
+				// per-session random subset of the pool (or the pinned override), drawn
+				// once for this manager-scoped factory
+				URLs: settings.selectIceServerUrls(),
 			},
 		},
 	})

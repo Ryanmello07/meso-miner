@@ -3,8 +3,14 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+// providerTestExecEnv makes the test binary behave as the provider itself, so
+// the start-up tests exercise the real main() in a child process instead of a
+// re-implementation. It must run before the temporary HOME below.
+const providerTestExecEnv = "URNETWORK_PROVIDER_TEST_EXEC"
 
 // The provider writes state, snapshots and event logs under ~/.urnetwork, and
 // several code paths log through importantLogf (which also appends to the disk
@@ -16,6 +22,11 @@ import (
 // runs, so an un-isolated test can no longer touch real state. withTempHome still
 // gives each test its own directory on top of this.
 func TestMain(m *testing.M) {
+	if execArgs := os.Getenv(providerTestExecEnv); execArgs != "" {
+		os.Args = append([]string{"provider"}, strings.Split(execArgs, "\x1f")...)
+		main()
+		os.Exit(0)
+	}
 	dir, err := os.MkdirTemp("", "urnetwork-provider-test-home-*")
 	if err != nil {
 		panic(err)

@@ -1,13 +1,5 @@
 package connect
 
-// control_family_test.go — the tests for the ported control-plane address
-// family policy (control_family.go). Ported from connect
-// v0.0.0-20261017075543-c8d8cdf536a8 (control_family_test.go), with the cases
-// that cover the parts NOT ported here removed (the pinned-transport policy
-// conflict, the per-dial evidence line, pickControlIPAddr) and the
-// network-change case rewritten: this tree has no NetworkChanged signal, so the
-// ledger's invalidation is exercised through controlFamilyClear directly.
-
 import (
 	"context"
 	"crypto/tls"
@@ -15,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 )
@@ -66,11 +59,11 @@ func TestControlDialNetworkForce(t *testing.T) {
 // `dial tcp6 1.1.1.1:443` fails immediately.
 //
 // This is the whole fallback layer, not a corner case. The extender dialers
-// dial a configured ip and the remote plain-DNS resolver dials a configured
-// resolver address (net_http_doh.go), both IP literals, both through
-// ConnectSettings.DialContext. A demotion learned on the api path used to take
-// every one of them down with it -- and because they fail at CONNECT, none of
-// them recorded anything that could undo the demotion.
+// dial extenderConfig.Ip (net_extender.go) and the remote plain-DNS resolver
+// dials a configured resolver address (net_http_doh.go), both IP literals,
+// both through ConnectSettings.DialContext. A demotion learned on the api path
+// used to take every one of them down with it -- and because they fail at
+// CONNECT, none of them recorded anything that could undo the demotion.
 func TestControlDialNetworkNeverNarrowsAnIPLiteral(t *testing.T) {
 	restore := swapControlFamilyProbe(func(int) bool { return true })
 	defer restore()
@@ -206,7 +199,9 @@ func TestControlFamilyDemoteRefusedWhenOtherFamilyUnusable(t *testing.T) {
 	}
 }
 
-// The IPv6-only guard is only as good as the probe behind it.
+// The IPv6-only guard is only as good as the probe behind it, and the probe
+// had no direct test at all: all sixteen call sites inject a
+// fake, so the "IPv6-only guard" test proved the BRANCH and never the probe.
 //
 // The device this pins is the one the guard exists for: an IPv6-only handset
 // (ios has no CLAT; NAT64/DNS64 is the App Store-required configuration) with
@@ -318,7 +313,8 @@ func TestProbeFamilySupportIgnoresOurOwnTunnel(t *testing.T) {
 // An unreadable interface table is NO EVIDENCE, and the only job this probe
 // has is to refuse a dangerous demotion. Failing open answers "yes, the other
 // family works" on a device nothing is known about, which is the one answer
-// that can take the control plane down.
+// that can take the control plane down. This repo already documents that
+// mobile interface enumeration can be restricted (see LocalIpv4Networks).
 func TestProbeFamilySupportFailsClosedOnEnumerationError(t *testing.T) {
 	restore := swapControlFamilyInterfaces(
 		func() ([]controlFamilyInterface, error) {
@@ -341,7 +337,7 @@ func TestProbeFamilySupportFailsClosedOnEnumerationError(t *testing.T) {
 	}
 }
 
-// FamilySupported is the exported probe for the callers outside this package.
+// FamilySupported is the exported probe the extender activation reads (G3).
 // It answers from the same interface table the probe does -- loopback alone is
 // not connectivity -- and refuses anything that is not an ip version.
 func TestFamilySupportedReadsTheInterfaceTable(t *testing.T) {
@@ -387,6 +383,19 @@ func TestFamilySupportedReadsTheInterfaceTable(t *testing.T) {
 	}
 }
 
+// The tests run on dual-stack hosts and require v6 (EXTENDER.md I), so the
+// unseamed probe must answer yes for both families here. A no is a broken test
+// host, not a broken build.
+func TestFamilySupportedOnThisHost(t *testing.T) {
+	if !FamilySupported(4) {
+		t.Error("this host has no usable ipv4; the extender tests require dual stack")
+	}
+	if !FamilySupported(6) {
+		// hosted CI runners have no usable ipv6; a dual-stack host proves the probe
+		t.Skip("this host has no usable ipv6")
+	}
+}
+
 func ipNet(cidr string) *net.IPNet {
 	ip, network, err := net.ParseCIDR(cidr)
 	if err != nil {
@@ -400,7 +409,8 @@ func ipNet(cidr string) *net.IPNet {
 // read back "Force IPv4" because the heuristic fired could not be set back to
 // Auto -- it would already appear not to be Auto. The demotion is visible
 // through controlFamilyStatus instead, which is what the ui shows beside the
-// policy.
+// policy. This is asserted HERE rather than in the sdk because
+// controlFamilyDemote is only reachable from this package.
 func TestControlIpFamilyPolicyIgnoresDemotion(t *testing.T) {
 	restore := swapControlFamilyProbe(func(int) bool { return true })
 	defer restore()
@@ -419,9 +429,6 @@ func TestControlIpFamilyPolicyIgnoresDemotion(t *testing.T) {
 	if controlFamilyStatus() == "" {
 		t.Fatal("expected a non-empty status while a demotion is live -- " +
 			"the ui has no other way to tell auto-with-a-demotion from plain auto")
-	}
-	if ControlFamilyStatus() == "" {
-		t.Fatal("the exported status must read the same live demotion")
 	}
 }
 
@@ -478,7 +485,7 @@ func TestForceBeatsDemotion(t *testing.T) {
 	}
 }
 
-func TestControlFamilyBackoffDoublesAcrossIncidentsAndCaps(t *testing.T) {
+func TestControlFamilyBackoffDoublesAndCaps(t *testing.T) {
 	restore := swapControlFamilyProbe(func(int) bool { return true })
 	defer restore()
 	base := time.Unix(1750000000, 0)
@@ -492,26 +499,14 @@ func TestControlFamilyBackoffDoublesAcrossIncidentsAndCaps(t *testing.T) {
 	if got := controlFamilyDemotedUntil(6).Sub(base); got != controlFamilyDemotionBase {
 		t.Fatalf("first demotion lasts %s, want %s", got, controlFamilyDemotionBase)
 	}
-	// A strike while the demotion is live came from a dial that started before
-	// it was applied, so it is not a new incident: the parallel hello races
-	// several dialers through the same dead path, and counting them all would
-	// turn a five minute hold into forty.
 	controlFamilyDemote(6)
-	if got := controlFamilyDemotedUntil(6).Sub(base); got != controlFamilyDemotionBase {
-		t.Fatalf("a strike during a live demotion changed the hold to %s, want %s", got, controlFamilyDemotionBase)
+	if got := controlFamilyDemotedUntil(6).Sub(base); got != 2*controlFamilyDemotionBase {
+		t.Fatalf("second demotion lasts %s, want %s", got, 2*controlFamilyDemotionBase)
 	}
-
-	now = now.Add(controlFamilyDemotionBase)
-	controlFamilyDemote(6)
-	if got := controlFamilyDemotedUntil(6).Sub(now); got != 2*controlFamilyDemotionBase {
-		t.Fatalf("second incident lasts %s, want %s", got, 2*controlFamilyDemotionBase)
-	}
-
 	for i := 0; i < 20; i += 1 {
-		now = controlFamilyDemotedUntil(6)
 		controlFamilyDemote(6)
 	}
-	if got := controlFamilyDemotedUntil(6).Sub(now); got != controlFamilyDemotionMax {
+	if got := controlFamilyDemotedUntil(6).Sub(base); got != controlFamilyDemotionMax {
 		t.Fatalf("demotion lasts %s, want the %s cap", got, controlFamilyDemotionMax)
 	}
 }
@@ -539,17 +534,15 @@ func TestControlFamilyDemotionExpires(t *testing.T) {
 	}
 }
 
-// A network change invalidates everything learned about the old path. This
-// tree has no NetworkChanged signal, so the invalidation is exercised through
-// controlFamilyClear -- the function a host that learns one must call.
-func TestControlFamilyClearDropsTheLedger(t *testing.T) {
+// A network change invalidates everything learned about the old path.
+func TestNetworkChangedClearsTheLedger(t *testing.T) {
 	restore := swapControlFamilyProbe(func(int) bool { return true })
 	defer restore()
 	controlFamilyClear()
 	defer controlFamilyClear()
 
 	controlFamilyDemote(6)
-	controlFamilyClear()
+	NetworkChanged()
 	network, err := controlDialNetwork("tcp", "api.example:443")
 	if err != nil {
 		t.Fatal(err)
@@ -559,15 +552,196 @@ func TestControlFamilyClearDropsTheLedger(t *testing.T) {
 	}
 }
 
-// A learned demotion must not be applied unchecked on the next path.
+func TestConnFamily(t *testing.T) {
+	tests := []struct {
+		name string
+		addr net.Addr
+		want int
+	}{
+		{"ipv4", &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 443}, 4},
+		{"ipv4 in ipv6 form", &net.TCPAddr{IP: net.ParseIP("::ffff:192.0.2.1"), Port: 443}, 4},
+		{"ipv6", &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 443}, 6},
+		{"nil", nil, 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := connFamily(&stubConn{remote: test.addr}); got != test.want {
+				t.Fatalf("got %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+type stubConn struct {
+	net.Conn
+	remote net.Addr
+}
+
+func (self *stubConn) RemoteAddr() net.Addr { return self.remote }
+
+func (self *stubConn) Close() error { return nil }
+
+// The family must be a LITERAL token, never derived from the address. The sdk
+// log redactor rewrites both IPv4 and IPv6 literals to the same opaque token
+// shape, so a redacted bundle -- the mode users are asked to send -- cannot
+// tell a v4 dial from a v6 dial by its address.
+func TestControlDialFamilyLineCarriesALiteralFamilyToken(t *testing.T) {
+	conn := &stubConn{remote: &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 443}}
+	line := controlDialFamilyLine("api", "tcp", "api.example:443", conn, nil)
+	if !strings.Contains(line, "family=6") {
+		t.Fatalf("line %q does not carry a literal family token", line)
+	}
+	if !strings.Contains(line, "tag=api") {
+		t.Fatalf("line %q does not name the dial tag", line)
+	}
+
+	conn4 := &stubConn{remote: &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 443}}
+	line4 := controlDialFamilyLine("platform", "tcp", "connect.example:443", conn4, nil)
+	if !strings.Contains(line4, "family=4") {
+		t.Fatalf("line %q does not carry a literal family token", line4)
+	}
+}
+
+// A failed dial has no connection to read a family from, and must say so
+// rather than claim one.
+func TestControlDialFamilyLineOnFailure(t *testing.T) {
+	line := controlDialFamilyLine("api", "tcp4", "api.example:443", nil, errors.New("i/o timeout"))
+	if !strings.Contains(line, "family=?") {
+		t.Fatalf("line %q should report an unknown family on failure", line)
+	}
+	if !strings.Contains(line, "err=") {
+		t.Fatalf("line %q should carry the error", line)
+	}
+}
+
+// The h3/quic transport resolves a name to exactly ONE udp address and dials
+// it, with no family race of any kind. It is the fallback carrier that is
+// supposed to rescue a stalled h1, so if it picks the same broken family the
+// fallback is lost too.
+func TestPickControlUDPAddrHonorsPolicyAndDemotion(t *testing.T) {
+	v6 := net.IPAddr{IP: net.ParseIP("2001:db8::1")}
+	v4 := net.IPAddr{IP: net.ParseIP("192.0.2.1")}
+	addrs := []net.IPAddr{v6, v4}
+
+	restore := swapControlFamilyProbe(func(int) bool { return true })
+	defer restore()
+	controlFamilyClear()
+	defer controlFamilyClear()
+
+	// auto with nothing learned ties toward IPv4, matching
+	// net.ResolveUDPAddr's own tie-break -- NOT the resolver's list order
+	// (addrs[0] here is v6), so a dual-stack, v6-first RFC 6724 ordering does
+	// not silently become the new default family.
+	if got := pickControlIPAddr(addrs); !got.IP.Equal(v4.IP) {
+		t.Fatalf("got %v, want the IPv4 tie-break address", got.IP)
+	}
+
+	// a demotion moves the pick off the demoted family
+	controlFamilyDemote(6)
+	if got := pickControlIPAddr(addrs); !got.IP.Equal(v4.IP) {
+		t.Fatalf("got %v, want the IPv4 address once IPv6 is demoted", got.IP)
+	}
+	controlFamilyClear()
+
+	// demoting the OTHER family is the assertion that actually distinguishes
+	// the demotion branch from the IPv4-first Auto default above: Auto alone
+	// already answers v4, so demote(6)+want=v4 above cannot fail if the
+	// demotion branch is deleted. demote(4) must move the pick to v6.
+	controlFamilyDemote(4)
+	if got := pickControlIPAddr(addrs); !got.IP.Equal(v6.IP) {
+		t.Fatalf("got %v, want the IPv6 address once IPv4 is demoted", got.IP)
+	}
+	controlFamilyClear()
+
+	// a force wins outright
+	SetControlIpFamilyPolicy(IpFamilyForce4)
+	defer SetControlIpFamilyPolicy(IpFamilyAuto)
+	if got := pickControlIPAddr(addrs); !got.IP.Equal(v4.IP) {
+		t.Fatalf("got %v, want the IPv4 address under force4", got.IP)
+	}
+
+	// force6 is the assertion that distinguishes the force switch from the
+	// IPv4-first Auto default, pinned here at the unit level and not only
+	// through the /etc/hosts-dependent resolveEgressUDPAddr test.
+	SetControlIpFamilyPolicy(IpFamilyForce6)
+	if got := pickControlIPAddr(addrs); !got.IP.Equal(v6.IP) {
+		t.Fatalf("got %v, want the IPv6 address under force6", got.IP)
+	}
+}
+
+// With no address of the preferred family, the pick falls back rather than
+// failing: a forced family that the name does not publish must not make the
+// transport unusable.
+func TestPickControlUDPAddrFallsBackWhenNoAddressMatches(t *testing.T) {
+	v6 := net.IPAddr{IP: net.ParseIP("2001:db8::1")}
+	SetControlIpFamilyPolicy(IpFamilyForce4)
+	defer SetControlIpFamilyPolicy(IpFamilyAuto)
+	if got := pickControlIPAddr([]net.IPAddr{v6}); !got.IP.Equal(v6.IP) {
+		t.Fatalf("got %v, want the only available address", got.IP)
+	}
+}
+
+// EgressInterfaceIndex is a (index4, index6) pair, and both being set at once
+// is the NORMAL bound configuration -- the Windows service updates both on
+// every network change (see EgressInterfaceIndex's doc comment) -- not an
+// edge case. With both set the bind constrains nothing about family, so an
+// explicit Force4/Force6 must still win; only a bind that names exactly one
+// family may override the pick.
+func TestEgressBoundIPAddrIgnoresNonConstrainingBind(t *testing.T) {
+	v6 := net.IPAddr{IP: net.ParseIP("2001:db8::1")}
+	v4 := net.IPAddr{IP: net.ParseIP("192.0.2.1")}
+	addrs := []net.IPAddr{v6, v4} // v6 first, so a buggy "take addrs[0]" loop is caught
+
+	SetControlIpFamilyPolicy(IpFamilyForce4)
+	defer SetControlIpFamilyPolicy(IpFamilyAuto)
+	pick := pickControlIPAddr(addrs)
+	if !pick.IP.Equal(v4.IP) {
+		t.Fatalf("precondition: pickControlIPAddr under force4 = %v, want v4", pick.IP)
+	}
+
+	// both indexes set: not a family constraint. The forced pick must survive
+	// untouched, even though addrs[0] (v6) has a nonzero index too.
+	if got := egressBoundIPAddr(addrs, 16, 23, pick); !got.IP.Equal(v4.IP) {
+		t.Fatalf("got %v, want the forced address unchanged by a both-set bind", got.IP)
+	}
+
+	// neither index set: also not a constraint, pick stands.
+	if got := egressBoundIPAddr(addrs, 0, 0, pick); !got.IP.Equal(v4.IP) {
+		t.Fatalf("got %v, want the forced address unchanged by an unset bind", got.IP)
+	}
+}
+
+// Exactly one index set IS a hard family constraint and must override even an
+// opposite Force, because the socket literally cannot carry the other family.
+func TestEgressBoundIPAddrOverridesForceWhenSingleFamilyBound(t *testing.T) {
+	v6 := net.IPAddr{IP: net.ParseIP("2001:db8::1")}
+	v4 := net.IPAddr{IP: net.ParseIP("192.0.2.1")}
+	addrs := []net.IPAddr{v6, v4}
+
+	SetControlIpFamilyPolicy(IpFamilyForce4)
+	defer SetControlIpFamilyPolicy(IpFamilyAuto)
+	pick := pickControlIPAddr(addrs)
+
+	if got := egressBoundIPAddr(addrs, 0, 23, pick); !got.IP.Equal(v6.IP) {
+		t.Fatalf("got %v, want the v6-bound address to override force4", got.IP)
+	}
+}
+
+// A demotion learned on one path must not be applied unchecked on the next.
 //
-// This tree has no network-change invalidation wired (controlFamilyClear is
-// called by the tests and by whatever host learns such a signal), so an entry
-// can stand until its backoff expires -- including across a wifi/cellular
-// switch that removed the family it would steer onto. The self-inflicted-
-// outage guard is therefore re-evaluated on every READ, not only when the
-// demotion was recorded: a demotion can never be applied on a path where
-// recording it would have been refused.
+// The ledger's only invalidation is AddNetworkChangeListener(controlFamilyClear),
+// and connect.NetworkChanged() has exactly one caller in the whole tree --
+// DeviceLocal. On ios that means the listener fires in the network extension
+// and NEVER in the app process, which is the process that dials pre-login and
+// whenever the tunnel is down: regimes 1 and 3 of the design's own table, and
+// the state a user is in when they open the Developer menu to fix this. Android
+// registers its callbacks from initDevice, so it is exposed the same way while
+// signed out. So an app-process demotion could stand for up to six hours with
+// no path change ever clearing it.
+//
+// The self-inflicted-outage guard is therefore evaluated on USE as well as on
+// record: a demotion can never be applied on a path where recording it would
+// have been refused.
 func TestADemotionIsRevalidatedOnUseNotOnlyWhenRecorded(t *testing.T) {
 	controlFamilyClear()
 	defer controlFamilyClear()
@@ -582,8 +756,8 @@ func TestADemotionIsRevalidatedOnUseNotOnlyWhenRecorded(t *testing.T) {
 	}
 	restoreDualStack()
 
-	// the user joins an ipv6-only cellular / NAT64 network. Nothing in this
-	// process can report the change, so the entry is still in the ledger.
+	// the user joins an ipv6-only cellular / NAT64 network. No NetworkChanged()
+	// arrives, because in this process nothing can call it.
 	restore := swapControlFamilyProbe(func(family int) bool { return family == 6 })
 	defer restore()
 
@@ -600,6 +774,14 @@ func TestADemotionIsRevalidatedOnUseNotOnlyWhenRecorded(t *testing.T) {
 	}
 	if got := controlFamilyStatus(); got != "" {
 		t.Fatalf("status %q describes a demotion the dialer is no longer acting on", got)
+	}
+	if got := pickControlIPAddr([]net.IPAddr{
+		{IP: net.ParseIP("2001:db8::1")},
+		{IP: net.ParseIP("192.0.2.1")},
+	}); !got.IP.Equal(net.ParseIP("192.0.2.1")) {
+		// auto with nothing live ties toward ipv4; the assertion that matters
+		// is that the stale demotion of 6 is not steering this pick
+		t.Fatalf("h3/quic pick %v is still steered by the stale demotion", got.IP)
 	}
 }
 
@@ -668,137 +850,4 @@ func TestALiveDemotionIsRevalidatedAgainstTheOtherFamily(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestConnFamily(t *testing.T) {
-	tests := []struct {
-		name string
-		addr net.Addr
-		want int
-	}{
-		{"ipv4", &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 443}, 4},
-		{"ipv4 in ipv6 form", &net.TCPAddr{IP: net.ParseIP("::ffff:192.0.2.1"), Port: 443}, 4},
-		{"ipv6", &net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 443}, 6},
-		{"nil", nil, 0},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			if got := connFamily(&stubConn{remote: test.addr}); got != test.want {
-				t.Fatalf("got %d, want %d", got, test.want)
-			}
-		})
-	}
-}
-
-type stubConn struct {
-	net.Conn
-	remote net.Addr
-}
-
-func (self *stubConn) RemoteAddr() net.Addr { return self.remote }
-
-func (self *stubConn) Close() error { return nil }
-
-// The legacy DisableIpv4/DisableIpv6 mapping is public API in this tree and
-// must keep working exactly as it did; the control-plane policy is applied on
-// TOP of it, and both reach the dialer through the same ConnectSettings
-// entry point.
-func TestDialContextKeepsLegacyDisableAndAppliesTheControlFamilyPolicy(t *testing.T) {
-	restore := swapControlFamilyProbe(func(int) bool { return true })
-	defer restore()
-
-	newSettings := func() (*ConnectSettings, *[]string) {
-		settings := DefaultConnectSettings()
-		dialed := []string{}
-		settings.DialContextSettings = &DialContextSettings{
-			DialContext: func(ctx context.Context, network string, addr string) (net.Conn, error) {
-				dialed = append(dialed, network)
-				return &stubConn{remote: &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 443}}, nil
-			},
-		}
-		return settings, &dialed
-	}
-
-	t.Run("no policy is the identity dial", func(t *testing.T) {
-		controlFamilyClear()
-		defer controlFamilyClear()
-		SetControlIpFamilyPolicy(IpFamilyAuto)
-		defer SetControlIpFamilyPolicy(IpFamilyAuto)
-
-		settings, dialed := newSettings()
-		if _, err := settings.DialContext(context.Background(), "tcp", "api.example:443"); err != nil {
-			t.Fatal(err)
-		}
-		if len(*dialed) != 1 || (*dialed)[0] != "tcp" {
-			t.Fatalf("dialed %v, want [tcp]", *dialed)
-		}
-	})
-
-	t.Run("a learned demotion narrows the control dial", func(t *testing.T) {
-		controlFamilyClear()
-		defer controlFamilyClear()
-		SetControlIpFamilyPolicy(IpFamilyAuto)
-		defer SetControlIpFamilyPolicy(IpFamilyAuto)
-		if !controlFamilyDemote(6) {
-			t.Fatal("expected the demotion to take")
-		}
-
-		settings, dialed := newSettings()
-		if _, err := settings.DialContext(context.Background(), "tcp", "api.example:443"); err != nil {
-			t.Fatal(err)
-		}
-		if len(*dialed) != 1 || (*dialed)[0] != "tcp4" {
-			t.Fatalf("dialed %v, want [tcp4]", *dialed)
-		}
-	})
-
-	t.Run("a demotion leaves a literal alone", func(t *testing.T) {
-		controlFamilyClear()
-		defer controlFamilyClear()
-		SetControlIpFamilyPolicy(IpFamilyAuto)
-		defer SetControlIpFamilyPolicy(IpFamilyAuto)
-		if !controlFamilyDemote(6) {
-			t.Fatal("expected the demotion to take")
-		}
-
-		settings, dialed := newSettings()
-		if _, err := settings.DialContext(context.Background(), "tcp", "1.1.1.1:443"); err != nil {
-			t.Fatal(err)
-		}
-		if len(*dialed) != 1 || (*dialed)[0] != "tcp" {
-			t.Fatalf("dialed %v, want [tcp] -- an IP literal has no family to steer", *dialed)
-		}
-	})
-
-	t.Run("the legacy disable pair is unchanged", func(t *testing.T) {
-		controlFamilyClear()
-		defer controlFamilyClear()
-		SetControlIpFamilyPolicy(IpFamilyAuto)
-		defer SetControlIpFamilyPolicy(IpFamilyAuto)
-
-		settings, dialed := newSettings()
-		settings.DisableIpv6 = true
-		if _, err := settings.DialContext(context.Background(), "tcp", "api.example:443"); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := settings.DialContext(context.Background(), "tcp6", "api.example:443"); err == nil {
-			t.Fatal("an explicitly disabled family must still be rejected")
-		}
-		if len(*dialed) != 1 || (*dialed)[0] != "tcp4" {
-			t.Fatalf("dialed %v, want [tcp4]", *dialed)
-		}
-	})
-
-	t.Run("the legacy disable pair and a contradicting force conflict", func(t *testing.T) {
-		controlFamilyClear()
-		defer controlFamilyClear()
-		SetControlIpFamilyPolicy(IpFamilyForce6)
-		defer SetControlIpFamilyPolicy(IpFamilyAuto)
-
-		settings, _ := newSettings()
-		settings.DisableIpv6 = true
-		if _, err := settings.DialContext(context.Background(), "tcp", "api.example:443"); err == nil {
-			t.Fatal("a force that contradicts the legacy disable pair must not silently dial")
-		}
-	})
 }

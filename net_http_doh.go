@@ -112,6 +112,9 @@ type DohSettings struct {
 	// MaxConcurrentResolutions bounds in-flight resolutions (DohCache.resolveSem) so a burst
 	// or flood of distinct names cannot fan out unbounded. 0 uses a sane default.
 	MaxConcurrentResolutions int
+	// MaxConcurrentHttpRequests hard-caps concurrent in-flight DoH HTTP requests (used by
+	// the ported internal-DoH leaf). 0 uses the library default.
+	MaxConcurrentHttpRequests int
 	// DohServerStagger delays launching each additional DoH server within a fan-out: the first
 	// server is queried immediately and each next one only if no answer has arrived within this
 	// interval, so a healthy primary answers before the redundant servers fire (saving tunnel
@@ -165,14 +168,17 @@ type DohServer struct {
 }
 
 type DnsResolverSettings struct {
-	EnableRemoteDoh   bool     `json:"enable_remote_doh,omitempty"`
-	EnableLocalDoh    bool     `json:"enable_local_doh,omitempty"`
-	EnableRemoteDns   bool     `json:"enable_remote_dns,omitempty"`
-	EnableLocalDns    bool     `json:"enable_local_dns,omitempty"`
-	RemoteDohUrlsIpv4 []string `json:"remote_doh_urls_ipv4,omitempty"`
-	RemoteDohUrlsIpv6 []string `json:"remote_doh_urls_ipv6,omitempty"`
-	LocalDohUrlsIpv4  []string `json:"local_doh_urls_ipv4,omitempty"`
-	LocalDohUrlsIpv6  []string `json:"local_doh_urls_ipv6,omitempty"`
+	EnableRemoteDoh bool `json:"enable_remote_doh,omitempty"`
+	EnableLocalDoh  bool `json:"enable_local_doh,omitempty"`
+	EnableRemoteDns bool `json:"enable_remote_dns,omitempty"`
+	EnableLocalDns  bool `json:"enable_local_dns,omitempty"`
+	// DnsUpgradeMaskAddress is the plain-DNS destination advertised under the
+	// tunnel mask (ported from upstream net_http_doh.go at 20b29f79).
+	DnsUpgradeMaskAddress string   `json:"dns_upgrade_mask_address,omitempty"`
+	RemoteDohUrlsIpv4     []string `json:"remote_doh_urls_ipv4,omitempty"`
+	RemoteDohUrlsIpv6     []string `json:"remote_doh_urls_ipv6,omitempty"`
+	LocalDohUrlsIpv4      []string `json:"local_doh_urls_ipv4,omitempty"`
+	LocalDohUrlsIpv6      []string `json:"local_doh_urls_ipv6,omitempty"`
 	// the *DohServers fields carry a per-server format tag (json or RFC 8484 wire). the legacy
 	// *DohUrls []string fields above are still honored and treated as json; prefer these for new
 	// config and for any wire-only server (e.g. Quad9, OpenDNS).
@@ -194,6 +200,17 @@ func httpClientWithSettings(settings *DohSettings) *http.Client {
 	return httpClientWithDialer(settings, settings.DialContext)
 }
 
+// defaultMaxConcurrentHttpRequests bounds a resolver transport's connections per
+// origin when DohSettings.MaxConcurrentHttpRequests is 0 (upstream's floor).
+const defaultMaxConcurrentHttpRequests = 16
+
+func maxConcurrentHttpRequests(settings *DohSettings) int {
+	if 0 < settings.MaxConcurrentHttpRequests {
+		return settings.MaxConcurrentHttpRequests
+	}
+	return defaultMaxConcurrentHttpRequests
+}
+
 // httpClientWithDialer builds a DoH HTTP client over the given dialer. Remote DoH
 // uses the tun dialer (settings.DialContext); local DoH uses the host dialer.
 func httpClientWithDialer(settings *DohSettings, dialContext DialContextFunction) *http.Client {
@@ -203,6 +220,11 @@ func httpClientWithDialer(settings *DohSettings, dialContext DialContextFunction
 		// keep the (typically single) DoH connection pooled across bursts so lookups don't
 		// re-pay a TCP+TLS handshake over the tunnel
 		IdleConnTimeout: 5 * time.Minute,
+		// Request cancellation releases the in-flight semaphore, but net/http may keep
+		// the reusable dial alive. Bound dialing, handshaking and pooled sockets per
+		// resolver origin in this transport, including those detached dials (upstream
+		// 358cefae).
+		MaxConnsPerHost: maxConcurrentHttpRequests(settings),
 	}
 	if settings.DnsResolverSettings != nil {
 		tr.TLSClientConfig = settings.DnsResolverSettings.TlsConfig
@@ -322,6 +344,7 @@ func dnsResolverAddrs(settings *DohSettings, remote bool, network string) []stri
 		ipv4 = settings.DnsResolverSettings.LocalDnsIpv4
 		ipv6 = settings.DnsResolverSettings.LocalDnsIpv6
 	}
+
 	switch {
 	case strings.HasSuffix(network, "6") || settings.IpVersion == 6:
 		if 0 < len(ipv6) {
@@ -828,131 +851,6 @@ func DohQueryWithClient(
 	domains ...string,
 ) map[netip.Addr]int {
 	return dohQueryWithClientResult(ctx, httpClient, nil, remoteDohServers(settings, ipVersion), ipVersion, recordType, settings, domains...).AddrTtls
-}
-
-// knownDohUrlPairs are the v4/v6 endpoint pairs of the default DoH operators,
-// matched on the urls this tree ships (note the Google pair's `/resolve` path).
-// A pair is what "race each operator's v4 and v6 endpoint" means for a url the
-// defaults ship; a url outside this table pairs by index only with another url
-// outside it (see familySiblings).
-var knownDohUrlPairs = [][2]string{
-	{"https://1.1.1.1/dns-query", "https://[2606:4700:4700::1111]/dns-query"},
-	{"https://8.8.8.8/resolve", "https://[2001:4860:4860::8888]/resolve"},
-	{"https://9.9.9.9/dns-query", "https://[2620:fe::fe]/dns-query"},
-	{"https://208.67.222.222/dns-query", "https://[2620:119:35::35]/dns-query"},
-}
-
-// knownDnsServerPairs are the v4/v6 pairs of the default and regional plain
-// dns operators, the same rule for the plain-dns lists.
-var knownDnsServerPairs = [][2]string{
-	{"1.1.1.1", "2606:4700:4700::1111"},
-	{"1.0.0.1", "2606:4700:4700::1001"},
-	{"8.8.8.8", "2001:4860:4860::8888"},
-	{"8.8.4.4", "2001:4860:4860::8844"},
-	{"9.9.9.9", "2620:fe::fe"},
-	{"149.112.112.112", "2620:fe::9"},
-	{"208.67.222.222", "2620:119:35::35"},
-	{"208.67.220.220", "2620:119:53::53"},
-	{"223.5.5.5", "2400:3200::1"},
-	{"119.29.29.29", "2402:4e00::"},
-	{"77.88.8.8", "2a02:6b8::feed:0ff"},
-}
-
-// familySiblings pairs the entries of a v4 list and a v6 list by operator:
-// a known pair from the table when both members are configured, else by
-// list index for entries that are outside the table on both sides. The
-// result maps each paired entry to its sibling in both directions.
-//
-// The table rule is what lets "start from the defaults and replace the v4
-// list" keep meaning "use only these servers": the default v6 entries are
-// known operators whose v4 partners are then absent, so they pair with
-// nothing and dualStackList leaves them out, instead of index-pairing a
-// caller's private server with Cloudflare's v6 endpoint.
-func familySiblings(ipv4 []string, ipv6 []string, known [][2]string) map[string]string {
-	siblings := map[string]string{}
-	knownOf := map[string]string{}
-	for _, pair := range known {
-		knownOf[pair[0]] = pair[1]
-		knownOf[pair[1]] = pair[0]
-	}
-	present6 := map[string]bool{}
-	for _, entry := range ipv6 {
-		present6[entry] = true
-	}
-	unknown4 := []string{}
-	for _, entry := range ipv4 {
-		if partner, ok := knownOf[entry]; ok {
-			if present6[partner] && partner != entry {
-				siblings[entry] = partner
-				siblings[partner] = entry
-			}
-			continue
-		}
-		unknown4 = append(unknown4, entry)
-	}
-	unknown6 := []string{}
-	for _, entry := range ipv6 {
-		if _, ok := knownOf[entry]; !ok {
-			unknown6 = append(unknown6, entry)
-		}
-	}
-	for i := 0; i < min(len(unknown4), len(unknown6)); i++ {
-		if unknown4[i] == "" || unknown6[i] == "" || unknown4[i] == unknown6[i] {
-			continue
-		}
-		siblings[unknown4[i]] = unknown6[i]
-		siblings[unknown6[i]] = unknown4[i]
-	}
-	return siblings
-}
-
-// dualStackList is the list a family-agnostic (IpVersion 0) consumer walks:
-// every v4 entry in order, each followed by its v6 sibling, so the families
-// interleave by operator.
-//
-// Two kinds of leftover v6 entry are treated differently, and the difference
-// is what makes "start from the defaults and replace the v4 list" behave:
-//
-//   - A KNOWN-TABLE entry whose v4 partner is absent is left out. Those are
-//     the shipped defaults; a caller who replaced the v4 list means "use my
-//     servers", and pulling Cloudflare's v6 endpoint back in would send real
-//     queries to an operator they just removed.
-//   - An entry OUTSIDE the table is kept, at the end. Those can only have come
-//     from the caller, so dropping one would ignore a server they explicitly
-//     configured -- which is what happened to every custom v6 endpoint past
-//     the shorter list's length, since familySiblings can only index-pair
-//     min(len4, len6) of them.
-func dualStackList(ipv4 []string, ipv6 []string, known [][2]string) []string {
-	if len(ipv4) == 0 {
-		return append([]string{}, ipv6...)
-	}
-	inTable := make(map[string]bool, 2*len(known))
-	for _, pair := range known {
-		inTable[pair[0]] = true
-		inTable[pair[1]] = true
-	}
-	siblings := familySiblings(ipv4, ipv6, known)
-	list := make([]string, 0, len(ipv4)+len(ipv6))
-	emitted := make(map[string]bool, len(ipv4)+len(ipv6))
-	emit := func(entry string) {
-		if emitted[entry] {
-			return
-		}
-		emitted[entry] = true
-		list = append(list, entry)
-	}
-	for _, entry := range ipv4 {
-		emit(entry)
-		if sibling, ok := siblings[entry]; ok {
-			emit(sibling)
-		}
-	}
-	for _, entry := range ipv6 {
-		if !inTable[entry] {
-			emit(entry)
-		}
-	}
-	return list
 }
 
 // dohServerUrls is the url view of a server list, for the pairing helpers.
@@ -1729,4 +1627,17 @@ func Punycode(domain string) (string, error) {
 		idna.Transitional(true),
 		idna.StrictDomainName(false),
 	).ToASCII(name)
+}
+
+const DefaultDnsUpgradeMaskAddress = "65.49.70.65"
+
+// CloseIdleConnections releases the cache's currently idle pooled DoH
+// connections while keeping the cache usable. Network changes and memory
+// pressure use this operation before a later query or warm re-dials.
+// (Adapted from upstream net_http_doh.go at 20b29f79: the fork keeps the two
+// HTTP clients directly on the cache instead of the remoteClient/localClient
+// wrappers.)
+func (self *DohCache) CloseIdleConnections() {
+	self.httpClient.CloseIdleConnections()
+	self.localHttpClient.CloseIdleConnections()
 }

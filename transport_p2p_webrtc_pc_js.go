@@ -23,7 +23,7 @@ func createWebRtcPeerConnection(ctx context.Context, active bool, settings *WebR
 	pc, err := api.NewPeerConnection(webrtc.Configuration{
 		ICEServers: []webrtc.ICEServer{
 			webrtc.ICEServer{
-				URLs: settings.IceServerUrls,
+				URLs: settings.selectIceServerUrls(),
 			},
 		},
 	})

@@ -10,38 +10,6 @@ import (
 	"time"
 )
 
-// Port note (v2026 engine -> 3.23 generation): this file is the fork's port of
-// the upstream egress_dial.go. Everything here is inert unless a platform
-// supplies an egress resolver, exactly as upstream. The two adaptations to
-// this generation are:
-//
-//   - upstream reaches the platform's in-process resolver through
-//     egressResolver(), defined in the egress_resolver_*.go files (owned by the
-//     dial-resolver slice and absent here). This port reaches the same place
-//     through egressResolverOverride, a nil-by-default seam the resolver files
-//     (or their integration) install; nil preserves the "no platform resolver"
-//     behavior, which is what every platform has until that slice lands.
-//   - upstream's usableEgressDnsServer compares against
-//     DefaultDnsUpgradeMaskAddress from net_http_doh.go (the DoH slice). The
-//     same literal is carried locally as egressDnsUpgradeMaskAddress so this
-//     family does not depend on that file's landing order.
-
-// egressResolverOverride, when non-nil, is the platform's in-process,
-// egress-bound resolver. See the port note above.
-var egressResolverOverride func() *net.Resolver
-
-// platformEgressResolver is egressResolver() with the fork's seam in front.
-func platformEgressResolver() *net.Resolver {
-	if egressResolverOverride == nil {
-		return nil
-	}
-	return egressResolverOverride()
-}
-
-// egressDnsUpgradeMaskAddress is DefaultDnsUpgradeMaskAddress's literal. See
-// the port note above.
-const egressDnsUpgradeMaskAddress = "65.49.70.65"
-
 // Control-dial escape and evidence (R1 for the Windows VPN service, part 2).
 //
 // egress.go pins the SOCKETS of the service's own control connections to the
@@ -49,12 +17,12 @@ const egressDnsUpgradeMaskAddress = "65.49.70.65"
 // route-table half of the self-capture. This file closes the other half: NAME
 // RESOLUTION. Go on Windows resolves through the OS resolver (GetAddrInfoW ->
 // the DNS Client service in svchost.exe), whose wire queries are a DIFFERENT
-// process following the tun default route to the tunnel's own resolver -- a
+// process following the tun default route to the tunnel's own resolver — a
 // resolver that only answers once the tunnel works. Every control dial to a
 // hostname (platform api, platform transport) therefore deadlocked behind the
 // tunnel it was trying to build, and only an OS DNS cache hit let a connect
 // attempt through. The instant disconnect reverted the routes, the same calls
-// completed in milliseconds -- the tell that this was capture, not the backend.
+// completed in milliseconds — the tell that this was capture, not the backend.
 //
 // The escape is an in-process resolver whose queries ride egress-bound sockets
 // (see egressResolver in egress_resolver_windows.go). The Windows service's
@@ -76,7 +44,7 @@ const egressDnsUpgradeMaskAddress = "65.49.70.65"
 // fwmark stamped at socket creation by a cgroup-BPF program, never with
 // IP_UNICAST_IF, so EgressInterfaceIndex stays zero there even while the
 // tunnel is up and this file's escapes would otherwise all read "unbound".
-// Nil -- the value on Windows and on every other platform -- means the interface
+// Nil — the value on Windows and on every other platform — means the interface
 // index is the whole story, exactly as before.
 var egressSelfExcluded func() bool
 
@@ -102,7 +70,7 @@ func egressAwareResolver(custom *net.Resolver) *net.Resolver {
 	if custom != nil {
 		return custom
 	}
-	return platformEgressResolver()
+	return egressResolver()
 }
 
 // dialResolver is the resolver a hostname dial resolves through before its
@@ -137,7 +105,7 @@ func dialResolver(custom *net.Resolver) *net.Resolver {
 // the second half of the Linux fix: pinning the resolver into NetDialer alone
 // would leave these three call sites resolving through the captured stub.
 func resolveEgressUDPAddr(ctx context.Context, addr string) (*net.UDPAddr, error) {
-	platformResolver := platformEgressResolver()
+	platformResolver := egressResolver()
 	bound := platformResolver != nil && egressBound()
 	return resolveEgressUDPAddrWithResolvers(
 		ctx,
@@ -259,7 +227,7 @@ func usableEgressDnsServer(addr netip.Addr, index4 uint32, index6 uint32) bool {
 	if addr.IsLoopback() || addr.IsUnspecified() {
 		return false
 	}
-	if maskAddr, err := netip.ParseAddr(egressDnsUpgradeMaskAddress); err == nil && addr == maskAddr {
+	if maskAddr, err := netip.ParseAddr(DefaultDnsUpgradeMaskAddress); err == nil && addr == maskAddr {
 		return false
 	}
 	// IPv4 link-local (169.254/16) is what Windows assigns when DHCP fails, and
@@ -323,7 +291,7 @@ func controlDialThrottle(key string) *logThrottle {
 
 // logControlDialResult emits the per-dial evidence line. Quiet unless an
 // egress interface is forced, so mobile and app builds are unaffected.
-// `bound` is whether this dial path rides the egress-bound dialer -- false
+// `bound` is whether this dial path rides the egress-bound dialer — false
 // names a path that is in-tunnel by design (e.g. the mux's tunnel DoH).
 func logControlDialResult(log Logger, tag string, bound bool, network string, addr string, conn net.Conn, err error) {
 	l := loggerOrDefault(log)

@@ -77,9 +77,7 @@ func TestUdpBufferSharedSocketLifecycleSendsDirectlyNoLoss(t *testing.T) {
 	bw := &ProxyBandwidth{}
 	responses := make(chan []byte, 64)
 	receive := func(_ TransferPath, _ protocol.ProvideMode, _ *IpPath, packet []byte) {
-		// receivePacket returns the pooled buffer to the pool as soon as this
-		// callback returns; copy what the test needs.
-		responses <- append([]byte(nil), packet...)
+		responses <- packet
 	}
 	buffer := NewUdp4Buffer(ctx, receive, settings, bw)
 	t.Cleanup(func() {
