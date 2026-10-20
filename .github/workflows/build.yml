@@ -187,7 +187,8 @@ jobs:
 
       - name: Check gofmt
         run: |
-          unformatted=$(gofmt -l .)
+          # third_party is a vendored module with its own formatting, as in 3.23-fix
+          unformatted=$(gofmt -l . | grep -v "^third_party/" || true)
           if [ -n "$unformatted" ]; then
             echo "Files not gofmt-clean:"
             echo "$unformatted"
