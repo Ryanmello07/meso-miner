@@ -6,6 +6,7 @@ package connect
 import (
 	"bytes"
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -40,9 +41,42 @@ type sendHarness struct {
 	sessions     chan h3TestSession
 	// conn and stream are the server side of the live connection, so a test can
 	// abort one direction and induce a stream write error deterministically while
-	// the connection itself stays up.
-	conn   *quic.Conn
-	stream *quic.Stream
+	// the connection itself stays up. The server callback publishes them from
+	// its own goroutine, so they are written under mu and a test waits on ready
+	// before it reads them; a bare assignment raced the test goroutine.
+	mu        sync.Mutex
+	ready     chan struct{}
+	readyOnce sync.Once
+	conn      *quic.Conn
+	stream    *quic.Stream
+}
+
+// setServerConn publishes the server side of the live connection and unblocks
+// every waiter on the first accepted connection.
+func (self *sendHarness) setServerConn(conn *quic.Conn, stream *quic.Stream) {
+	self.mu.Lock()
+	self.conn, self.stream = conn, stream
+	self.mu.Unlock()
+	self.readyOnce.Do(func() { close(self.ready) })
+}
+
+// waitReady blocks until the server accepted a connection, so a read of conn
+// or stream is ordered after the write that published it.
+func (self *sendHarness) waitReady(t *testing.T) {
+	t.Helper()
+	select {
+	case <-self.ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the H3 test server published no connection")
+	}
+}
+
+// serverStream is the server side of the accepted connection.
+func (self *sendHarness) serverStream(t *testing.T) *quic.Stream {
+	self.waitReady(t)
+	self.mu.Lock()
+	defer self.mu.Unlock()
+	return self.stream
 }
 
 // startSendHarness starts the server and the transport. serverReadsDatagrams is
@@ -56,14 +90,14 @@ func startSendHarness(t *testing.T, serverReadsDatagrams bool, h1Up bool) *sendH
 		fromStream:   make(chan []byte, 1024),
 		fromDatagram: make(chan []byte, 1024),
 		sendRoute:    make(chan chan []byte, 4),
+		ready:        make(chan struct{}),
 	}
 
 	server := startH3TestServer(t, ctx, true, func(ctx context.Context, conn *quic.Conn, stream *quic.Stream, framer *Framer, accepted bool) {
 		if !accepted {
 			return
 		}
-		harness.conn = conn
-		harness.stream = stream
+		harness.setServerConn(conn, stream)
 		// stream reader: everything non-empty the client wrote on the stream
 		go func() {
 			for {
@@ -117,7 +151,10 @@ func startSendHarness(t *testing.T, serverReadsDatagrams bool, h1Up bool) *sendH
 
 	transportCtx, transportCancel := context.WithCancel(ctx)
 	transport := newH3DatagramTestTransport(transportCtx, transportCancel, server.port)
-	transport.settings.sendRouteObserverForTest = func(send chan []byte) {
+	transport.settings.SendRouteObserver = func(_ Transport, send Route, connected bool) {
+		if !connected {
+			return
+		}
 		select {
 		case harness.sendRoute <- send:
 		default:
@@ -130,7 +167,7 @@ func startSendHarness(t *testing.T, serverReadsDatagrams bool, h1Up bool) *sendH
 	harness.sessions = server.sessions
 	harness.cancel = transportCancel
 	harness.done = make(chan struct{})
-	go func() { defer close(harness.done); transport.runH3(TransportModeH3, 0, 1) }()
+	go func() { defer close(harness.done); transport.runH3(transport.ctx, TransportModeH3, 0, 1) }()
 	t.Cleanup(func() { transportCancel(); <-harness.done })
 
 	select {
@@ -379,8 +416,7 @@ func TestH3MemoryBoundsAreAppliedAndScale(t *testing.T) {
 	t.Cleanup(func() { SetMemoryBudget(previous) })
 
 	SetMemoryBudget(0)
-	config := &quic.Config{}
-	applyH3MemoryBounds(config)
+	config := newPlatformQuicConfig(DefaultPlatformTransportSettings(), 1)
 	if config.InitialStreamReceiveWindow != uint64(kib(256)) ||
 		config.InitialConnectionReceiveWindow != uint64(kib(512)) {
 		t.Fatalf("initial windows %d / %d", config.InitialStreamReceiveWindow, config.InitialConnectionReceiveWindow)
@@ -395,8 +431,7 @@ func TestH3MemoryBoundsAreAppliedAndScale(t *testing.T) {
 	// a small budget shrinks the ceilings but never below the working floor, and
 	// the initial credit never exceeds the ceiling
 	SetMemoryBudget(mib(8))
-	small := &quic.Config{}
-	applyH3MemoryBounds(small)
+	small := newPlatformQuicConfig(DefaultPlatformTransportSettings(), 1)
 	if small.MaxStreamReceiveWindow >= config.MaxStreamReceiveWindow ||
 		small.MaxConnectionReceiveWindow >= config.MaxConnectionReceiveWindow {
 		t.Fatalf("an 8 MiB budget did not shrink the windows: %d / %d", small.MaxStreamReceiveWindow, small.MaxConnectionReceiveWindow)
@@ -407,20 +442,5 @@ func TestH3MemoryBoundsAreAppliedAndScale(t *testing.T) {
 	if small.InitialStreamReceiveWindow > small.MaxStreamReceiveWindow ||
 		small.InitialConnectionReceiveWindow > small.MaxConnectionReceiveWindow {
 		t.Fatal("initial credit exceeds the ceiling")
-	}
-}
-
-// The H3 transport's real dial uses those bounds: a connection made by runH3
-// advertises the pinned windows, not quic-go's auto-tuned 6 MiB / 15 MiB.
-func TestH3DatagramLimitsAreMemoryScaledAndBounded(t *testing.T) {
-	settings, budget := h3DatagramLimits()
-	if settings == nil || budget == nil {
-		t.Fatal("limits not resolved")
-	}
-	if settings.ProcessReassemblyByteCount < int64(kib(512)) || int64(mib(8)) < settings.ProcessReassemblyByteCount {
-		t.Fatalf("process reassembly %d outside [512 KiB, 8 MiB]", settings.ProcessReassemblyByteCount)
-	}
-	if again, _ := h3DatagramLimits(); again != settings {
-		t.Fatal("the limits must resolve once")
 	}
 }

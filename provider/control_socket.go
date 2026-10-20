@@ -315,6 +315,8 @@ var liveEffectKeys = map[string]bool{
 	"h3":                          true,
 	"h3_datagram":                 true,
 	"h3_datagram_send":            true,
+	"ip_version":                  true,
+	"h1_plus":                     true,
 	"baseline":                    true,
 	"proxy_self_heal":             true,
 	"proxy_audit":                 true,
@@ -329,6 +331,7 @@ var liveEffectKeys = map[string]bool{
 	"hot_restart":                 true,
 	"metrics":                     true,
 	"metrics_listen":              true,
+	"proxy_target_family":         true,
 }
 
 // needsRestart returns true if setting this key requires a provider restart
@@ -369,18 +372,26 @@ func validateControlValue(key, value string) error {
 		default:
 			return fmt.Errorf("%s: must be none, url, or all (got %q)", key, value)
 		}
-	case "h3":
-		if strings.TrimSpace(value) == "" {
-			return fmt.Errorf("h3: must be off, direct, on, auto, a positive proxy count, or all (got an empty value)")
-		}
-		if _, err := parseH3Mode(value); err != nil {
+	case "ip_version":
+		if _, err := connect.ParseFamilyStackMode(value); err != nil {
 			return err
 		}
-	case "fast_auth", "proxy_self_heal", "proxy_audit", "smart_dialer", "baseline", "h3_datagram", "h3_datagram_send":
+	case "proxy_target_family":
+		if _, err := connect.ParseProxyTargetFamily(value); err != nil {
+			return err
+		}
+	case "fast_auth", "proxy_self_heal", "proxy_audit", "smart_dialer", "baseline", "h3_datagram", "h3_datagram_send", "h1_plus":
 		switch valLower {
 		case "on", "off":
 		default:
 			return fmt.Errorf("%s: must be on or off (got %q)", key, value)
+		}
+	case "h3":
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("h3: must be off, direct, on, a positive proxy count, or all (got an empty value)")
+		}
+		if _, err := parseH3Mode(value); err != nil {
+			return err
 		}
 	case "oom_cap":
 		switch valLower {
@@ -477,6 +488,14 @@ var liveDefaults = map[string]string{
 	// off default; without the entry, clear reported success while the live
 	// dialer stayed enabled until restart.
 	"smart_dialer": "off",
+	// Clearing ip_version hands the families back to the default: dual stack.
+	"ip_version": "dual",
+	// Clearing proxy_target_family goes back to resolving the target here and
+	// sending the proxy an IPv4 literal, which is what every release before the
+	// key did.
+	"proxy_target_family": proxyTargetFamilyDefault,
+	// Clearing h1_plus restores the default: H1+ upgrades allowed.
+	"h1_plus": "on",
 	// Clearing h3_datagram_send returns to the default: on, as upstream.
 	"h3_datagram_send": "on",
 	// Clearing h3_datagram returns to the default: offering DATAGRAM is on, as
@@ -496,7 +515,7 @@ func applyLiveDefault(key string) error {
 	if key == "h3" {
 		// Clearing the key hands the decision back to URNETWORK_H3, which is
 		// what a restart would use, so the live state matches the persisted one.
-		return applyLiveSideEffect(key, resolveH3Mode(nil, currentProxyResolution()).String())
+		return applyLiveSideEffect(key, h3DefaultModeName())
 	}
 	def, ok := liveDefaults[key]
 	if !ok {
@@ -1070,9 +1089,9 @@ func applyLiveSideEffect(key, value string) error {
 		}
 		tlog("⚙️ [control] applied smart_dialer=%s (was %s)\n", value, was)
 	case "h3":
-		// The mode (see h3Mode) is read when an identity builds its transport.
-		// The beside-H1 gate follows it at once; a changed mode relaunches the
-		// direct identity, the only one it affects.
+		// The mode (see h3Mode) is read when an identity builds its transport. The
+		// beside-H1 gate follows it at once; a changed mode relaunches the direct
+		// identity, the only one it affects, so the new policy takes hold.
 		setting, err := parseH3Mode(value)
 		if err != nil {
 			return err
@@ -1082,6 +1101,9 @@ func applyLiveSideEffect(key, value string) error {
 		if relaunch {
 			go connect.HandleError(restartDirectIdentity)
 		}
+		if previous != setting {
+			go connect.HandleError(func() { relaunchH3ProxiesNow(setting) })
+		}
 	case "h3_datagram":
 		// The offer is made when H3 dials, so a change closes the live H3
 		// connection and it reconnects with the new setting. It does nothing
@@ -1089,6 +1111,19 @@ func applyLiveSideEffect(key, value string) error {
 		enabled := strings.EqualFold(value, "on")
 		previous := connect.SetH3DatagramsEnabled(enabled)
 		tlog("⚙️ [control] applied h3_datagram=%s (was %s)\n", value, onOff(previous))
+	case "ip_version":
+		return applyIpVersion(value)
+	case "proxy_target_family":
+		// Read inside every proxied dial (see connect/proxy_target_family.go), so
+		// the next dial follows it. Nothing is relaunched and no open session is
+		// touched, which keeps flipping it back a complete rollback.
+		return applyProxyTargetFamily(value)
+	case "h1_plus":
+		// Read at each dial: new connections try (on) or skip (off) the H1+
+		// upgrade; live connections keep their carrier until they reconnect.
+		enabled := strings.EqualFold(value, "on")
+		connect.SetH1PlusDisabled(!enabled)
+		tlog("⚙️ [control] applied h1_plus=%s (takes effect on the next connect)\n", onOff(enabled))
 	case "h3_datagram_send":
 		// Read per message, so this takes effect at once with no reconnect. It
 		// only matters on an H3 connection where the server accepted DATAGRAM
@@ -1213,12 +1248,7 @@ func startMetricsAfterTakeover(state *controlState) {
 	if metricsServer != nil {
 		return
 	}
-	enabled := os.Getenv("URNETWORK_METRICS") != ""
-	if !enabled {
-		if v, ok := state.get("metrics"); ok && strings.EqualFold(v, "on") {
-			enabled = true
-		}
-	}
+	enabled := os.Getenv("URNETWORK_METRICS") != "" || metricsEnabledByState(state)
 	if !enabled {
 		return
 	}
@@ -1280,6 +1310,35 @@ func getHotSwapTrigger() func() error {
 	return hotSwapTrigger
 }
 
+// metricsEnabledByState reports whether /metrics should run according to the
+// persisted `metrics` setting. It defaults to ON: a node whose operator never
+// switched it on went dark (a fleet node had no listener and no one noticed).
+// The listener in "auto" mode binds loopback plus the box's Tailscale
+// addresses (inside a container, 0.0.0.0 with only published ports reachable)
+// and never a public interface, and rendering costs nothing until something
+// scrapes it. An explicit `urnet-tools metrics off` is persisted and wins.
+func metricsEnabledByState(state *controlState) bool {
+	v, ok := state.get("metrics")
+	if !ok || strings.TrimSpace(v) == "" {
+		return true
+	}
+	return !strings.EqualFold(strings.TrimSpace(v), "off")
+}
+
+// startDefaultMetrics starts /metrics at provider startup for a node that did
+// not choose: URNETWORK_METRICS (main.go binds that address itself), a persisted
+// `metrics on` (applyPersistedRuntimeTuning) and a persisted `metrics off` all
+// take precedence. A HotSwap candidate skips it; startMetricsAfterTakeover binds
+// after takeover. A start failure is logged and never stops the provider.
+func startDefaultMetrics(state *controlState, hotSwapCandidate bool) {
+	if hotSwapCandidate || os.Getenv("URNETWORK_METRICS") != "" || !metricsEnabledByState(state) {
+		return
+	}
+	if err := applyMetricsLive("on"); err != nil {
+		tlog("[metrics] default /metrics could not start: %v\n", err)
+	}
+}
+
 func applyPersistedRuntimeTuning(state *controlState) {
 	if v, ok := state.get("gomemlimit"); ok && v != "" && !strings.EqualFold(v, "off") {
 		if err := applyLiveSideEffect("gomemlimit", v); err != nil {
@@ -1300,9 +1359,9 @@ func applyPersistedRuntimeTuning(state *controlState) {
 			tlog("[control] failed to apply persisted metrics=on: %s\n", err)
 		}
 	}
-	// h3_datagram / h3_datagram_send have no environment default. They default
-	// on everywhere, as upstream offers and sends datagrams by default. An
-	// explicit persisted key (off included) still wins.
+	// h3_datagram / h3_datagram_send have no environment default. They default on
+	// everywhere, as upstream offers and sends datagrams by default. An explicit
+	// persisted key (off included) still wins.
 	res := currentProxyResolution()
 	directOnly := datagramDefaultOn(res)
 	datagramValue, datagramSet := state.get("h3_datagram")
@@ -1319,6 +1378,30 @@ func applyPersistedRuntimeTuning(state *controlState) {
 	if err := applyLiveSideEffect("h3_datagram_send", onOff(strings.EqualFold(sendValue, "on"))); err != nil {
 		tlog("[control] failed to apply h3_datagram_send: %s\n", err)
 	}
+	if v, ok := state.get("h1_plus"); ok {
+		if err := applyLiveSideEffect("h1_plus", v); err != nil {
+			tlog("[control] failed to apply persisted h1_plus=%s: %s\n", v, err)
+		}
+	}
+	if v, ok := state.get("ip_version"); ok {
+		if err := applyLiveSideEffect("ip_version", v); err != nil {
+			tlog("[control] failed to apply persisted ip_version=%s: %s\n", v, err)
+		}
+	}
+	// Replayed in both directions, including the default: an unset key must put
+	// the dial path on v4 explicitly rather than leave it on whatever the
+	// environment or a previous run left behind. URNETWORK_PROXY_TARGET_FAMILY is
+	// the startup default the key overrides.
+	if err := applyLiveSideEffect("proxy_target_family", resolveProxyTargetFamily(state)); err != nil {
+		tlog("[control] failed to apply proxy_target_family: %s\n", err)
+	}
+	// h3 is replayed in BOTH directions, falling back to the startup default
+	// when the key was never set: a persisted off must beat the env var and the
+	// direct-only default, and an unset key must not leave the gate at its zero
+	// value. On a settled direct-only node the default flips h3 ON — one
+	// identity means one extra socket for a transport that falls back to H1
+	// quietly — so a lean direct box gets H3 without the operator configuring
+	// anything. A pooled node keeps the off default.
 	if err := applyLiveSideEffect("h3", resolveH3Mode(state, currentProxyResolution()).String()); err != nil {
 		tlog("[control] failed to apply h3: %s\n", err)
 	}

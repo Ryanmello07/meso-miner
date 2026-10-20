@@ -88,6 +88,11 @@ func newResilientDialTlsContext(
 	reorder bool,
 	segment bool,
 ) DialTlsContextFunction {
+	// one session ticket cache for this dial path, shared by every dial it makes
+	// (Clone below keeps the pointer)
+	baseTlsConfig := newClientTlsConfig(connectSettings.TlsConfig, nil)
+	tlsPath := resilientTlsPath(fragment, reorder, segment)
+
 	return func(
 		ctx context.Context,
 		network string,
@@ -115,7 +120,7 @@ func newResilientDialTlsContext(
 			rconn := newResilientTlsConn(conn, fragment, reorder, segment)
 
 			// copy and extend
-			tlsConfig := connectSettings.TlsConfig.Clone()
+			tlsConfig := baseTlsConfig.Clone()
 			tlsConfig.ServerName = host
 			tlsConn := tls.Client(rconn, tlsConfig)
 
@@ -124,6 +129,7 @@ func newResilientDialTlsContext(
 				defer tlsCancel()
 				err = tlsConn.HandshakeContext(tlsCtx)
 			}()
+			noteTlsHandshake(tlsPath, host, tlsConn.ConnectionState(), err)
 			if err != nil {
 				tlsConn.Close()
 				return nil, err

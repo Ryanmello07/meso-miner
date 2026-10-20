@@ -138,10 +138,6 @@ type ClientStrategySettings struct {
 	// expose consistent ips
 	// if true, enables ech
 	ExposeServerIps bool
-	// DisableManualExtenders makes SetCustomExtenders a no-op. A strategy built
-	// with fixed extenders keeps its own set.
-	DisableManualExtenders bool
-
 	// expose server names
 	// if true, enables non-ech
 	// TODO set this to default false
@@ -163,12 +159,22 @@ type ClientStrategySettings struct {
 	ExtenderHostnames []string
 	ReconnectTimeout  time.Duration
 	MaxExtenderCount  int
+	// DisableManualExtenders makes SetCustomExtenders a no-op. A strategy built
+	// for a family-pinned transport sets it: an extender's address family is its
+	// own, so it would prove the extender's family, not the provider's.
+	DisableManualExtenders bool
 	// extender minimum weight
 	ExtenderMinimumWeight float32
 	// drop dialers that have not had a successful connect in this timeout
 	ExtenderDropTimeout time.Duration
 
 	DohSettings *DohSettings
+
+	// InternalDohDomains are network-space domains whose exact host and
+	// subdomains resolve through the strategy's direct DoH cache before a
+	// control connection is dialed by raw IP (ported from the upstream
+	// internal-DoH leaf; nil disables the rule).
+	InternalDohDomains []string
 
 	HelloRetryTimeout time.Duration
 
@@ -185,6 +191,20 @@ type ClientStrategy struct {
 
 	settings *ClientStrategySettings
 
+	// ipFamily is the family pin this strategy's dialers dial for: 4 or 6 for
+	// the direct-only strategy a family-pinned platform transport owns, 0 for
+	// a family-agnostic one. It is set at construction and never changes; the
+	// framed-upgrade rejection cache reads it to keep the pins from aliasing
+	// each other (see upgradeRouteScope).
+	ipFamily int
+
+	// internalDohResolver exists only when InternalDohDomains are configured
+	// (see net_http_internal_doh.go; ported from upstream at 20b29f79).
+	internalDohResolver *internalDohResolver
+	// dohSettings is the strategy's current DoH settings, replaced live by
+	// SetInternalDohSettings (ported from upstream at 20b29f79).
+	dohSettings *DohSettings
+
 	mutex sync.Mutex
 	// dialers are only updated inside the mutex
 	dialers             map[*clientDialer]bool
@@ -196,6 +216,8 @@ type ClientStrategy struct {
 
 	nextConnectTime time.Time
 	failureCount    int
+	// callers holding the reconnect fast path; guarded by mutex
+	reconnectFastPathCount int
 
 	probes probeWindow
 }
@@ -229,6 +251,10 @@ func NewClientStrategyWithDefaults(ctx context.Context) *ClientStrategy {
 
 // extender udp 53 to platform extender
 func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *ClientStrategy {
+	// wire the internal DoH resolver when InternalDohDomains are configured
+	// (ported from upstream net_http.go at 20b29f79; inert when unset)
+	settings, internalDohResolver := clientStrategySettingsWithInternalDoh(settings)
+
 	// create dialers to match settings
 	dialers := map[*clientDialer]bool{}
 	resolvedExtenderIps := []netip.Addr{}
@@ -248,6 +274,15 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 			// budgets rather than one deadline shared across connect and
 			// handshake. That is the intended behavior, and it applies to every
 			// dial, not only forced ones.
+
+			// this dial path's own session ticket cache (see newClientTlsConfig)
+			normalTlsConfig := newClientTlsConfig(settings.TlsConfig, nil)
+			// the handshake metric label follows the strategy's transport, which
+			// the unified dial no longer branches on
+			handshakePath := tlsPathNormal
+			if settings.ProxySettings != nil {
+				handshakePath = tlsPathNormalProxy
+			}
 			var tlsDialContext DialTlsContextFunction
 			tlsDialContext = func(ctx context.Context, network string, addr string) (net.Conn, error) {
 				// the handshake half of the dial. It owns the connection's tls
@@ -260,11 +295,7 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 						return nil, err
 					}
 
-					tlsConfig := settings.TlsConfig
-					if tlsConfig == nil {
-						// `tls.defaultConfig`
-						tlsConfig = &tls.Config{}
-					}
+					tlsConfig := normalTlsConfig
 					if tlsConfig.ServerName == "" {
 						c := tlsConfig.Clone()
 						c.ServerName = host
@@ -277,6 +308,7 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 						defer tlsCancel()
 						err = tlsConn.HandshakeContext(tlsCtx)
 					}()
+					noteTlsHandshake(handshakePath, host, tlsConn.ConnectionState(), err)
 					if err != nil {
 						tlsConn.Close()
 						return nil, err
@@ -395,6 +427,8 @@ func NewClientStrategy(ctx context.Context, settings *ClientStrategySettings) *C
 		ctx:                 ctx,
 		log:                 loggerOrDefault(settings.Log),
 		settings:            settings,
+		internalDohResolver: internalDohResolver,
+		dohSettings:         settings.DohSettings,
 		dialers:             dialers,
 		resolvedExtenderIps: resolvedExtenderIps,
 		extenderIpSecrets:   map[netip.Addr]string{},
@@ -425,8 +459,22 @@ func (self *ClientStrategy) CustomExtenders() map[netip.Addr]string {
 	return maps.Clone(self.extenderIpSecrets)
 }
 
-// new connections should use next connect time to avoid flooding the network at once
-func (self *ClientStrategy) NextConnectTime() time.Time {
+// nextConnectMaxLead caps how far the shared next-connect timestamp may run
+// ahead of wall clock. A dialer whose pacing wait was cancelled used to keep its
+// step, so rapid connect/disconnect cycles compounded the lead without bound.
+// The cancel release below is the primary fix; this clamp is the backstop that
+// bounds the damage of any reservation that still leaks (from upstream at
+// 20b29f79).
+const nextConnectMaxLead = 10 * time.Second
+
+// new connections should use next connect time to avoid flooding the network
+// at once.
+//
+// The returned release gives this caller's reservation back to the staircase.
+// It exists for one situation: the caller's pacing wait was cancelled before it
+// ever dialed, so the step it reserved paces nobody. A caller that goes on to
+// dial must NOT call release. The release is idempotent and never nil.
+func (self *ClientStrategy) NextConnectTime() (time.Time, func()) {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 
@@ -440,8 +488,63 @@ func (self *ClientStrategy) NextConnectTime() time.Time {
 	if nextConnectTime.Before(now) {
 		nextConnectTime = now
 	}
+	if maxLead := now.Add(nextConnectMaxLead); maxLead.Before(nextConnectTime) {
+		nextConnectTime = maxLead
+	}
 	self.nextConnectTime = nextConnectTime
-	return nextConnectTime
+
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			self.mutex.Lock()
+			defer self.mutex.Unlock()
+			self.nextConnectTime = self.nextConnectTime.Add(-connectDelay)
+		})
+	}
+	return nextConnectTime, release
+}
+
+const (
+	// reconnectFastPathLimit caps how many callers may hold the reconnect fast
+	// path (NextReconnectTime) at once; callers past the cap fall back to the
+	// serialized NextConnectTime staircase.
+	reconnectFastPathLimit = 4
+	// reconnectFastPathMaxDelay is the independent per-caller jitter for a
+	// fast-path reconnect: uniform in [0, 250ms).
+	reconnectFastPathMaxDelay = 250 * time.Millisecond
+)
+
+// NextReconnectTime is the scoped fast path of NextConnectTime for a caller
+// whose transport was connected and just lost its connection: a small
+// independent jitter that neither reads nor advances the shared timestamp, capped
+// at reconnectFastPathLimit concurrent holders. The returned release frees the
+// slot and MUST be called once the dial attempt completes; it is idempotent and
+// never nil. Retries after a failed reconnect go back through NextConnectTime.
+func (self *ClientStrategy) NextReconnectTime() (time.Time, func()) {
+	acquired := false
+	func() {
+		self.mutex.Lock()
+		defer self.mutex.Unlock()
+		if self.reconnectFastPathCount < reconnectFastPathLimit {
+			self.reconnectFastPathCount += 1
+			acquired = true
+		}
+	}()
+	if !acquired {
+		next, _ := self.NextConnectTime()
+		return next, func() {}
+	}
+
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() {
+			self.mutex.Lock()
+			defer self.mutex.Unlock()
+			self.reconnectFastPathCount -= 1
+		})
+	}
+	jitter := time.Duration(mathrand.Int63n(int64(reconnectFastPathMaxDelay)))
+	return time.Now().Add(jitter), release
 }
 
 func (self *ClientStrategy) dialerWeights() map[*clientDialer]float32 {
@@ -490,6 +593,16 @@ type evalResult struct {
 	dialer *clientDialer
 	wsConn *websocket.Conn
 	err    error
+	// materialize, when set, is run for the selected HTTP response (ported
+	// from upstream net_http.go at 20b29f79; nil is inert on the fork).
+	materialize func() error
+	// h1Conn is the framed H1 message connection an H1 dial produced; dialerInfo
+	// describes the dialer that won it (stage 3, from upstream at 20b29f79).
+	h1Conn     H1MessageConn
+	dialerInfo *DialerInfo
+	// terminal ends the logical dial with this result's error instead of
+	// retrying the remaining dialers (an authorization denial).
+	terminal bool
 
 	httpResult
 }
@@ -517,6 +630,12 @@ func newEvalResultFromHttpResponse(response *http.Response, err error) *evalResu
 }
 
 func (self *evalResult) Close() {
+	// fork: an H1 dial (websocket or H1+) stores its connection in h1Conn; a
+	// losing parallel dial must close it, or its authenticated platform session
+	// stays open with no reader. (Upstream's Close does the same.)
+	if self.h1Conn != nil {
+		self.h1Conn.Close()
+	}
 	if self.wsConn != nil {
 		self.wsConn.Close()
 		// if wsConn is set, the response does not need to be closed
@@ -668,7 +787,7 @@ func (self *ClientStrategy) parallelEvalErr(ctx context.Context, eval func(ctx c
 				result := eval(handleCtx, dialer)
 				noteFailed(result)
 				if result != nil {
-					if result.err == nil {
+					if result.err == nil || result.terminal {
 						self.log.V(2).Infof("[net][p]select: %s\n", dialer.String())
 						return result, nil
 					}
@@ -692,7 +811,7 @@ func (self *ClientStrategy) parallelEvalErr(ctx context.Context, eval func(ctx c
 					return nil, finish()
 				case result := <-out:
 					if result != nil {
-						if result.err == nil {
+						if result.err == nil || result.terminal {
 							self.log.V(2).Infof("[net][p]select: %s\n", result.dialer.String())
 							return result, nil
 						}
@@ -720,7 +839,7 @@ func (self *ClientStrategy) parallelEvalErr(ctx context.Context, eval func(ctx c
 					return nil, finish()
 				case result := <-out:
 					if result != nil {
-						if result.err == nil {
+						if result.err == nil || result.terminal {
 							self.log.V(2).Infof("[net][p]select: %s\n", result.dialer.String())
 							return result, nil
 						}
@@ -740,7 +859,7 @@ func (self *ClientStrategy) parallelEvalErr(ctx context.Context, eval func(ctx c
 				return nil, finish()
 			case result := <-out:
 				if result != nil {
-					if result.err == nil {
+					if result.err == nil || result.terminal {
 						return result, nil
 					}
 					result.Close()
@@ -1604,6 +1723,22 @@ func (self *clientDialer) String() string {
 	}
 }
 
+// routeIdentity is the stable identity of the route this dialer takes, in the
+// shape of String() without the live counters: the proxy index and address, or
+// just the description for a direct dial. The strategy's dialers are cached
+// and reused, and a rebuild (a proxy reload, a recreated strategy) issues new
+// pointers for the same route, so the framed-upgrade rejection cache keys on
+// this identity instead of the pointer (see upgradeRouteScope).
+func (self *clientDialer) routeIdentity() string {
+	if self.extenderConfig != nil {
+		return fmt.Sprintf("extender|%v", self.extenderConfig)
+	}
+	if self.settings != nil && self.settings.ProxySettings != nil {
+		return fmt.Sprintf("proxy|%d|%s|%s", self.settings.ProxySettings.Index, self.settings.ProxySettings.Address, self.description)
+	}
+	return fmt.Sprintf("direct|%s", self.description)
+}
+
 func (self *clientDialer) Close() {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
@@ -1659,13 +1794,12 @@ func NewBlockingApiCallback[R any](ctx context.Context) (ApiCallback[R], chan Ap
 	return apiCallback, c
 }
 
-// httpErrorFromResponse builds an error from a non-200 response. Some
-// front-end proxies (nginx, Cloudflare) return an HTML error page as the
-// body instead of plain text or JSON; embedding that verbatim produces
-// multi-line, unreadable log spam at every call site that prints the error.
-// Collapse an HTML body down to a short descriptor instead.
-// HttpStatusError is a confirmed non-2xx response. The status code makes a
-// rejection distinguishable from a transport error without matching on text.
+// HttpStatusError is a non-200 HTTP response from an API call.
+//
+// Error returns exactly the text this error had before it carried a type, so
+// every log line and every caller that prints it is unchanged. The status
+// code makes a confirmed rejection distinguishable from a transport error or
+// a 5xx without matching on text.
 type HttpStatusError struct {
 	StatusCode int
 	Status     string
@@ -1684,6 +1818,11 @@ func (self *HttpStatusError) HTTPStatusCode() int {
 	return self.StatusCode
 }
 
+// httpErrorFromResponse builds an error from a non-200 response. Some
+// front-end proxies (nginx, Cloudflare) return an HTML error page as the
+// body instead of plain text or JSON; embedding that verbatim produces
+// multi-line, unreadable log spam at every call site that prints the error.
+// Collapse an HTML body down to a short descriptor instead.
 func httpErrorFromResponse(status string, bodyBytes []byte) error {
 	statusCode := 0
 	if fields := strings.Fields(status); 0 < len(fields) {

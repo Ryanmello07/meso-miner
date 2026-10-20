@@ -76,8 +76,10 @@ func setProxyResolutionStatus(status int32, reason string) {
 	}
 	reportProxyStatusToSystemd()
 	// Direct-only H3 defaults depend on this status becoming ZeroValid, so the
-	// re-apply belongs here -- the one choke point every path goes through --
-	// and fires only on transitions into or out of it.
+	// re-apply belongs here — the one choke point every path goes through — and
+	// fires only on transitions into or out of it. Without the guard it would re-run on
+	// every settled reload (the 30s reload loop), spamming the control log with
+	// "applied h3_datagram=on (was on)" once a minute forever.
 	if (status == proxyResolutionZeroValid) != (prev == proxyResolutionZeroValid) {
 		applyDirectOnlyH3Defaults()
 	}

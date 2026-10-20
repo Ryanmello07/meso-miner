@@ -119,7 +119,10 @@ var controlKeys = map[string]bool{
 	"h3":                          true,
 	"h3_datagram":                 true,
 	"h3_datagram_send":            true,
+	"ip_version":                  true,
+	"h1_plus":                     true,
 	"oom_cap":                     true,
+	"proxy_target_family":         true,
 }
 
 // globalControlState is the single provider-wide instance. Set by

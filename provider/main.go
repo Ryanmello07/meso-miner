@@ -35,6 +35,7 @@ import (
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 
+	"github.com/urfoundation/sn/miner/onchain"
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 )
@@ -854,6 +855,18 @@ func main() {
 		sanitizeRootPath()
 	}
 
+	// `provider snclaim ...` hands the whole argument list to sn's on-chain
+	// submission library untouched. It has its own usage and flags, which this
+	// command's docopt would reject, so it runs before the banners, the logger
+	// and the parse: its output stays exactly what the sn `snclaim` tool prints.
+	if isSnclaimInvocation(os.Args) {
+		if Version != "" {
+			onchain.Version = Version
+		}
+		onchain.Run(os.Args[2:])
+		return
+	}
+
 	profile := os.Getenv("URNETWORK_PROFILE")
 	ramlogs := os.Getenv("URNETWORK_RAMLOGS")
 
@@ -891,157 +904,7 @@ func main() {
 		initSHMLoggerWithHandover()
 	}
 
-	usage := fmt.Sprintf(
-		`Connect provider.
-
-The default URLs are:
-    api_url: %s
-    connect_url: %s
-
-Usage:
-    provider auth ([<auth_code>] | --user_auth=<user_auth> [--password=<password>]) [-f]
-    	[--api_url=<api_url>]
-    	[--max-memory=<mem>]
-    	[-v...]
-    provider provide [--port=<port>]
-        [--api_url=<api_url>]
-        [--connect_url=<connect_url>]
-        [--wallet=<coldkey_ss58> [--legacy-network-wallet]]
-        [--max-memory=<mem>]
-        [--proxy_file=<proxy_file>]
-        [--file=<file>]
-        [--proxy_url=<proxy_url>...]
-        [--url=<url>...]
-        [--URL=<URL>...]
-        [--proxy_url_refresh=<proxy_url_refresh>]
-        [--proxy_url_max=<proxy_url_max>]
-        [--proxy_dead_cleanup_scope=<proxy_dead_cleanup_scope>]
-        [--proxy_dead_cleanup_interval=<proxy_dead_cleanup_interval>]
-        [-v...]
-    provider auth-provide ([<auth_code>] | --user_auth=<user_auth> [--password=<password>]) [-f]
-    	[--port=<port>]
-        [--api_url=<api_url>]
-        [--connect_url=<connect_url>]
-        [--wallet=<coldkey_ss58> [--legacy-network-wallet]]
-        [--max-memory=<mem>]
-        [--proxy_file=<proxy_file>]
-        [--file=<file>]
-        [--proxy_url=<proxy_url>...]
-        [--url=<url>...]
-        [--URL=<URL>...]
-        [-v...]
-    provider wallet set <coldkey_ss58> [--legacy-network-wallet]
-        [--api_url=<api_url>]
-        [-v...]
-    provider sn-status [--json]
-        [--api_url=<api_url>]
-        [-v...]
-    provider claim [--store-client=<key> | --provider-jwt=<path> | --legacy-coldkey=<coldkey_ss58>] [--epoch=<epoch>] [--rpc=<rpc_url>]... [--key_file=<key_file>] [--dry-run]
-        [--api_url=<api_url>]
-        [-v...]
-    provider bind-head --manifest=<file> --hotkey_seed_file=<file> --valid_from_epoch=<n> --valid_to_epoch=<n> [--client_id=<hex16>] [--client_seed_file=<file>] [--rpc=<rpc_url>]... [--key_file=<key_file>] [--dry-run]
-        [-v...]
-    provider unbind-head --manifest=<file> --effective_epoch=<n> [--client_id=<hex16>] [--client_seed_file=<file>] [--offline] [--rpc=<rpc_url>]... [--key_file=<key_file>] [--dry-run]
-        [-v...]
-    provider proxy auth add [<key>] <proxy_user> <proxy_password> [-f]
-    provider proxy auth remove [<key>] [--all]
-    provider proxy add [<key_address>...] [--proxy_file=<proxy_file>] [--file=<file>] [--url=<url>] [--URL=<URL>] [-f]
-    provider proxy remove [<key_address>...] [--all]
-    provider proxy remove --match=<pattern> [--yes] [--preview]
-    provider proxy remove-dead [--degraded[=<duration>]] [--auth-failures=<N>] [--source=<source>] [--yes] [--preview]
-    provider proxy activity
-    provider proxy refresh [--force]
-    provider proxy add-source <url>
-    provider proxy remove-source <url>
-    provider proxy exclude [<pattern>] [--remove]
-    provider proxy summary
-    provider proxy trim <count> [--preview]
-    provider direct [<state>]
-    provider proxy paste [--file=<file>]
-    provider logs [-n <lines>]
-    provider print-network-id <file>
-    provider choose_network <api_url> [<connect_url>]
-    provider choose_network --reset
-    provider choose_network --show
-
-Options:
-    -h --help                        Show this help and exit.
-    --version                        Show version.
-    -v...                            Enable verbose mode. -v implies verbose level 1,
-    				                 -vv implies level 2... etc.
-    --json                           Output in JSON format for automated tooling.
-    -f                               Force overwrite the JWT token store file or proxy value, if exists.
-                                     By default, existing values will not be overwritten.
-    --api_url=<api_url>              Specify a custom API URL to use.
-    --connect_url=<connect_url>      Specify a custom connect URL to use.
-    <api_url>                        API URL to save as the chosen network (http:// or https://),
-                                     or a preset: main | beta.
-    <connect_url>                    Connect URL to save as the chosen network (ws:// or wss://).
-    --reset                          With choose_network, clear the saved network and revert to the main network.
-    --show                           With choose_network, print the network currently in effect and exit.
-    --user_auth=<user_auth>	         Login with a username.
-    --password=<password>            Login with a password. If --user_auth is used, you will be prompted for your
-    				                 password anyways, if you don't specify it using this option.
-    -p --port=<port>                 Status server port [default: 0].
-    --max-memory=<mem>               Set the maximum amount of memory in bytes, or the suffixes b, kib, mib, gib may be used [This is a soft limit].
-    --wallet=<coldkey_ss58>          Also set the subnet claim wallet at startup, same as provider wallet set.
-                                     A failure is logged and does not block providing.
-    --legacy-network-wallet          Allow the unsigned network wallet request (provider wallet set, provide --wallet).
-                                     Without it both refuse: set the wallet in the URnetwork app or web account.
-    <coldkey_ss58>                   Subnet claim wallet: an ss58 coldkey address (prefix 42).
-    --store-client=<key>             claim: use the client token of this identity from the store
-                                     (~/.urnetwork/.client_jwts.json; the key is a proxy address or "direct").
-                                     A bare address also finds the one credentialed identity there.
-                                     Pick a client that served traffic.
-    --provider-jwt=<path>            claim: use the client token in this file.
-    --legacy-coldkey=<coldkey_ss58>  claim: network token plus this coldkey, only for an epoch without a provider artifact.
-    --epoch=<epoch>                  Epoch to fetch the subnet pool claim for. Defaults to the last
-                                     finalized epoch, which is the epoch before the current one.
-    --rpc=<rpc_url>                  EVM json-rpc endpoint used to check the payout root on-chain.
-                                     May be repeated; endpoints are tried in order until one answers.
-    --key_file=<key_file>            EVM private key file. When given, claim/bind-head/unbind-head sign
-                                     and submit the transaction (via --rpc); without it, the ready-to-submit
-                                     calldata is printed for the offline/air-gapped snclaim path.
-    --dry-run                        Build and sign the extrinsic but do not submit.
-    --manifest=<file>                Fleet manifest JSON (schema/chain_id/netuid/coordinator/fleet_id/
-                                     hotkey/generation/members). Required by bind-head and unbind-head;
-                                     the manifest is the single source for the fleet identity.
-    --hotkey_seed_file=<file>        sr25519 hotkey seed file (raw or hex 32 bytes). Required by
-                                     bind-head: the fleet binding is dual-signed, and this key must
-                                     match the manifest hotkey.
-    --client_id=<hex16>              The provider's 16-byte client_id (hex). Defaults to the client_id in
-                                     the provider's client JWT store (the "direct" entry).
-    --client_seed_file=<file>        Ed25519 client seed file (raw or hex 32 bytes) overriding the
-                                     provider's own client key for the binding/revoke signature.
-    --valid_from_epoch=<n>           First epoch the fleet binding is valid (bind-head).
-    --valid_to_epoch=<n>             Last epoch the fleet binding is valid (bind-head).
-    --effective_epoch=<n>            Epoch at which the fleet revoke takes effect (unbind-head).
-    <key>                            Authentication key
-    <proxy_user>                     SOCKS5 user
-    <proxy_password>                 SOCKS5 password
-    <key_address>                    SOCKS5 server as host:port, host:port:user:pass, host:port::, or key@host:port
-    --proxy_file=<proxy_file>        A path to a file where each line contains on entry as host:port, host:port:user:pass, host:port::, or key@host:port
-    --proxy_url=<proxy_url>          A live proxy list URL. Repeatable. Additive with --proxy_file / internal config. Also settable via PROXY_URL (comma-separated for multiple).
-    --url=<url>                      Alias for --proxy_url.
-    --URL=<URL>                      Alias for --proxy_url.
-    --proxy_url_refresh=<dur>        How often to re-fetch --proxy_url sources and add new entries. Also settable via PROXY_URL_REFRESH.
-    --proxy_url_max=<n>              Cap on total proxies sourced from --proxy_url. 0 = unlimited, defaults to 500. Also settable via PROXY_URL_MAX.
-    --proxy_dead_cleanup_scope=<s>   Automatic dead-proxy cleanup scope: none, url, or all. Defaults to url (URL-sourced only). Also settable via PROXY_DEAD_CLEANUP_SCOPE.
-    --proxy_dead_cleanup_interval=<dur>  How often automatic cleanup runs, when scope isn't none. Also settable via PROXY_DEAD_CLEANUP_INTERVAL.
-    <url>                            A proxy list URL.
-    --match=<pattern>                Case-insensitive substring matched against proxy hosts (never port or
-                                     credentials). Removes matches from the proxy list, proxy file, and URL
-                                     cache, and excludes the pattern from future URL fetches. See 'proxy exclude'.
-    <pattern>                        Host substring for 'proxy exclude' (add). With --remove, deletes the pattern.
-                                     With no pattern, 'proxy exclude' lists active patterns.
-    --file=<file>                    A path to a proxy file (alias for --proxy_file, or input for 'proxy paste').
-    <state>                          Direct IP providing state: on | off | status. If omitted, reports current state.
-    <count>                          Max number of running proxies to keep. The A-F worst-graded above it are shed. 0/off clears the cap.
-    --force                          Bypass the 8-hour warmup protection gate.
-    -n <lines>                       Number of lines to show from the end of the log [default: 0].`,
-		DefaultApiUrl,
-		DefaultConnectUrl,
-	)
+	usage := fmt.Sprintf(mainUsage(), DefaultApiUrl, DefaultConnectUrl)
 
 	// Allow `provider help` as a friendlier alias for --help
 	if len(os.Args) == 2 && os.Args[1] == "help" {
@@ -1093,21 +956,59 @@ Options:
 			proxyTrim(opts)
 		}
 	} else if wallet, _ := opts.Bool("wallet"); wallet {
-		if set, _ := opts.Bool("set"); set {
+		if hotkey, _ := opts.Bool("hotkey"); hotkey {
+			hotkeyWalletCmd(opts)
+		} else if set, _ := opts.Bool("set"); set {
 			walletSet(opts)
+		} else if challenge, _ := opts.Bool("challenge"); challenge {
+			if err := walletChallenge(opts, os.Stdout); err != nil {
+				fmt.Printf("wallet challenge failed: %s\n", err)
+				os.Exit(1)
+			}
+		} else if status, _ := opts.Bool("status"); status {
+			walletStatus(opts)
+		} else if sign, _ := opts.Bool("sign"); sign {
+			walletSign(opts)
 		}
 	} else if snStatus, _ := opts.Bool("sn-status"); snStatus {
 		snStatusCmd(opts)
+	} else if operators, _ := opts.Bool("operators"); operators {
+		operatorsCmd(opts)
 	} else if claim_, _ := opts.Bool("claim"); claim_ {
 		claim(opts)
+	} else if claimDaemon, _ := opts.Bool("claim-daemon"); claimDaemon {
+		claimDaemonCmd(opts)
+	} else if claimDaemonV2, _ := opts.Bool("claim-daemon-v2"); claimDaemonV2 {
+		claimDaemonV2Cmd(opts)
+	} else if fleet_, _ := opts.Bool("fleet"); fleet_ {
+		fleetCmd(opts)
 	} else if bindHead_, _ := opts.Bool("bind-head"); bindHead_ {
 		bindHead(opts)
 	} else if unbindHead_, _ := opts.Bool("unbind-head"); unbindHead_ {
 		unbindHead(opts)
 	} else if auth_, _ := opts.Bool("auth"); auth_ {
-		auth(opts)
+		if operator, _ := opts.String("--operator"); operator != "" {
+			operatorAuthCmd(opts)
+		} else {
+			auth(opts)
+		}
 	} else if provide_, _ := opts.Bool("provide"); provide_ {
-		provide(opts)
+		// docopt-go matches the plain provide pattern even when
+		// --all-operators is present (the option lands outside the matched
+		// pattern and is dropped), so detect it from the raw argv. The usage
+		// grammar itself is final; this is the dispatch fix.
+		allOperators := false
+		for _, arg := range os.Args[1:] {
+			if arg == "--all-operators" {
+				allOperators = true
+				break
+			}
+		}
+		if allOperators {
+			provideAllOperatorsCmd(opts)
+		} else {
+			provide(opts)
+		}
 	} else if authProvide, _ := opts.Bool("auth-provide"); authProvide {
 		if os.Getenv(EnvHotSwap) != "1" {
 			auth(opts)
@@ -1132,13 +1033,18 @@ func auth(opts docopt.Opts) {
 	urNetworkDir := filepath.Join(home, ".urnetwork")
 	jwtPath := filepath.Join(urNetworkDir, "jwt")
 
+	// ONE buffered reader for the whole command. A bufio.Reader reads a whole
+	// chunk from the pipe, not just the one line it returns, so a second reader
+	// created later sees only EOF - which is exactly how the auth code that
+	// followed the overwrite answer on the same pipe was being lost.
+	stdinReader := bufio.NewReader(os.Stdin)
+
 	if _, err := os.Stat(jwtPath); !errors.Is(err, os.ErrNotExist) {
 		// jwt exists
 		if force, _ := opts.Bool("-f"); !force {
 			fmt.Printf("%s exists. Overwrite? [yN]\n", jwtPath)
 
-			reader := bufio.NewReader(os.Stdin)
-			confirm, _ := reader.ReadString('\n')
+			confirm, _ := stdinReader.ReadString('\n')
 			if strings.ToLower(strings.TrimSpace(confirm)) != "y" {
 				return
 			}
@@ -1227,7 +1133,18 @@ func auth(opts docopt.Opts) {
 			fmt.Print("Enter auth code: ")
 			authCodeBytes, err := term.ReadPassword(int(syscall.Stdin))
 			if err != nil {
-				panic(err)
+				// Not a terminal: the code arrived on a pipe or a redirect.
+				// term.ReadPassword needs a TTY (it ioctls to suppress echo),
+				// and the old code PANICKED here, so every scripted auth -
+				// the OpenRC installer's prompt, `urnetwork auth <<<code`,
+				// any provisioning automation - crashed instead of working.
+				// Read one plain line instead; there is no echo to suppress
+				// on a pipe anyway.
+				line, readErr := stdinReader.ReadString('\n')
+				if line == "" && readErr != nil {
+					shmLogFatal(14, "could not read the auth code from stdin: %v", readErr)
+				}
+				authCodeBytes = []byte(line)
 			}
 			authCode = strings.TrimSpace(string(authCodeBytes))
 			fmt.Printf("\n")
@@ -1703,20 +1620,50 @@ func sumLastN(deltas []uint64, n int) uint64 {
 // operator can distinguish "no demand" from "no proxies" from "still warming
 // up" without cross-referencing other lines. Returns "-" while earning. The
 // checks are ordered most-fundamental first: a healthy earning provider needs
-// proxies up, clients matched to them, and bytes actually moving.
-func earningReason(earning bool, proxiesUp int, clients int64, warmup bool) string {
+// a live transport, matched clients, and bytes actually moving.
+func earningReason(earning bool, proxiesUp int, clients int64, warmup bool, directUp bool) string {
 	switch {
 	case earning:
 		return "-"
 	case warmup:
 		return "warmup"
-	case proxiesUp == 0:
+	case proxiesUp == 0 && !directUp:
 		return "no_proxies"
 	case clients == 0:
 		return "idle"
 	default:
 		return "no_traffic"
 	}
+}
+
+// profitTransportCounts keeps native transport traffic separate from proxy counts.
+func profitTransportCounts(proxiesUp int, bw map[string]*connect.ProxyBandwidth, health map[string]connect.ProxyHealthStatus) (billable uint64, clients int64, serving, proxiesOnly int, directUp bool) {
+	// directUp tracks the native [direct] identity separately. It is a
+	// real transport that earns, but it is NOT a proxy: counting it in
+	// proxies_up made a direct-only box read as "1 proxy up, earning",
+	// which is the number an operator (or an alert keyed on proxies_up)
+	// would take at face value. Report true proxies only, and say which
+	// mode the node is in via mode=.
+	directUp = health[directProxyKey].Health == "up"
+	for addr, p := range bw {
+		billable += p.BillableRx.Load() + p.BillableTx.Load()
+		pc := p.Clients.Load()
+		clients += pc
+		if isDirectAddr(addr) {
+			continue
+		}
+		if pc > 0 {
+			serving++
+		}
+	}
+	// proxiesUp counted the direct identity too; subtract it so the field
+	// means "proxies actually running".
+	proxiesOnly = proxiesUp
+	if directUp && proxiesOnly > 0 {
+		proxiesOnly--
+	}
+
+	return
 }
 
 // profitIdleLogInterval caps how often a non-earning [profit] line is
@@ -1756,17 +1703,7 @@ func runProfitHeartbeat(ctx context.Context) {
 
 		proxiesUp, _, _, bw, connecting := connect.ProxyHealthSnapshot()
 
-		var billable uint64
-		var clients int64
-		var serving int
-		for _, p := range bw {
-			billable += p.BillableRx.Load() + p.BillableTx.Load()
-			pc := p.Clients.Load()
-			clients += pc
-			if pc > 0 {
-				serving++
-			}
-		}
+		billable, clients, serving, proxiesOnly, directUp := profitTransportCounts(proxiesUp, bw, connect.ProxyHealthByKey())
 
 		now := time.Now()
 		if !prevSet {
@@ -1805,7 +1742,7 @@ func runProfitHeartbeat(ctx context.Context) {
 			if earning {
 				status = "yes"
 			}
-			idle := proxiesUp - serving
+			idle := proxiesOnly - serving
 			if idle < 0 {
 				idle = 0
 			}
@@ -1813,7 +1750,9 @@ func runProfitHeartbeat(ctx context.Context) {
 			// quiet provider mid-ramp reports reason=warmup rather than a
 			// false "idle"/"no_traffic". Mirrors paceMonitor's done threshold.
 			warmup := len(connecting) >= 5
-			reason := earningReason(earning, proxiesUp, clients, warmup)
+			reason := earningReason(earning, proxiesOnly, clients, warmup, directUp)
+			mode := earningMode(directUp, proxiesOnly)
+			modeNote := profitModeNote(mode, proxiesOnly)
 			profitEmoji := ""
 			if status == "yes" {
 				profitEmoji = "💰 "
@@ -1827,8 +1766,12 @@ func runProfitHeartbeat(ctx context.Context) {
 				}
 				contractFields = fmt.Sprintf(" contracts=%d denied=%d avg_util=%d%%", acquired, denied, avgUtil)
 			}
-			tlog("%s[profit] earning=%s reason=%s clients=%d rate=%s proxies_up=%d serving=%d idle=%d%s\n",
-				profitEmoji, status, reason, clients, fmtRate(float64(delta)/elapsed), proxiesUp, serving, idle, contractFields)
+			// mode= is the stable, greppable field (direct|proxies|mixed|none);
+			// modeNote is a human tail that only appears when there is
+			// something non-obvious to say, so a healthy earning pool stays a
+			// clean one-line record.
+			tlog("%s[profit] earning=%s reason=%s mode=%s clients=%d rate=%s proxies_up=%d serving=%d idle=%d%s%s\n",
+				profitEmoji, status, reason, mode, clients, fmtRate(float64(delta)/elapsed), proxiesOnly, serving, idle, contractFields, modeNote)
 			lastLogTime = now
 		}
 	}
@@ -2331,8 +2274,10 @@ func runHealthHeartbeat(ctx context.Context, startTime time.Time, profile string
 }
 
 // refreshJWT renews the provider's network JWT (the same token species originally
-// minted by the auth command and stored at ~/.urnetwork/jwt). It uses the
-// same code-create → code-login flow as initial authentication so it returns
+// minted by the auth command and stored at ~/.urnetwork/jwt). It tries
+// POST /auth/network-refresh first, which renews the presented network token
+// in one call, and falls back to the code-create → code-login flow for a
+// server without the route or one that refuses the request. Both paths return
 // a network JWT (no client_id claim) instead of a client JWT.
 //
 // Previous implementation used /network/auth-client which is a client-provisioning
@@ -2431,6 +2376,10 @@ func refreshJWT(ctx context.Context, apiUrl, byJwt string) (string, error) {
 	return newJwt, nil
 }
 
+// verifyRefreshedJWT checks a freshly minted network JWT against a
+// lightweight read-only endpoint before the caller writes it to disk, so a
+// dead token never replaces a working one. label keeps the legacy path's
+// "step 3/3" log lines and names the network-refresh path in its own.
 func verifyRefreshedJWT(ctx context.Context, apiUrl, byJwt, label string) error {
 	tlog("🔑 [jwt] refresh → %s: verifying new token against %s/transfer/stats...\n", label, apiUrl)
 
@@ -2890,8 +2839,20 @@ func runDegradedProxyReaper(ctx context.Context, proxyCancelMap map[string]conte
 }
 
 func provide(opts docopt.Opts) {
+	// An operator child of provide --all-operators gets the strict identity
+	// gate: a missing .provider.key there is recovery work, never a request
+	// for a new identity. Plain provide and auth-provide keep the v33
+	// behavior: a missing key is minted and persisted on first run.
+	if err := providerClientIdentityGateForOpts(opts); err != nil {
+		fmt.Fprintf(os.Stderr, "provider client identity: %v\n", err)
+		os.Exit(1)
+	}
 	connect.CritLogger = critLog
 	installScoutScorer()
+	// the durable enforcement log must exist before the governors emit their first
+	// events (restart_marker and crash_loop fire inside InitGovernState and
+	// NoteGovernStart), or those events never reach it
+	initEnforcementLog()
 	if home, err := os.UserHomeDir(); err == nil {
 		// a restart in the middle of a backend outage starts throttled
 		connect.InitGovernState(filepath.Join(home, ".urnetwork", "govern_outage"))
@@ -3131,16 +3092,39 @@ func provide(opts docopt.Opts) {
 	// before providing starts. A failure warns and does not block
 	// providing — the wallet may already be set from a previous run, and
 	// the call can be retried any time with `provider wallet set`.
+	//
+	// The main network requires the coldkey's signature, so the same proof
+	// flags as `provider wallet set` apply here. Without one the request is
+	// unsigned and refused unless the operator opted in.
 	if coldkeySs58, walletErr := opts.String("--wallet"); walletErr == nil && coldkeySs58 != "" {
-		legacyNetwork, _ := opts.Bool("--legacy-network-wallet")
-		if err := legacyNetworkWalletGate(legacyNetwork, "provide --wallet"); err != nil {
-			fmt.Printf("subnet wallet not set: %s\n", err)
+		walletProof, proofErr := snWalletProofFromOpts(opts)
+		if proofErr != nil {
+			fmt.Printf("subnet wallet not set: %s\n", proofErr)
 			fmt.Printf("continuing to provide.\n")
+		} else if walletProof.SeedFile != "" || walletProof.Message != "" || walletProof.Signature != "" {
+			// The coldkey seed must not sit on a provider node and be used on
+			// every start, restart and update; a pasted proof expires in
+			// minutes and would be refused on the next start anyway. Prove the
+			// coldkey on the operator's own machine with `provider wallet set`.
+			fmt.Printf("subnet wallet not set: signing the wallet proof is not done while providing; run `provider wallet set <coldkey_ss58> --coldkey_seed_file=<path>` on your own machine\n")
+			fmt.Printf("continuing to provide.\n")
+		} else if walletProof.unsigned() {
+			legacyNetwork, _ := opts.Bool("--legacy-network-wallet")
+			if err := legacyNetworkWalletGate(legacyNetwork, "provide --wallet"); err != nil {
+				fmt.Printf("subnet wallet not set: %s\n", err)
+				fmt.Printf("continuing to provide.\n")
+			} else {
+				walletClientStrategy := connect.NewClientStrategyWithDefaults(ctx)
+				if err := snSetWalletSigned(ctx, walletClientStrategy, apiUrl, coldkeySs58, walletProof); err != nil {
+					fmt.Printf("subnet wallet not set: %s\n", err)
+					fmt.Printf("continuing to provide. Retry with: provider wallet set <coldkey_ss58> --legacy-network-wallet\n")
+				}
+			}
 		} else {
 			walletClientStrategy := connect.NewClientStrategyWithDefaults(ctx)
-			if err := snSetWallet(ctx, walletClientStrategy, apiUrl, coldkeySs58); err != nil {
+			if err := snSetWalletSigned(ctx, walletClientStrategy, apiUrl, coldkeySs58, walletProof); err != nil {
 				fmt.Printf("subnet wallet not set: %s\n", err)
-				fmt.Printf("continuing to provide. Retry with: provider wallet set <coldkey_ss58> --legacy-network-wallet\n")
+				fmt.Printf("continuing to provide. Retry with: provider wallet set <coldkey_ss58> followed by the same proof flags\n")
 			}
 		}
 	}
@@ -3489,6 +3473,13 @@ func provide(opts docopt.Opts) {
 						}
 						return byClientJwt, clientId, reused, nil
 					}
+				}
+
+				if quarantine, ok, quarantineErr := quarantineRejectedOperatorSignIn(opts, err); ok {
+					fmt.Fprintf(os.Stderr, "provider network sign-in was rejected; set it aside at %s and exiting %d so the supervisor signs in again\n", quarantine.Path, providerQuarantinedExitCode)
+					os.Exit(providerQuarantinedExitCode)
+				} else if quarantineErr != nil {
+					fmt.Fprintf(os.Stderr, "provider rejected network sign-in could not be set aside: %v\n", quarantineErr)
 				}
 
 				if errors.Is(err, ErrTokenInvalid) {
@@ -3855,18 +3846,58 @@ func provide(opts docopt.Opts) {
 			bw = connect.RegisterProxyBandwidth(0)
 		}
 		platformSettings := platformTransportSettingsFor(proxySettings, isNative)
+		// the native identity's transports keep per-family counters and write the
+		// [ipv6] connect / session lines (connect/transport_family_stats.go)
+		platformSettings.FamilyEvents = isNative && proxySettings == nil
+		// one H1+ collector for every identity, exported as urnet_h1plus_*
+		platformSettings.H1PlusStats = h1PlusProcessStats
+		startH1PlusSummaryLog(context.Background())
 		if platformSettings.EnableH3 {
 			tlog("[t]h3 eligible for the direct identity, currently %s (urnet-tools set h3 on|off or URNETWORK_H3): H3 runs beside H1 and falls back to H1 quietly\n",
-				onOff(resolveH3(globalControlState)))
+				onOff(resolveH3Setting(globalControlState, currentProxyResolution())))
 		}
 		platformSettings.ClientLimitBackoff = clientLimitHoldWithContext(proxyCtx, clientId, time.Now())
-		platformTransport := connect.NewPlatformTransport(proxyCtx, clientStrategy, connectClient.RouteManager(), connectUrl, auth, platformSettings)
+		// The platform refusing the credential (revoked, expired, rejected) is the
+		// signal to renew it now: the transport holds the refused JWT for minutes,
+		// and only a new one ends the hold early. Nonblocking, as the engine requires.
+		renewNow := make(chan struct{}, 1)
+		// a refusal forces a renewal: it is counted by neither the OOB 401 counter
+		// nor the transport auth-failure counter the watcher otherwise reads
+		refused := make(chan struct{}, 1)
+		platformSettings.AuthorizationClosed = func(cause connect.AuthorizationCloseCause) {
+			switch cause {
+			case connect.AuthorizationCloseRevoked, connect.AuthorizationCloseExpired, connect.AuthorizationCloseRejected:
+				select {
+				case refused <- struct{}{}:
+				default:
+				}
+			}
+		}
+		// Only the direct identity can hold a transport per address family (see
+		// family_transport.go); every proxied identity builds exactly the single
+		// transport it always has.
+		useFamily, familyReason := useFamilyTransports(proxySettings, isNative, connectUrl)
+		if isNative {
+			recordFamilyTransportDecision(useFamily, familyReason)
+		}
+		platformTransport, _, familyGroup := newProviderPlatformTransport(
+			proxyCtx, clientStrategySettings, clientStrategy, connectClient.RouteManager(),
+			connectUrl, auth, platformSettings, useFamily,
+		)
 		// Register coordinator closer so HotSwap yields the coordinator session cleanly during handoff.
 		// Defer unregister so proxy reloads or shutdowns don't leak stale closers (F-5).
 		unregCloser := RegisterCoordinatorCloser(func() {
 			platformTransport.Close()
 		})
 		defer unregCloser()
+		if familyGroup != nil {
+			familyGroupLive.Store(familyGroup)
+			defer familyGroupLive.CompareAndSwap(familyGroup, nil)
+			// prompt teardown of the group's three transports and two strategies
+			defer familyGroup.Close()
+			stopFamilyStatus := startFamilyStatusReporter(proxyCtx, familyGroup)
+			defer stopFamilyStatus()
+		}
 
 		// This proxy now has a live transport; bracket it so systemd STATUS=
 		// reflects the real count. Paired with the defer so every early return
@@ -4007,7 +4038,6 @@ func provide(opts docopt.Opts) {
 		// and at startup if the reused token is already expired, preserving
 		// the client_id identity. On backends still issuing long-lived tokens
 		// the 12h threshold never fires — a no-op.
-		renewNow := make(chan struct{}, 1)
 		go runProxyJWTWatcher(proxyCtx, proxyJWTWatcherConfig{
 			IdentityKey: identityKey,
 			ClientID:    clientId,
@@ -4023,6 +4053,7 @@ func provide(opts docopt.Opts) {
 			OOB:            clientOob,
 			Transport:      platformTransport,
 			RenewNow:       renewNow,
+			Refused:        refused,
 			ProxyIndex:     proxyIndex,
 			InstanceId:     instanceId,
 			RevocationDone: revocationDone,
@@ -4419,7 +4450,7 @@ func provide(opts docopt.Opts) {
 	// reload path (watcher, watchdog, first reload) can observe it.
 	cleanStaleSelfProxyLock()
 	reloader.StartWatcher(ctx)
-	go superviseLoop(ctx, "reload_watchdog", func() { reloader.RunReloadWatchdog(ctx) }, nil)
+	go superviseLoop(ctx, "reload_watchdog", func() { reloader.RunReloadWatchdog(ctx, func() time.Time { return nowFn() }) }, nil)
 	// Reconcile against the operator trim cap immediately at startup. The launch
 	// loop above already holds back the worst-graded proxies above the cap
 	// (startupTrimSelection); this reload confirms the cap, logs the result, and
@@ -4500,6 +4531,9 @@ func provide(opts docopt.Opts) {
 			serveMetrics(ln)
 		}
 	}
+	// /metrics is on by default (see metricsEnabledByState): auto mode binds
+	// loopback plus the box's Tailscale addresses and never a public interface.
+	startDefaultMetrics(globalControlState, isHotSwapCandidate)
 	if 0 < port {
 		tlog("[startup] status server listening on :%d\n", port)
 		statusServer := &http.Server{
@@ -4538,6 +4572,9 @@ func provide(opts docopt.Opts) {
 
 	// All goroutines have finished. Log final status before exit.
 	tlog("[provider] exiting\n")
+	if globalEnforcementLog != nil {
+		globalEnforcementLog.flush()
+	}
 	critLog("PROVIDER EXIT: normal shutdown (code=0)")
 	// Explicitly close the DoH cache and flush retention events before
 	// os.Exit(0) since defers do not run on os.Exit. Both are idempotent —
@@ -4556,6 +4593,8 @@ func provide(opts docopt.Opts) {
 		defer cancel()
 		metricsServer.Shutdown(ctx)
 	}
+	// a kick just before the stop must survive the restart that follows
+	settleClientLimitHolds(2 * time.Second)
 	markCleanShutdown()
 	if home, err := os.UserHomeDir(); err == nil {
 		// a planned stop: the next start must not count toward a crash loop
@@ -5308,7 +5347,13 @@ func provideAuth(ctx context.Context, clientStrategy *connect.ClientStrategy, ap
 	}
 
 	if authClientResult.Error != nil {
+		// Only an operator child of provide --all-operators re-types a 401:
+		// its supervisor sets the token aside and signs in again. A plain
+		// node keeps the original error text, which its scripts match on.
 		returnErr = authClientResult.Error
+		if operatorChild, _ := opts.Bool("--operator-child"); operatorChild {
+			returnErr = networkCredentialRejection(returnErr)
+		}
 		return
 	}
 	if authClientResult.Result == nil {
@@ -6196,9 +6241,37 @@ func providerLogs(opts docopt.Opts) {
 	}
 }
 
+// proxyAddressWithCredentials matches host:port:user:password for IPv4 and
+// hostnames. It is compiled once: parseProxyAddress runs for every proxy on
+// every reload, and compiling per call was ~6% of a busy node's allocations
+// (alloc profile, 2026-10-15).
+var proxyAddressWithCredentials = regexp.MustCompile("^(.*:\\d*):([^:]*):([^:]*)$")
+
+// parseProxyAddress splits a proxy line into address, user and password.
+// Accepted forms: host:port, host:port:user:password, and the same two with an
+// IPv6 host in brackets ([2001:db8::1]:1080, [2001:db8::1]:1080:user:password).
+// A bare, unbracketed IPv6 address cannot be told apart from host:port, so it
+// is not supported; anything that does not match comes back whole as the address.
 func parseProxyAddress(proxyAddress string) (address string, user string, password string) {
-	r := regexp.MustCompile("^(.*:\\d*):([^:]*):([^:]*)$")
-	groups := r.FindStringSubmatch(proxyAddress)
+	if strings.HasPrefix(proxyAddress, "[") {
+		if end := strings.Index(proxyAddress, "]"); end > 0 {
+			rest := proxyAddress[end+1:]
+			if strings.HasPrefix(rest, ":") {
+				fields := strings.Split(rest[1:], ":")
+				if isDigits(fields[0]) {
+					switch len(fields) {
+					case 1:
+						return proxyAddress, "", ""
+					case 3:
+						return proxyAddress[:end+1] + ":" + fields[0], fields[1], fields[2]
+					}
+				}
+			}
+		}
+		// malformed bracketed form: keep it whole, as an unparsable line always was
+		return proxyAddress, "", ""
+	}
+	groups := proxyAddressWithCredentials.FindStringSubmatch(proxyAddress)
 	if groups != nil {
 		address = groups[1]
 		user = groups[2]
@@ -6208,6 +6281,17 @@ func parseProxyAddress(proxyAddress string) (address string, user string, passwo
 	// assume host:port
 	address = proxyAddress
 	return
+}
+
+// isDigits reports whether s is empty or all ASCII digits (the old pattern
+// allowed an empty port).
+func isDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func obfuscateUser(user string) string {
@@ -7289,4 +7373,258 @@ func usesSlowRetrySemaphore(hasProxy, isURLSourced bool, authFailures, maxAuthFa
 		return false
 	}
 	return authFailures >= maxAuthFailures || 0 < slowRetryCycles || 0 < genuineRetryCycles
+}
+
+// mainUsage is the provider docopt usage. It is a function so that tests can
+// check every command the docs name still exists in the CLI (see
+// cli_command_refs_test.go). The %s verbs are the default API and connect URLs.
+func mainUsage() string {
+	return `Connect provider.
+
+The default URLs are:
+    api_url: %s
+    connect_url: %s
+
+Usage:
+    provider auth ([<auth_code>] | --user_auth=<user_auth> [--password=<password>]) [-f]
+    	[--api_url=<api_url>]
+    	[--max-memory=<mem>]
+    	[-v...]
+    provider auth --operator=<domain> ([<auth_code>] | --user_auth=<user_auth> [--password=<password>] | --hotkey_seed_file=<file>) [-f]
+        [--operators-url=<url>]
+        [-v...]
+    provider provide --all-operators [--operators-url=<url>] [--operators-refresh=<duration>]
+        [--auto-register --hotkey_seed_file=<file> | --hotkey_seed_file=<file>]
+        [--port=<port>] [--max-memory=<mem>] [--allow-client-registration]
+        [--api_url=<api_url>]
+        [-v...]
+    provider provide [--port=<port>]
+        [--api_url=<api_url>]
+        [--connect_url=<connect_url>]
+        [--wallet=<coldkey_ss58> [--legacy-network-wallet]]
+        [--max-memory=<mem>]
+        [--allow-client-registration]
+        [--quarantine-rejected-sign-in]
+        [--operator-child]
+        [--proxy_file=<proxy_file>]
+        [--file=<file>]
+        [--proxy_url=<proxy_url>...]
+        [--url=<url>...]
+        [--URL=<URL>...]
+        [--proxy_url_refresh=<proxy_url_refresh>]
+        [--proxy_url_max=<proxy_url_max>]
+        [--proxy_dead_cleanup_scope=<proxy_dead_cleanup_scope>]
+        [--proxy_dead_cleanup_interval=<proxy_dead_cleanup_interval>]
+        [-v...]
+    provider auth-provide ([<auth_code>] | --user_auth=<user_auth> [--password=<password>]) [-f]
+    	[--port=<port>]
+        [--api_url=<api_url>]
+        [--connect_url=<connect_url>]
+        [--wallet=<coldkey_ss58> [--legacy-network-wallet]]
+        [--max-memory=<mem>]
+        [--allow-client-registration]
+        [--proxy_file=<proxy_file>]
+        [--file=<file>]
+        [--proxy_url=<proxy_url>...]
+        [--url=<url>...]
+        [--URL=<URL>...]
+        [-v...]
+    provider wallet set <coldkey_ss58> [--coldkey_seed_file=<path> | --message=<text> --signature=<hex>]
+        [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>] [--legacy-network-wallet]
+        [--api_url=<api_url>]
+        [-v...]
+    provider wallet challenge <coldkey_ss58>
+        [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>]
+        [--api_url=<api_url>]
+        [-v...]
+    provider wallet status
+        [--api_url=<api_url>]
+        [-v...]
+    provider wallet sign [<coldkey_ss58>]
+        [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>]
+        [--port=<port>] [--no-open]
+        [--api_url=<api_url>]
+        [-v...]
+    provider wallet hotkey challenge <coldkey_ss58> --hotkey_seed_file=<path>
+        [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>] [--operators-url=<url>]
+        [-v...]
+    provider wallet hotkey set <coldkey_ss58> --hotkey_seed_file=<path>
+        [--coldkey_seed_file=<path> | --message=<text> --signature=<hex>]
+        [--wallet-from-epoch=<epoch>] [--wallet-through-epoch=<epoch>] [--operators-url=<url>]
+        [-v...]
+    provider wallet hotkey status [--hotkey_seed_file=<path>] [--operators-url=<url>] [-v...]
+    provider sn-status [--json]
+        [--api_url=<api_url>]
+        [-v...]
+    provider claim [--store-client=<key> | --provider-jwt=<path> | --legacy-coldkey=<coldkey_ss58>] [--epoch=<epoch>] [--rpc=<rpc_url>]... [--key_file=<key_file>] [--dry-run]
+        [--api_url=<api_url>]
+        [-v...]
+    provider claim-daemon --config=<path>
+        [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+        [-v...]
+    provider claim-daemon-v2 --config=<path> [--v1-config=<path>] [--threshold-rao=<rao>] [--claim-now]
+        [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+        [-v...]
+    provider operators [--operators-url=<url>] [-v...]
+    provider bind-head --manifest=<file> --hotkey_seed_file=<file> --valid_from_epoch=<n> --valid_to_epoch=<n> [--client_id=<hex16>] [--client_seed_file=<file>] [--rpc=<rpc_url>]... [--key_file=<key_file>] [--dry-run]
+        [-v...]
+    provider unbind-head --manifest=<file> --effective_epoch=<n> [--client_id=<hex16>] [--client_seed_file=<file>] [--rpc=<rpc_url>]... [--key_file=<key_file>] [--dry-run]
+        [-v...]
+    provider fleet manifest --manifest=<path>
+        [-v...]
+    provider fleet register --manifest=<path> --hotkey_seed_file=<path> --coldkey_seed_file=<path> --substrate=<ws_url>...
+        [--burn_limit_rao=<n>] [--fee_limit_rao=<n>] [--apply | --dry-run]
+        [--provisional-runtime-compatibility=<profile> --runtime-observation-dir=<path>]
+        [--mainnet-runtime-authority=<path> --mainnet-runtime-authority-sha256=<hex>]
+        [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+        [-v...]
+    provider fleet publish --manifest=<path> --substrate=<ws_url>... --hotkey_seed_file=<path>
+        [--provisional-runtime-compatibility=<profile> --runtime-observation-dir=<path>]
+        [--mainnet-runtime-authority=<path> --mainnet-runtime-authority-sha256=<hex>]
+        [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+        [-v...]
+    provider fleet bind --manifest=<path> --client_id=<hex> --client_seed_file=<path> --hotkey_seed_file=<path> --valid_from_epoch=<e> --valid_to_epoch=<e> --rpc=<rpc_url>... --relayer_key_file=<path> [--dry-run]
+        [--mainnet-runtime-authority=<path> --mainnet-runtime-authority-sha256=<hex>]
+        [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+        [-v...]
+    provider fleet sign --manifest=<path> [--client_id=<hex>] [--client_seed_file=<path>] [--hotkey_seed_file=<path>] --valid_from_epoch=<e> --valid_to_epoch=<e>
+        [-v...]
+    provider fleet status --manifest=<path> --client_id=<hex> --substrate=<ws_url>... --rpc=<rpc_url>...
+        [--provisional-runtime-compatibility=<profile> --runtime-observation-dir=<path>]
+        [--mainnet-runtime-authority=<path> --mainnet-runtime-authority-sha256=<hex>]
+        [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+        [-v...]
+    provider fleet revoke --manifest=<path> --client_id=<hex> --client_seed_file=<path> --effective_epoch=<e> --rpc=<rpc_url>... --relayer_key_file=<path> [--dry-run]
+        [--mainnet-runtime-authority=<path> --mainnet-runtime-authority-sha256=<hex>]
+        [--durable-volumes=<path> --durable-volumes-sha256=<hash>]
+        [-v...]
+    provider proxy auth add [<key>] <proxy_user> <proxy_password> [-f]
+    provider proxy auth remove [<key>] [--all]
+    provider proxy add [<key_address>...] [--proxy_file=<proxy_file>] [--file=<file>] [--url=<url>] [--URL=<URL>] [-f]
+    provider proxy remove [<key_address>...] [--all]
+    provider proxy remove --match=<pattern> [--yes] [--preview]
+    provider proxy remove-dead [--degraded[=<duration>]] [--auth-failures=<N>] [--source=<source>] [--yes] [--preview]
+    provider proxy activity
+    provider proxy refresh [--force]
+    provider proxy add-source <url>
+    provider proxy remove-source <url>
+    provider proxy exclude [<pattern>] [--remove]
+    provider proxy summary
+    provider proxy trim <count> [--preview]
+    provider direct [<state>]
+    provider proxy paste [--file=<file>]
+    provider logs [-n <lines>]
+    provider print-network-id <file>
+    provider choose_network <api_url> [<connect_url>]
+    provider choose_network --reset
+    provider choose_network --show
+    provider snclaim <snclaim_args>...
+
+Options:
+    -h --help                        Show this help and exit.
+    --version                        Show version.
+    -v...                            Enable verbose mode. -v implies verbose level 1,
+    				                 -vv implies level 2... etc.
+    --json                           Output in JSON format for automated tooling.
+    -f                               Force overwrite the JWT token store file or proxy value, if exists.
+                                     By default, existing values will not be overwritten.
+    --no-open                        wallet sign: do not open the browser; print the address only.
+    --api_url=<api_url>              Specify a custom API URL to use.
+    --connect_url=<connect_url>      Specify a custom connect URL to use.
+    --all-operators                  provide: run one provider per operator in the operator list, each in its
+                                     own state directory operators/<domain> below the provider state directory.
+                                     Excludes --api_url, --connect_url, and the wallet flags.
+    --operators-url=<url>            Operator list URL. Defaults to the published list.
+    --operators-refresh=<duration>   How often to refresh the operator list; at least 1m. Default: 1h.
+    --operator=<domain>              auth: sign in to this listed operator and write its jwt below its directory.
+    --auto-register                  Provide --all-operators: sign in with the hotkey for every operator that
+                                     has no jwt yet. Needs --hotkey_seed_file.
+    --allow-client-registration      With provide --all-operators: allow a new operator's provider to create its
+                                     client identity when that operator's state directory has no .provider.key
+                                     yet. Without it a new operator directory is refused. Plain provide is unchanged.
+    --quarantine-rejected-sign-in    Internal: a rejected network sign-in is set aside and the process exits so
+                                     its supervisor can sign in again.
+    --operator-child                 Internal: this process is one operator child of provide --all-operators.
+                                     A missing .provider.key is refused instead of created.
+    <api_url>                        API URL to save as the chosen network (http:// or https://),
+                                     or a preset: main | beta.
+    <connect_url>                    Connect URL to save as the chosen network (ws:// or wss://).
+    --reset                          With choose_network, clear the saved network and revert to the main network.
+    --show                           With choose_network, print the network currently in effect and exit.
+    <snclaim_args>                   snclaim: everything after "snclaim" goes to the on-chain submission tool unchanged
+                                     (submit, status, withdraw, v2 status|claim|check). Run: provider snclaim --help
+    --user_auth=<user_auth>	         Login with a username.
+    --password=<password>            Login with a password. If --user_auth is used, you will be prompted for your
+    				                 password anyways, if you don't specify it using this option.
+    -p --port=<port>                 Status server port [default: 0].
+    --max-memory=<mem>               Set the maximum amount of memory in bytes, or the suffixes b, kib, mib, gib may be used [This is a soft limit].
+    --wallet=<coldkey_ss58>          Also set the subnet claim wallet at startup, same as provider wallet set.
+                                     A failure is logged and does not block providing.
+    --coldkey_seed_file=<path>       Prove the coldkey by signing the server challenge with this 32-byte
+                                     sr25519 seed (raw, or 64 hex characters). The seed never leaves the host
+                                     and is never logged. Use it on a workstation, not on a fleet node.
+                                     The file must be mode 600 and is never created.
+    --message=<text>                 Prove the coldkey with a challenge signed elsewhere: the exact message
+                                     printed by provider wallet challenge, or its one-line form with a
+                                     literal \n per line break. Goes with --signature.
+    --signature=<hex>                The coldkey's 64-byte sr25519 signature over --message, hex, 0x optional.
+    --wallet-from-epoch=<epoch>      First epoch the wallet mapping applies to. Goes with --wallet-through-epoch.
+    --wallet-through-epoch=<epoch>   Last epoch the wallet mapping applies to; at most 65536 epochs apart.
+    --legacy-network-wallet          Send the unsigned network wallet request (provider wallet set, provide --wallet).
+                                     Without it an unsigned request is refused: sign it with
+                                     --coldkey_seed_file (or --message with --signature), or set the wallet in
+                                     the URnetwork app or web account.
+    <coldkey_ss58>                   Subnet claim wallet: an ss58 coldkey address (prefix 42).
+    --store-client=<key>             claim: use the client token of this identity from the store
+                                     (~/.urnetwork/.client_jwts.json; the key is a proxy address or "direct").
+                                     A bare address also finds the one credentialed identity there.
+                                     Pick a client that served traffic.
+    --provider-jwt=<path>            claim: use the client token in this file.
+    --legacy-coldkey=<coldkey_ss58>  claim: network token plus this coldkey, only for an epoch without a provider artifact.
+    --epoch=<epoch>                  Epoch to fetch the subnet pool claim for. Defaults to the last
+                                     finalized epoch, which is the epoch before the current one.
+    --rpc=<rpc_url>                  EVM json-rpc endpoint used to check the payout root on-chain.
+                                     May be repeated; endpoints are tried in order until one answers.
+    --key_file=<key_file>            EVM private key file. When given, claim/bind-head/unbind-head sign
+                                     and submit the transaction (via --rpc); without it, the ready-to-submit
+                                     calldata is printed for the offline/air-gapped snclaim path.
+    --dry-run                        Build and sign the extrinsic but do not submit.
+    --manifest=<file>                Fleet manifest JSON (schema/chain_id/netuid/coordinator/fleet_id/
+                                     hotkey/generation/members). Required by bind-head and unbind-head;
+                                     the manifest is the single source for the fleet identity.
+    --hotkey_seed_file=<file>        sr25519 hotkey seed file (raw or hex 32 bytes). Required by
+                                     bind-head: the fleet binding is dual-signed, and this key must
+                                     match the manifest hotkey. With provide --all-operators and --auto-register
+                                     it signs in to each listed operator; with auth --operator it signs in
+                                     to that operator. The file is never created and never logged.
+    --client_id=<hex16>              The provider's 16-byte client_id (hex). Defaults to the client_id in
+                                     the provider's client JWT store (the "direct" entry).
+    --client_seed_file=<file>        Ed25519 client seed file (raw or hex 32 bytes) overriding the
+                                     provider's own client key for the binding/revoke signature.
+    --valid_from_epoch=<n>           First epoch the fleet binding is valid (bind-head).
+    --valid_to_epoch=<n>             Last epoch the fleet binding is valid (bind-head).
+    --effective_epoch=<n>            Epoch at which the fleet revoke takes effect (unbind-head).
+    <key>                            Authentication key
+    <proxy_user>                     SOCKS5 user
+    <proxy_password>                 SOCKS5 password
+    <key_address>                    SOCKS5 server as host:port, host:port:user:pass, host:port::, or key@host:port
+    --proxy_file=<proxy_file>        A path to a file where each line contains on entry as host:port, host:port:user:pass, host:port::, or key@host:port
+    --proxy_url=<proxy_url>          A live proxy list URL. Repeatable. Additive with --proxy_file / internal config. Also settable via PROXY_URL (comma-separated for multiple).
+    --url=<url>                      Alias for --proxy_url.
+    --URL=<URL>                      Alias for --proxy_url.
+    --proxy_url_refresh=<dur>        How often to re-fetch --proxy_url sources and add new entries. Also settable via PROXY_URL_REFRESH.
+    --proxy_url_max=<n>              Cap on total proxies sourced from --proxy_url. 0 = unlimited, defaults to 500. Also settable via PROXY_URL_MAX.
+    --proxy_dead_cleanup_scope=<s>   Automatic dead-proxy cleanup scope: none, url, or all. Defaults to url (URL-sourced only). Also settable via PROXY_DEAD_CLEANUP_SCOPE.
+    --proxy_dead_cleanup_interval=<dur>  How often automatic cleanup runs, when scope isn't none. Also settable via PROXY_DEAD_CLEANUP_INTERVAL.
+    <url>                            A proxy list URL.
+    --match=<pattern>                Case-insensitive substring matched against proxy hosts (never port or
+                                     credentials). Removes matches from the proxy list, proxy file, and URL
+                                     cache, and excludes the pattern from future URL fetches. See 'proxy exclude'.
+    <pattern>                        Host substring for 'proxy exclude' (add). With --remove, deletes the pattern.
+                                     With no pattern, 'proxy exclude' lists active patterns.
+    --file=<file>                    A path to a proxy file (alias for --proxy_file, or input for 'proxy paste').
+    <state>                          Direct IP providing state: on | off | status. If omitted, reports current state.
+    <count>                          Max number of running proxies to keep. The A-F worst-graded above it are shed. 0/off clears the cap.
+    --force                          Bypass the 8-hour warmup protection gate.
+    -n <lines>                       Number of lines to show from the end of the log [default: 0].`
 }

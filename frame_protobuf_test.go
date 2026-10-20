@@ -256,11 +256,14 @@ func TestFrameCodecRandomized(t *testing.T) {
 
 func buildEquivalentAckFrame(m *sendAckFrame) *protocol.TransferFrame {
 	ack := &protocol.Ack{
-		MessageId:              m.messageId.Bytes(),
-		SequenceId:             m.sequenceId.Bytes(),
-		Selective:              m.selective,
-		Tag:                    m.tag,
-		ReceiveWindowByteCount: m.windowByteCount,
+		MessageId:  m.messageId.Bytes(),
+		SequenceId: m.sequenceId.Bytes(),
+		Selective:  m.selective,
+		Tag:        m.tag,
+	}
+	if m.receiveWindowSet {
+		receiveWindowByteCount := m.receiveWindowByteCount
+		ack.ReceiveWindowByteCount = &receiveWindowByteCount
 	}
 	tf := &protocol.TransferFrame{
 		TransferPath: m.path.ToProtobuf(),
@@ -312,6 +315,29 @@ func TestAckCodecEdgeCases(t *testing.T) {
 			sequenceId: idA,
 			tag:        &protocol.Tag{SendTime: 0},
 		},
+		"receive window advertised": {
+			path:                   TransferPath{DestinationId: idA, SourceId: idB},
+			messageId:              idC,
+			sequenceId:             idA,
+			receiveWindowByteCount: 2_621_440,
+			receiveWindowSet:       true,
+		},
+		"receive window zero is a real value": {
+			path:             TransferPath{DestinationId: idA, SourceId: idB},
+			messageId:        idC,
+			sequenceId:       idA,
+			selective:        true,
+			tag:              &protocol.Tag{SendTime: 1},
+			receiveWindowSet: true,
+		},
+		"receive window 16 MiB with tag": {
+			path:                   TransferPath{DestinationId: idA, SourceId: idB},
+			messageId:              idC,
+			sequenceId:             idA,
+			tag:                    &protocol.Tag{SendTime: 1_700_000_000_000},
+			receiveWindowByteCount: 16 << 20,
+			receiveWindowSet:       true,
+		},
 		"stream only path": {
 			path:       TransferPath{StreamId: idC},
 			messageId:  idC,
@@ -349,6 +375,10 @@ func TestAckCodecRandomized(t *testing.T) {
 			m.tag = &protocol.Tag{SendTime: mathrandv2.Uint64()}
 		case 1:
 			m.tag = &protocol.Tag{SendTime: 0}
+		}
+		if mathrandv2.IntN(2) == 0 {
+			m.receiveWindowSet = true
+			m.receiveWindowByteCount = mathrandv2.Uint64() >> uint(mathrandv2.IntN(64))
 		}
 		assertAckCodecMatches(t, m)
 	}
@@ -628,85 +658,4 @@ func TestFrameCodecAllocs(t *testing.T) {
 	if 1 < allocs {
 		t.Fatalf("marshalSendPackTransferFrame allocates %v per call, want <=1", allocs)
 	}
-}
-
-// The resizable-window capability the modern provider gate measures. The ack
-// carries what this receiver can still hold out of order; an absent value stays
-// absent, so a peer that never advertises reads as legacy rather than as a
-// receiver with no capacity, and zero is a real advertised value.
-func TestAckReceiveWindowCodec(t *testing.T) {
-	idA, idB := NewId(), NewId()
-	window := uint64(mib(2) + kib(512))
-
-	marshalAck := func(ack *protocol.Ack) []byte {
-		t.Helper()
-		b, err := ProtoMarshal(ack)
-		if err != nil {
-			t.Fatalf("marshal: %s", err)
-		}
-		return b
-	}
-
-	t.Run("hot path carries the window", func(t *testing.T) {
-		m := &sendAckFrame{
-			path:            TransferPath{DestinationId: idA, SourceId: idB},
-			messageId:       idB,
-			sequenceId:      idA,
-			selective:       true,
-			tag:             &protocol.Tag{SendTime: 1_700_000_000_000},
-			windowByteCount: &window,
-		}
-		frameBytes := marshalSendAckTransferFrame(m)
-		defer MessagePoolReturn(frameBytes)
-		var tf protocol.TransferFrame
-		if err := proto.Unmarshal(frameBytes, &tf); err != nil {
-			t.Fatalf("unmarshal: %s", err)
-		}
-		if got := tf.GetAck().GetReceiveWindowByteCount(); got != window {
-			t.Fatalf("window = %d, want %d", got, window)
-		}
-		// byte-identical to the proto structs
-		assertAckCodecMatches(t, m)
-	})
-
-	t.Run("decoder reads the window", func(t *testing.T) {
-		ack, ok := decodeAck(marshalAck(&protocol.Ack{
-			MessageId:              idB.Bytes(),
-			SequenceId:             idA.Bytes(),
-			Selective:              true,
-			ReceiveWindowByteCount: &window,
-		}))
-		if !ok || ack.ReceiveWindowByteCount == nil {
-			t.Fatal("decoder dropped receive_window_byte_count")
-		}
-		if *ack.ReceiveWindowByteCount != window {
-			t.Fatalf("window = %d, want %d", *ack.ReceiveWindowByteCount, window)
-		}
-	})
-
-	t.Run("absent stays absent", func(t *testing.T) {
-		ack, ok := decodeAck(marshalAck(&protocol.Ack{
-			MessageId:  idB.Bytes(),
-			SequenceId: idA.Bytes(),
-			Selective:  true,
-		}))
-		if !ok {
-			t.Fatal("decode failed")
-		}
-		if ack.ReceiveWindowByteCount != nil {
-			t.Fatalf("absent window decoded as %d", *ack.ReceiveWindowByteCount)
-		}
-	})
-
-	t.Run("zero is a real value", func(t *testing.T) {
-		zero := uint64(0)
-		ack, ok := decodeAck(marshalAck(&protocol.Ack{
-			MessageId:              idB.Bytes(),
-			SequenceId:             idA.Bytes(),
-			ReceiveWindowByteCount: &zero,
-		}))
-		if !ok || ack.ReceiveWindowByteCount == nil || *ack.ReceiveWindowByteCount != 0 {
-			t.Fatal("a present zero window must stay present")
-		}
-	})
 }

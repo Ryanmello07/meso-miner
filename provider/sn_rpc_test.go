@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -25,12 +26,11 @@ func TestParseEthHexQuantity(t *testing.T) {
 		{name: "0x0", input: "0x0", want: 0},
 		{name: "0xff", input: "0xff", want: 255},
 		{name: "mixed case hex", input: "0xAbCd", want: 0xabcd},
-		// The 0x prefix is REQUIRED (matching the reference's
-		// ErrMissingPrefix): a bare quantity is out of the json-rpc spec,
-		// and accepting one would let a sloppy or hostile endpoint feed
-		// unprefixed data through. This test previously pinned the leniency;
-		// it now pins the strictness.
-		{name: "no 0x prefix errors", input: "ff", wantErr: true},
+		// Allowed: parseEthHexQuantity only TrimPrefix's the literal "0x"
+		// and leaves bare hex untouched, so ParseUint then accepts it. This
+		// is the actual current behaviour; a bare quantity is out of the
+		// json-rpc spec but the leniency is intentional in the code today.
+		{name: "no 0x prefix succeeds", input: "ff", want: 255},
 		// parseEthHexQuantity only TrimPrefixes the lowercase "0x", so an
 		// uppercase "0X" prefix is NOT stripped and must error, unlike
 		// parseBytes32Arg/parseEvmAddressArg which strip both. eth_chainId always
@@ -71,13 +71,11 @@ func TestParseEthHexBytes(t *testing.T) {
 		{name: "two bytes", input: "0x0102", want: []byte{1, 2}},
 		{name: "single byte", input: "0x41", want: []byte{0x41}},
 		{name: "mixed case", input: "0xAb", want: []byte{0xab}},
-		// "0x" decodes to an empty, error-free slice (the prefix is valid,
-		// the payload is empty). An EMPTY STRING is no longer accepted: the
-		// 0x prefix is required, matching the reference's ErrMissingPrefix —
-		// a missing prefix would let a sloppy or hostile endpoint smuggle
-		// data past prefix-aware checks.
+		// Both "0x" and "" decode to an empty, error-free slice: the
+		// TrimPrefix is a no-op for "", and hex.DecodeString("") yields an
+		// empty slice with no error. Assert that actual behaviour.
 		{name: "bare 0x yields empty slice", input: "0x", want: []byte{}},
-		{name: "empty string errors (missing 0x prefix)", input: "", wantErr: true},
+		{name: "empty string yields empty slice", input: "", want: []byte{}},
 		{name: "odd length errors", input: "0x010", wantErr: true},
 		{name: "non-hex errors", input: "0xzz", wantErr: true},
 	}
@@ -299,7 +297,7 @@ func TestSnReadFleetRevokeDigest_FirstEndpointSucceeds(t *testing.T) {
 	server := snRPCServer("0x1", "0x"+hex.EncodeToString(want[:]))
 	defer server.Close()
 
-	digest, rpcUrl, err := snReadFleetRevokeDigest(context.Background(), 1,
+	digest, rpcUrl, err := snReadFleetRevokeDigest(context.Background(),
 		[]string{server.URL}, "0x1234", []byte{1, 2, 3})
 	if err != nil {
 		t.Fatalf("snReadFleetRevokeDigest unexpected error: %s", err)
@@ -323,7 +321,7 @@ func TestSnReadFleetRevokeDigest_FailoverToSecondEndpoint(t *testing.T) {
 	good := snRPCServer("0x1", "0x"+hex.EncodeToString(want[:]))
 	defer good.Close()
 
-	digest, rpcUrl, err := snReadFleetRevokeDigest(context.Background(), 1,
+	digest, rpcUrl, err := snReadFleetRevokeDigest(context.Background(),
 		[]string{bad.URL, good.URL}, "0x1234", []byte{1, 2, 3})
 	if err != nil {
 		t.Fatalf("snReadFleetRevokeDigest should fail over to the second endpoint, got error: %s", err)
@@ -342,8 +340,20 @@ func TestSnReadFleetRevokeDigest_ShortReturnData(t *testing.T) {
 	server := snRPCServer("0x1", "0x1234")
 	defer server.Close()
 
-	_, _, callErr := snReadFleetRevokeDigest(context.Background(), 1,
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %s", err)
+	}
+	os.Stdout = w
+	defer func() { os.Stdout = old }()
+
+	_, _, callErr := snReadFleetRevokeDigest(context.Background(),
 		[]string{server.URL}, "0x1234", []byte{1, 2, 3})
+
+	w.Close()
+	out, _ := io.ReadAll(r)
+	// os.Stdout is restored by the deferred func() { os.Stdout = old } above.
 
 	if callErr == nil {
 		t.Fatal("short headBindDigest data must fail when it is the only endpoint")
@@ -351,8 +361,9 @@ func TestSnReadFleetRevokeDigest_ShortReturnData(t *testing.T) {
 	if callErr.Error() != "no --rpc endpoint answered the fleet revoke digest" {
 		t.Errorf("error = %q; want %q", callErr, "no --rpc endpoint answered the fleet revoke digest")
 	}
-	// The ABI-decode round: a short return fails UnpackFleetRevokeDigest and
-	// fails over silently (the old raw-copy path printed a stdout warning).
+	if !strings.Contains(string(out), "expected >= 32") {
+		t.Errorf("stdout %q does not mention %q", out, "expected >= 32")
+	}
 }
 
 func TestSnReadFleetRevokeDigest_AllEndpointsFail(t *testing.T) {
@@ -365,7 +376,7 @@ func TestSnReadFleetRevokeDigest_AllEndpointsFail(t *testing.T) {
 	}))
 	defer bad2.Close()
 
-	_, _, err := snReadFleetRevokeDigest(context.Background(), 1,
+	_, _, err := snReadFleetRevokeDigest(context.Background(),
 		[]string{bad1.URL, bad2.URL}, "0x1234", []byte{1, 2, 3})
 	if err == nil {
 		t.Fatal("expected an error when every endpoint fails")

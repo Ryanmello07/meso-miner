@@ -13,7 +13,6 @@ package connect
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"time"
 )
@@ -100,11 +99,6 @@ func dialControlTlsWithFamilyFallback(
 	// ConnectSettings.DialContext, so name resolution below it requests only
 	// the pinned record type, and a Force that contradicts the pin surfaces
 	// there as the error the transport idles on.
-	// A dial that goes through a SOCKS proxy observes the PROXY's address
-	// family, not the destination's: connFamily reads the hop to the proxy,
-	// and a handshake timeout on that connection is the proxy or its upstream.
-	// No strike, no narrowing, no retry.
-	proxied := settings != nil && settings.dialUsesProxy()
 	pinnedFamily := pinnedIpFamilyFromContext(ctx)
 	if pinnedFamily != 0 {
 		narrowed, err := pinnedDialNetwork(network, pinnedFamily)
@@ -115,9 +109,6 @@ func dialControlTlsWithFamilyFallback(
 	}
 	conn, err := dial(ctx, network, addr)
 	if err != nil {
-		if proxied {
-			return nil, err
-		}
 		conn, err = redialWithoutAContradictedDemotion(ctx, network, addr, dial, err)
 		if err != nil {
 			return nil, err
@@ -146,13 +137,9 @@ func dialControlTlsWithFamilyFallback(
 	// its family is still evidence for the ledger the family-agnostic dials
 	// read: it is recorded (subject to the same guards) and not retried.
 	if pinnedFamily != 0 {
-		if !proxied && isPathTimeout(err) && failed != 0 && ctx.Err() == nil && !isIPLiteralDialAddr(addr) {
+		if isPathTimeout(err) && failed != 0 && ctx.Err() == nil && !isIPLiteralDialAddr(addr) {
 			recordControlFamilyStrike(failed, err)
 		}
-		return nil, err
-	}
-	// a proxied dial has nowhere family-specific to go
-	if proxied {
 		return nil, err
 	}
 	// only a family-agnostic dial has somewhere else to go
@@ -197,17 +184,13 @@ func dialControlTlsWithFamilyFallback(
 		// second failure over the second family is not a family problem.
 		// Leaving the strike standing would narrow every control dial in the
 		// process onto a family that just failed outright.
-		if ctx.Err() == nil && isPathFailure(retryErr) {
-			controlFamilyUndemote(failed)
-		}
+		controlFamilyUndemote(failed)
 		return nil, err
 	}
 	retryTlsConn, retryErr := handshake(ctx, retryConn)
 	if retryErr != nil {
 		retryConn.Close()
-		if ctx.Err() == nil && isPathFailure(retryErr) {
-			controlFamilyUndemote(failed)
-		}
+		controlFamilyUndemote(failed)
 		return nil, err
 	}
 	return retryTlsConn, nil
@@ -279,13 +262,6 @@ func redialWithoutAContradictedDemotion(
 	if ControlIpFamilyPolicy() != IpFamilyAuto {
 		return nil, dialErr
 	}
-	// Only a path failure on the narrowed family contradicts the demotion. A
-	// cancellation, an expired deadline, DNS, or a refusal says nothing about
-	// the family, and clearing the entry would send the next dial down the
-	// blackholed path for the full handshake bound again.
-	if ctx.Err() != nil || !isPathFailure(dialErr) {
-		return nil, dialErr
-	}
 	demoted := controlFamilyDemotedFamily()
 	if demoted == 0 {
 		return nil, dialErr
@@ -298,58 +274,4 @@ func redialWithoutAContradictedDemotion(
 		return nil, dialErr
 	}
 	return conn, nil
-}
-
-// pinnedIpFamilyContextKey carries the family a pinned platform transport
-// proves through the strategy's dial chain (see IpFamily in ip_family.go for
-// the provider-egress vocabulary; this is the control-plane pin).
-type pinnedIpFamilyContextKey struct{}
-
-// pinnedIpFamilyFromContext returns the family a dial context has been pinned
-// to, or 0 when it is family-agnostic.
-func pinnedIpFamilyFromContext(ctx context.Context) int {
-	if ctx == nil {
-		return 0
-	}
-	if ipFamily, ok := ctx.Value(pinnedIpFamilyContextKey{}).(int); ok {
-		return normalizeIpFamily(ipFamily)
-	}
-	return 0
-}
-
-// normalizeIpFamily is 4 or 6, else 0.
-func normalizeIpFamily(ipFamily int) int {
-	switch ipFamily {
-	case 4, 6:
-		return ipFamily
-	default:
-		return 0
-	}
-}
-
-// pinnedDialNetwork narrows a family-agnostic network string to the pinned
-// family. A network already of that family passes unchanged; a network of the
-// OTHER family is an error, because a pinned transport must never dial the
-// family it does not prove. Networks that carry no family (unix sockets) pass
-// unchanged.
-func pinnedDialNetwork(network string, ipFamily int) (string, error) {
-	ipFamily = normalizeIpFamily(ipFamily)
-	if ipFamily == 0 {
-		return network, nil
-	}
-	switch network {
-	case "tcp", "udp":
-		return fmt.Sprintf("%s%d", network, ipFamily), nil
-	case "tcp4", "udp4":
-		if ipFamily == 4 {
-			return network, nil
-		}
-	case "tcp6", "udp6":
-		if ipFamily == 6 {
-			return network, nil
-		}
-	default:
-		return network, nil
-	}
-	return "", fmt.Errorf("network %s contradicts the ipv%d pin", network, ipFamily)
 }

@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -37,6 +38,13 @@ func (e dnsCacheEntry) all() []string {
 // targets, so the system resolver isn't hit on every single dial through
 // every proxy. TTL is 60 seconds — long enough to absorb burst dials from
 // 2000+ concurrent warmup goroutines, short enough to pick up DNS changes.
+//
+// It backs v4 mode only. In proxy mode (proxy_target_family, see
+// proxy_target_family.go) the destination name goes to the proxy and nothing
+// here is consulted or written: there is no local address to cache, and a stale
+// one would be a family choice the provider has no business making. Keeping the
+// path intact for v4 is what lets the mode be flipped back with no other
+// change.
 var dnsCache struct {
 	mu  sync.Mutex
 	m   map[string]dnsCacheEntry
@@ -60,6 +68,9 @@ const dnsCacheMaxEntries = 4096
 const proxyDNSResolveTimeout = 3 * time.Second
 
 // lookupProxyTarget resolves a proxy target hostname to an IPv4 address.
+// It is the v4 half of proxy_target_family (proxy_target_family.go) and the
+// only caller of the cache below: proxy mode never reaches it, so nothing is
+// resolved, cached, or held against a target's health there.
 // When a shared DohCache has been registered (via SetSharedDohCache), DNS
 // resolution goes through the cache rather than net.DefaultResolver — gaining
 // serve-stale (RFC 8767) during resolver outages, server-scoring-based fan-out
@@ -296,6 +307,10 @@ type ConnectSettings struct {
 	// DefaultLogger().
 	Log Logger
 
+	// The QUIC versions the platform h3 carriers offer (net_quic_version.go).
+	// The zero value offers version 2 first with version 1 behind it.
+	QuicVersionPolicy QuicVersionPolicy
+
 	RequestTimeout   time.Duration
 	ConnectTimeout   time.Duration
 	TlsTimeout       time.Duration
@@ -357,15 +372,17 @@ type ConnectSettings struct {
 
 	DialContextSettings *DialContextSettings
 
+	// DialControl, when set, runs on every socket the default dialer creates,
+	// letting the caller bind egress or mark the socket (ported from upstream
+	// net.go at 20b29f79; nil is a no-op).
+	DialControl func(network string, address string, c syscall.RawConn) error
+	// DialNetworkHook, when set, is called at the top of DialContext with the
+	// network and address before any narrowing (ported from upstream; nil is a
+	// no-op).
+	DialNetworkHook func(network string, addr string)
+
 	DisableIpv4 bool
 	DisableIpv6 bool
-}
-
-// dialUsesProxy reports whether DialContext will be the SOCKS path, in which
-// case a completed connection's remote address describes the hop to the proxy,
-// not the destination or the host's own route to it.
-func (self *ConnectSettings) dialUsesProxy() bool {
-	return self.DialContextSettings == nil && self.ProxySettings != nil
 }
 
 type DialContextSettings struct {
@@ -396,6 +413,9 @@ type DialContextSettings struct {
 // configured, otherwise through a plain NetDialer. Dial results are logged
 // at V(2).
 func (self *ConnectSettings) DialContext(ctx context.Context, network string, addr string) (net.Conn, error) {
+	if hook := self.DialNetworkHook; hook != nil {
+		hook(network, addr)
+	}
 	if self.DisableIpv4 && self.DisableIpv6 {
 		return nil, fmt.Errorf("ipv4 and ipv6 are both disabled")
 	}
@@ -470,6 +490,7 @@ func (self *ConnectSettings) NetDialer() *net.Dialer {
 		Timeout:         self.ConnectTimeout,
 		KeepAlive:       self.KeepAliveTimeout,
 		KeepAliveConfig: self.KeepAliveConfig,
+		Control:         self.DialControl,
 		Resolver:        self.Resolver,
 	}
 }
@@ -521,17 +542,38 @@ func SplitProxyKey(key string) (address, user string) {
 
 // proxyDialError marks a failure that happened on a proxied dial. It is
 // returned by ProxySettings.NewDialContext and exists for exactly one reader:
-// recordControlFamilyStrike (control_family.go). A proxied control dial
-// connects to the proxy first, so the family of that socket is the PROXY's
-// family, not the destination's (the NY5 demotion bug).
+// recordControlFamilyStrike (control_family.go).
+//
+// The distinction it preserves is the difference between a bug and a six-hour
+// outage. A proxied control dial connects to the proxy first, so the family of
+// that socket is the PROXY's family, not the destination's, and a stall or a
+// failure after the CONNECT is the proxy or its upstream, not this host's
+// route. Striking IPv4 for it demotes the family every other control dial in
+// the process depends on, which is what happened on NY5: a fleet of proxies
+// that could not reach the platform read as "IPv4 is blackholed" and pinned the
+// whole node onto an IPv6 path that was not there.
+//
+// Error() is the underlying message VERBATIM, with no prefix, because the
+// connect classifiers in reconnect_governor.go and proxy_health.go read error
+// strings: a marker that changed one of those strings would change proxy health
+// and reconnect accounting, which is a bigger blast radius than the bug this
+// guards. Unwrap keeps errors.Is and errors.As working through the marker.
 type proxyDialError struct {
 	index int
 	err   error
 }
 
 func (self *proxyDialError) Error() string { return self.err.Error() }
+
 func (self *proxyDialError) Unwrap() error { return self.err }
 
+// Timeout and Temporary forward the wrapped error's classification. They are
+// here because a caller that type-asserts the concrete error to net.Error
+// (rather than using errors.As) must still see a timed-out proxied dial as a
+// timeout; without them the marker would silently change retry and backoff
+// decisions on the proxied paths. A wrapped error that is not a net.Error
+// reports false from both, which is the same answer net.Error gives a
+// non-timeout failure.
 func (self *proxyDialError) Timeout() bool {
 	var netErr net.Error
 	return errors.As(self.err, &netErr) && netErr.Timeout()
@@ -542,6 +584,8 @@ func (self *proxyDialError) Temporary() bool {
 	return errors.As(self.err, &netErr) && netErr.Temporary()
 }
 
+// proxyIndex is the ProxySettings.Index of the proxy the dial went through, for
+// a log line.
 func (self *proxyDialError) proxyIndex() int { return self.index }
 
 // proxySOCKS5DialTimeout is the maximum time a single SOCKS5 dial (TCP
@@ -554,11 +598,17 @@ func (self *proxyDialError) proxyIndex() int { return self.index }
 const proxySOCKS5DialTimeout = 30 * time.Second
 
 // NewDialContext returns a DialContextFunction that dials through this
-// SOCKS5 proxy using forward as the transport. Non-IP hosts are resolved
-// through the package-level dnsCache before the proxy CONNECT; when the
+// SOCKS5 proxy using forward as the transport. What happens to a non-IP host
+// depends on proxy_target_family (proxy_target_family.go): in v4 mode, the
+// default, it is resolved through the package-level dnsCache and the CONNECT
+// carries an IPv4 literal, exactly as before; in proxy mode the name goes to
+// the proxy untouched so the proxy's resolver picks the family. When the
 // caller's context carries no deadline the proxy dial is bounded by
 // proxySOCKS5DialTimeout; successful connections are wrapped in a trackedConn
-// that counts bytes against this proxy's bandwidth index.
+// that counts bytes against this proxy's bandwidth index. A failed dial is
+// returned as a proxyDialError so family accounting can never read it as
+// evidence about this host's address family (recordControlFamilyStrike in
+// control_family.go).
 func (self *ProxySettings) NewDialContext(ctx context.Context, forward proxy.Dialer) DialContextFunction {
 	return func(ctx context.Context, network string, addr string) (net.Conn, error) {
 		// one dial of the connect attempt that carries these stats, if any
@@ -568,11 +618,23 @@ func (self *ProxySettings) NewDialContext(ctx context.Context, forward proxy.Dia
 		}
 		host, port, err := net.SplitHostPort(addr)
 		targetHost := ""
+		// only a dial that resolved the target here has an address of its own
+		// to record an outcome against; a name handed to the proxy is the
+		// proxy's resolution, not evidence this host can use that target
+		targetUsesLocalAddress := false
 		if err == nil {
 			if ip := net.ParseIP(host); ip == nil {
-				if resolved, ok := lookupProxyTarget(ctx, host); ok {
+				if ProxyTargetFamilyCarriesName() {
+					// proxy mode: the CONNECT carries the hostname and the proxy
+					// resolves it, so its own A and AAAA answers decide the
+					// family. No local lookup and no dnsCache entry, which is
+					// the point: there is no address here to choose, cache, or
+					// hold against a target's health.
+					targetHost = host
+				} else if resolved, ok := lookupProxyTarget(ctx, host); ok {
 					addr = net.JoinHostPort(resolved, port)
 					targetHost = host
+					targetUsesLocalAddress = true
 				}
 			}
 		}
@@ -601,10 +663,16 @@ func (self *ProxySettings) NewDialContext(ctx context.Context, forward proxy.Dia
 			conn, err = proxyDialer.Dial(network, addr)
 		}
 		if err != nil {
+			// Every failure below this point happened to a SOCKS5 hop, which is
+			// not this host's path: the family of the connection to the proxy
+			// says nothing about the family of the destination, and neither does
+			// the proxy's own upstream failure (see recordControlFamilyStrike).
 			return nil, &proxyDialError{index: self.Index, err: err}
 		}
-		if attempt != nil && targetHost != "" {
-			// the proxy reached the address: a stall from here on is about it
+		if attempt != nil && targetUsesLocalAddress {
+			// the proxy reached the address this dial resolved: a stall from
+			// here on is about that target. In proxy mode there is no such
+			// address, so nothing is recorded until a dial resolves one.
 			attempt.noteDialedTarget(targetHost, self.Index)
 		}
 
@@ -645,6 +713,9 @@ type trackedConn struct {
 // byte count to the proxy's TotalRx.
 func (self *trackedConn) Read(b []byte) (n int, err error) {
 	n, err = self.Conn.Read(b)
+	if n > 0 {
+		recordSocketBytes(self.socketPhase(), false, n)
+	}
 	if n > 0 && self.bw != nil {
 		self.bw.TotalRx.Add(uint64(n))
 	}
@@ -658,6 +729,9 @@ func (self *trackedConn) Read(b []byte) (n int, err error) {
 // byte count to the proxy's TotalTx.
 func (self *trackedConn) Write(b []byte) (n int, err error) {
 	n, err = self.Conn.Write(b)
+	if n > 0 {
+		recordSocketBytes(self.socketPhase(), true, n)
+	}
 	if n > 0 && self.bw != nil {
 		self.bw.TotalTx.Add(uint64(n))
 	}

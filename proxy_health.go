@@ -370,6 +370,21 @@ func RecordProxyAuthFailure(index int, err error) {
 	}
 }
 
+// RecordProxyCredentialRefusal counts one definitive refusal of the proxy's
+// credential by the platform (revoked, expired, rejected). It feeds the
+// rejection count that the revoked-identity safety net reads, which a refusal
+// no longer reaches through RecordProxyAuthFailure. A refusal while the
+// backend is degraded is not trusted, as there.
+func RecordProxyCredentialRefusal(index int) {
+	proxyHealthMu.Lock()
+	defer proxyHealthMu.Unlock()
+	if h, ok := proxyHealthByIndex[index]; ok && !backendDegradedNow() {
+		h.failures.Rejections.Add(1)
+		h.lastError = "credential refused by the platform"
+		h.lastErrorAt = time.Now()
+	}
+}
+
 // RecordProxyTransportDrop increments the transport-drop counter for a proxy.
 func RecordProxyTransportDrop(index int, err error) {
 	proxyHealthMu.Lock()

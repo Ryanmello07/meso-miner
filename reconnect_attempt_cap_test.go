@@ -13,6 +13,7 @@ func newCapHarness(proxies int) (*budgetHarness, *[]string) {
 	h.budget.attemptCap.proxyCount = func() int { return proxies }
 	var mu sync.Mutex
 	lines := []string{}
+	h.budget.emitAt = nil
 	h.budget.emit = func(line string) {
 		mu.Lock()
 		defer mu.Unlock()

@@ -92,6 +92,7 @@ func TestNoteStart_ThirdStartInTenMinutesIsGoverned(t *testing.T) {
 			dir := t.TempDir()
 			h := newBudgetHarness()
 			var lines []string
+			h.budget.emitAt = nil
 			h.budget.emit = func(line string) { lines = append(lines, line) }
 			// a fresh process: inside its startup grace
 			h.gov.started = *h.now
@@ -151,6 +152,7 @@ func TestNoteStart_RoutineRestartsAreNotACrashLoop(t *testing.T) {
 	marker := filepath.Join(dir, "govern_outage")
 	h := newBudgetHarness()
 	var lines []string
+	h.budget.emitAt = nil
 	h.budget.emit = func(line string) { lines = append(lines, line) }
 	h.gov.started = *h.now
 

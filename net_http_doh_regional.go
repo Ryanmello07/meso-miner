@@ -13,13 +13,12 @@ import (
 //     families (knownDnsServerPairs, dualStackList) instead of being v4-only.
 //     A region that publishes no v6 resolver keeps a v4-only recommendation,
 //     and the resolver then walks the v4 list.
-//   - This tree's RegionalDnsResolverSettings() also sets EnableLocalDns and
-//     the 1.1.1.1 local list. That shape is kept (it is public API here); the
-//     v6 remote list is added on top of it.
+//   - This tree's RegionalDnsResolverSettings() keeps its existing shape,
+//     including DnsUpgradeMaskAddress and the v4 remote list; the v6 remote
+//     list is added on top of it.
 //   - The bootstrap control-DoH presets (RegionalControlDohServer and
-//     RegionalControlDohUrls) are NOT ported: this tree has no control-DoH
-//     path for them to feed.
-
+//     RegionalControlDohUrls) stay as this tree already has them.
+//
 // a well known regional dns server, associated to a country code. Ipv6 is
 // empty where the operator publishes no v6 resolver (or none is known).
 type RegionalDnsServer struct {
@@ -50,6 +49,68 @@ func RegionalDnsServers() []*RegionalDnsServer {
 	return regionalDnsServers
 }
 
+// a well known regional DoH server a user can take as a bootstrap DoH server
+// for the control names (net_http_doh_control.go), associated to a country
+// code. DohUrlIpv6 is empty where the operator serves no v6 DoH endpoint whose
+// certificate names its v6 address.
+type RegionalControlDohServer struct {
+	CountryCode string
+	Name        string
+	DohUrlIpv4  string
+	DohUrlIpv6  string
+}
+
+// the presets of the bootstrap DoH setting. Each was checked to answer RFC
+// 8484 wire format (an application/dns-message GET and POST) with a
+// certificate whose SAN carries the url's ip, which is what the DoH client
+// verifies (2026-10-04). Alidns's v6 endpoints present a certificate without
+// their v6 addresses and DNSPod serves no v6 DoH, so the cn presets are v4.
+var regionalControlDohServers = []*RegionalControlDohServer{
+	{CountryCode: "cn", Name: "Alidns", DohUrlIpv4: "https://223.5.5.5/dns-query"},
+	{CountryCode: "cn", Name: "Alidns", DohUrlIpv4: "https://223.6.6.6/dns-query"},
+	{CountryCode: "cn", Name: "DNSPod/Tencent", DohUrlIpv4: "https://1.12.12.12/dns-query"},
+	{CountryCode: "cn", Name: "DNSPod/Tencent", DohUrlIpv4: "https://120.53.53.53/dns-query"},
+}
+
+// The bootstrap DoH server urls recommended for a country, v4 and v6, or none
+// when there is no recommendation. This is the single source of the presets the
+// apps offer (through the sdk).
+func RegionalControlDohUrls(countryCode string) (dohUrlsIpv4 []string, dohUrlsIpv6 []string) {
+	countryCode = strings.ToLower(strings.TrimSpace(countryCode))
+	for _, server := range regionalControlDohServers {
+		if server.CountryCode != countryCode {
+			continue
+		}
+		if server.DohUrlIpv4 != "" {
+			dohUrlsIpv4 = append(dohUrlsIpv4, server.DohUrlIpv4)
+		}
+		if server.DohUrlIpv6 != "" {
+			dohUrlsIpv6 = append(dohUrlsIpv6, server.DohUrlIpv6)
+		}
+	}
+	return
+}
+
+// RegionalDnsResolverSettings is the recommended dns resolver settings for a
+// region where the strong-privacy defaults (DoH / cert-pinned) are known not to
+// work: unencrypted remote dns only, using the region's known-working servers
+// in both families. nil when there is no regional recommendation and the
+// universal resolver should be used. this is the single source of truth for
+// the recommendation, used by both the apps (via the sdk) and the server proxy
+// config
+func RegionalDnsResolverSettings(countryCode string) *DnsResolverSettings {
+	remoteDnsIpv4 := RegionalDnsServerIps(countryCode)
+	if len(remoteDnsIpv4) == 0 {
+		return nil
+	}
+	return &DnsResolverSettings{
+		EnableRemoteDns:       true,
+		DnsUpgradeMaskAddress: DefaultDnsUpgradeMaskAddress,
+		RemoteDnsIpv4:         remoteDnsIpv4,
+		RemoteDnsIpv6:         RegionalDnsServerIpv6s(countryCode),
+	}
+}
+
 // RegionalDnsServerIps returns the recommended dns server ipv4 addresses for a
 // country, or nil when there is no recommendation
 func RegionalDnsServerIps(countryCode string) []string {
@@ -75,22 +136,4 @@ func RegionalDnsServerIpv6s(countryCode string) []string {
 		}
 	}
 	return ips
-}
-
-// regional dns resolver settings tune the dns resolver for regions
-// if the result is nil, there is no regional specific setting and a universal resolver should be used
-func RegionalDnsResolverSettings(countryCode string) *DnsResolverSettings {
-	remoteDnsIpv4 := RegionalDnsServerIps(countryCode)
-	if len(remoteDnsIpv4) == 0 {
-		return nil
-	}
-	return &DnsResolverSettings{
-		EnableRemoteDns: true,
-		EnableLocalDns:  true,
-		RemoteDnsIpv4:   remoteDnsIpv4,
-		RemoteDnsIpv6:   RegionalDnsServerIpv6s(countryCode),
-		LocalDnsIpv4: []string{
-			"1.1.1.1",
-		},
-	}
 }

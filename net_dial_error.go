@@ -141,12 +141,24 @@ type authRejector interface {
 // explicitly refusing the identity. It is structural on purpose: the text of an
 // error ("401 Unauthorized") is not evidence, and a timeout is never one.
 func explicitRejection(err error) bool {
-	for e := err; e != nil; e = errors.Unwrap(e) {
-		if r, ok := e.(authRejector); ok && r.AuthRejected() {
-			return true
-		}
+	if err == nil {
+		return false
 	}
-	return false
+	if r, ok := err.(authRejector); ok && r.AuthRejected() {
+		return true
+	}
+	// an error that wraps several (errors.Join, a failed H1+ upgrade followed by
+	// the websocket fallback's own failure) is a rejection when any of them is
+	switch e := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, inner := range e.Unwrap() {
+			if explicitRejection(inner) {
+				return true
+			}
+		}
+		return false
+	}
+	return explicitRejection(errors.Unwrap(err))
 }
 
 // isProxyLevelError reports whether err is a failure of the proxy path itself (a

@@ -115,31 +115,10 @@ func writeNetworkConfig(apiUrl, connectUrl string) error {
 	if err != nil {
 		return err
 	}
-	// A torn write here is an unreadable network config, which the provider
-	// treats as fatal at startup. Write a sibling temp file and rename it into
-	// place so a crash or a full disk leaves either the old file or the new one.
-	tmp, err := os.CreateTemp(filepath.Dir(p), ".network-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := tmp.Chmod(0600); err != nil {
-		tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(b); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, p)
+	// Through a temp file and a rename, so a crash or a full disk cannot leave
+	// a truncated network.json behind: every command now reads it, and a bad
+	// one stops them all (under a Restart=always unit, permanently).
+	return atomicWriteFile(p, b, 0600)
 }
 
 // resetNetworkConfig removes ~/.urnetwork/network.json. Removing a
@@ -224,6 +203,24 @@ func resolveAPIProbeHostPort() (string, uint16) {
 	return apiProbeHostPort(apiUrl)
 }
 
+// urlScheme returns the scheme of rawUrl, or "" when it does not parse.
+func urlScheme(rawUrl string) string {
+	u, err := url.Parse(rawUrl)
+	if err != nil {
+		return ""
+	}
+	return u.Scheme
+}
+
+// insecureNetworkWarning returns a warning when the chosen network would
+// carry the provider's credentials in the clear, or "" when both URLs are
+// encrypted.
+//
+// The network jwt travels as an `Authorization: Bearer` header on every api
+// call, so a plaintext api_url puts it on the wire in the clear for anyone on
+// the path. The one-off --api_url flag has always allowed this, but a saved
+// network makes it persistent and invisible, which is why it is worth saying
+// out loud at the point it gets written down and whenever it is shown.
 func insecureNetworkWarning(apiUrl, connectUrl string) string {
 	insecure := []string{}
 	if urlScheme(apiUrl) == "http" {
@@ -243,11 +240,12 @@ func insecureNetworkWarning(apiUrl, connectUrl string) string {
 	)
 }
 
-// apiUrlChanged reports whether selecting newApiUrl changes the network the
-// provider talks to. With no saved config the provider is already on
-// DefaultApiUrl, so writing the default back (or resetting to it) is not a
-// switch. An unreadable config cannot be compared, so it counts as a change:
-// better a superfluous warning than a jwt silently pointed at another network.
+// networkSwitchNotice warns that the credentials already in dir belong to the
+// previously selected network, or returns "" when there are none.
+//
+// The jwt is minted by one network's api and means nothing to another, so
+// after a switch `provider provide` fails with an auth error whose cause is
+// several steps removed from the message.
 func apiUrlChanged(newApiUrl string) bool {
 	cfg, ok, err := readNetworkConfig()
 	if err != nil {
@@ -259,14 +257,6 @@ func apiUrlChanged(newApiUrl string) bool {
 	return newApiUrl != cfg.ApiUrl
 }
 
-// networkSwitchNotice warns that the credentials already in dir belong to
-// the previously selected network, or returns "" when there are none or when
-// the effective network did not move.
-//
-// changed is the caller's comparison of the effective api_url before and
-// after the command. A save or reset that leaves the network where it was is
-// not a switch — the jwt still belongs to the selected network — and the
-// notice costs a single-use auth code when followed, so it must stay quiet.
 func networkSwitchNotice(dir string, changed bool) string {
 	if !changed {
 		return ""
@@ -281,6 +271,9 @@ func networkSwitchNotice(dir string, changed bool) string {
 	)
 }
 
+// networkShowText is the text of `provider choose_network --show`: the saved
+// network, or the default one when none is saved, with the insecure-network
+// warning when it applies.
 func networkShowText() (string, error) {
 	cfg, ok, err := readNetworkConfig()
 	if err != nil {
@@ -307,20 +300,11 @@ func networkShowText() (string, error) {
 }
 
 // networkSwitchNoticeForState is networkSwitchNotice for the provider state
-// directory that holds network.json. changed must say whether the command
-// moved the effective network.
+// directory that holds network.json.
 func networkSwitchNoticeForState(changed bool) string {
 	p, err := networkConfigPath()
 	if err != nil {
 		return ""
 	}
 	return networkSwitchNotice(filepath.Dir(p), changed)
-}
-
-func urlScheme(rawUrl string) string {
-	u, err := url.Parse(rawUrl)
-	if err != nil {
-		return ""
-	}
-	return u.Scheme
 }

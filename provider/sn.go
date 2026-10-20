@@ -91,24 +91,87 @@ func snSetWallet(ctx context.Context, clientStrategy *connect.ClientStrategy, ap
 }
 
 // legacyNetworkWalletGate refuses the unsigned network wallet request unless the
-// operator opted in. The platform is moving wallet binding to a signed consent
-// (one coldkey signature, delegated to a hotkey), and whether it still accepts
-// an unsigned request is a server-side policy this binary cannot see, so the
-// request is sent only on an explicit opt-in. The signed flow needs packages
-// (crv4, hotkeywallet) that this fleet binary does not link; it is a one-time
-// per-network action and never needs a hotkey seed on a fleet node.
+// operator opted in. The main network refuses an unsigned wallet set: the
+// signed consent needs the coldkey's signature over a server challenge, and
+// whether a deployment still accepts an unsigned request is a server-side
+// policy this binary cannot see, so the request is sent only on an explicit
+// opt-in. Pass --coldkey_seed_file (or --message with --signature) to use the
+// signed path, which needs no opt-in.
 func legacyNetworkWalletGate(legacyNetwork bool, via string) error {
 	if legacyNetwork {
 		return nil
 	}
-	return fmt.Errorf("%s sends the unsigned network wallet request, which the platform may refuse under its signed wallet rules; set the wallet in the URnetwork app or web account, or pass --legacy-network-wallet to send the unsigned request anyway", via)
+	return fmt.Errorf("%s sends the unsigned network wallet request, which the platform may refuse under its signed wallet rules; set the wallet in the URnetwork app or web account, sign it here with --coldkey_seed_file (or --message with --signature), or pass --legacy-network-wallet to send the unsigned request anyway", via)
 }
 
-// walletSet implements `provider wallet set <coldkey_ss58>`.
+// walletStatus implements `provider wallet status`.
+func walletStatus(opts docopt.Opts) {
+	apiUrl, err := resolveApiUrl(opts)
+	if err != nil {
+		fmt.Printf("network config error: %s\n", err)
+		os.Exit(1)
+	}
+	ctx, cancel := walletCommandContext()
+	defer cancel()
+	ctx, cancelTimeout := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelTimeout()
+	clientStrategy := connect.NewClientStrategyWithDefaults(ctx)
+	if err := snWalletStatus(ctx, os.Stdout, clientStrategy, apiUrl); err != nil {
+		fmt.Printf("%s\n", err)
+		os.Exit(1)
+	}
+}
+
+// walletSign implements `provider wallet sign <coldkey_ss58>`: one local page
+// where a browser wallet extension signs the network wallet consent. Run it on
+// your own computer, never on a fleet node.
+func walletSign(opts docopt.Opts) {
+	apiUrl, err := resolveApiUrl(opts)
+	if err != nil {
+		fmt.Printf("network config error: %s\n", err)
+		os.Exit(1)
+	}
+	proof, err := snWalletProofFromOpts(opts)
+	if err != nil {
+		fmt.Printf("wallet sign failed: %s\n", err)
+		os.Exit(1)
+	}
+	coldkeySs58, _ := opts.String("<coldkey_ss58>")
+	coldkeySs58 = strings.TrimSpace(coldkeySs58)
+	port := snSignDefaultPort
+	if text, err := opts.String("--port"); err == nil {
+		if value, err := strconv.Atoi(text); err == nil && 0 < value && value < 65536 {
+			port = value
+		}
+	}
+	noOpen, _ := opts.Bool("--no-open")
+	ctx, cancel := walletCommandContext()
+	defer cancel()
+	clientStrategy := connect.NewClientStrategyWithDefaults(ctx)
+	if err := snWalletSignUi(ctx, os.Stdout, clientStrategy, apiUrl, coldkeySs58, proof, port, !noOpen); err != nil {
+		fmt.Printf("wallet sign failed: %s\n", err)
+		os.Exit(1)
+	}
+}
+
+// walletSet implements `provider wallet set <coldkey_ss58>
+// [--coldkey_seed_file=<path> | --message=<text> --signature=<hex>]`.
 func walletSet(opts docopt.Opts) {
-	legacyNetwork, _ := opts.Bool("--legacy-network-wallet")
-	if err := legacyNetworkWalletGate(legacyNetwork, "provider wallet set"); err != nil {
+	proof, err := snWalletProofFromOpts(opts)
+	if err != nil {
 		fmt.Printf("subnet wallet not set: %s\n", err)
+		os.Exit(1)
+	}
+	legacyNetwork, _ := opts.Bool("--legacy-network-wallet")
+	// An unsigned set is the only form the gate governs; a proof makes the
+	// request self-authenticating and needs no opt-in.
+	if proof.unsigned() {
+		if err := legacyNetworkWalletGate(legacyNetwork, "provider wallet set"); err != nil {
+			fmt.Printf("subnet wallet not set: %s\n", err)
+			os.Exit(1)
+		}
+	} else if legacyNetwork {
+		fmt.Printf("subnet wallet not set: --legacy-network-wallet is the unsigned mode; drop it to send the signed set\n")
 		os.Exit(1)
 	}
 	apiUrl, err := resolveApiUrl(opts)
@@ -126,7 +189,19 @@ func walletSet(opts docopt.Opts) {
 	clientStrategy := connect.NewClientStrategyWithDefaults(ctx)
 
 	coldkeySs58, _ := opts.String("<coldkey_ss58>")
-	if err := snSetWallet(ctx, clientStrategy, apiUrl, coldkeySs58); err != nil {
+	if !proof.unsigned() {
+		// a signed set is the network consent; the login challenge is never signed
+		if err := snSetNetworkWalletConsent(ctx, clientStrategy, apiUrl, strings.TrimSpace(coldkeySs58), proof); err != nil {
+			fmt.Printf("subnet wallet not set: %s\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if proof.fromEpoch != nil {
+		fmt.Printf("subnet wallet not set: the unsigned legacy request cannot carry an earning interval\n")
+		os.Exit(1)
+	}
+	if err := snSetWalletSigned(ctx, clientStrategy, apiUrl, coldkeySs58, proof); err != nil {
 		fmt.Printf("subnet wallet not set: %s\n", err)
 		os.Exit(1)
 	}
@@ -433,40 +508,73 @@ func printMinerClaimed(receipt *types.Receipt, contract common.Address) {
 }
 
 // ---------------------------------------------------------------------
-// Fleet binding — client <-> hotkey association (WHITEPAPER §8.4/§11.4,
-// decisions D-6/D-18). A miner is steered by validators on pure measured
-// quality; to be measured it must publish a dual-signed association between
-// the client_id its trails are measured under and its subnet hotkey. This
-// binary owns the client key, so it produces the client_id signature. The
-// fleet-bind digest read and the bindHead/unbindHead calldata are packed
-// with sn/stabi; with a --key_file the transaction is signed and submitted
-// via sn/miner/onchain, otherwise the calldata is printed for offline
-// broadcast.
+// Head-tier claim — client_id <-> hotkey binding (WHITEPAPER §8.4/§11.4,
+// decisions D-6/D-18). A top-level (head) miner runs its own UID and is
+// steered by validators on pure measured quality; to be measured it must
+// publish a dual-signed association between the client_id its trails are
+// measured under and its subnet hotkey. This binary owns the client key,
+// so it produces the client_id signature. The head-bind digest read and
+// the bindHead/unbindHead calldata are packed with sn/stabi; with a
+// --key_file the transaction is signed and submitted via sn/miner/onchain,
+// otherwise the calldata is printed for snclaim.
 // ---------------------------------------------------------------------
 
+// snBindHeadIntent is the signed-head-binding bundle: everything needed to
+// pack and submit bindHead, plus the digest that was signed (for display).
+type snBindHeadIntent struct {
+	hotkey      [32]byte
+	clientId    [32]byte // the provider's client Ed25519 public key (ckey)
+	registrant  common.Address
+	digest      [32]byte
+	clientIdSig []byte // 64-byte Ed25519 signature (R‖S) by clientId over digest
+}
+
 // snLoadClientKey loads the provider's own client identity key (the
-// ed25519 key `provider provide` generates), under the same seed-custody
-// policy the --client_seed_file path enforces — the default path is the
-// common one, so a world-writable or swapped .provider.key must fail the
-// same way. Raw 32-byte (the original format) or 0x/0X hex text.
+// ed25519 key `provider provide` generates).
 func snLoadClientKey() (ed25519.PrivateKey, error) {
-	p, _ := providerStatePath(".provider.key")
-	raw, err := snReadSeedFile(p)
+	seed, err := readProviderClientKeySeed()
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("provider client key not found at %s. Run `provider provide` once to generate the client identity key", p)
-		}
 		return nil, err
 	}
-	if len(raw) != ed25519.SeedSize {
-		trimmed := strings.TrimSpace(string(raw))
-		decoded, decodeErr := hex.DecodeString(strings.TrimPrefix(strings.TrimPrefix(trimmed, "0x"), "0X"))
-		if decodeErr != nil || len(decoded) != ed25519.SeedSize {
-			return nil, fmt.Errorf("%s: expected raw or hex 32-byte Ed25519 seed", p)
-		}
-		raw = decoded
+	if len(seed) == 0 {
+		p, _ := providerStatePath(".provider.key")
+		return nil, fmt.Errorf("provider client key not found at %s. Run `provider provide` once to generate the client identity key", p)
 	}
-	return ed25519.NewKeyFromSeed(raw), nil
+	if len(seed) != ed25519.SeedSize {
+		return nil, fmt.Errorf("provider client key seed length %d; expected %d", len(seed), ed25519.SeedSize)
+	}
+	return ed25519.NewKeyFromSeed(seed), nil
+}
+
+// parseBytes32Arg parses a 0x-optional 32-byte hex argument (hotkey or
+// client_id).
+func parseBytes32Arg(field string, s string) ([32]byte, error) {
+	var out [32]byte
+	h := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(s), "0x"), "0X")
+	b, err := hex.DecodeString(h)
+	if err != nil {
+		return out, fmt.Errorf("%s: %s", field, err)
+	}
+	if len(b) != 32 {
+		return out, fmt.Errorf("%s: %d hex bytes; expected 32", field, len(b))
+	}
+	copy(out[:], b)
+	return out, nil
+}
+
+// parseEvmAddressArg parses a 0x-optional 20-byte hex EVM address.
+func parseEvmAddressArg(field string, s string) ([20]byte, error) {
+	var out [20]byte
+	h := strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(s), "0x"), "0X")
+	b, err := hex.DecodeString(h)
+	if err != nil {
+		return out, fmt.Errorf("%s: %s", field, err)
+	}
+	if len(b) != 20 {
+		return out, fmt.Errorf("%s: %d hex bytes; expected a 20-byte EVM address", field, len(b))
+	}
+	copy(out[:], b)
+	return out, nil
 }
 
 // bindHead implements `provider bind-head --manifest=<file>
@@ -495,9 +603,6 @@ func bindHead(opts docopt.Opts) {
 	member, err := snFleetMember(manifest, clientID)
 	if err != nil {
 		fail(err)
-	}
-	if commitment, commitmentErr := manifest.CommitmentHash(); commitmentErr == nil {
-		fmt.Printf("manifest commitment hash: 0x%x (verify against the finalized Subtensor commitment before trusting this manifest)\n", commitment)
 	}
 	from, err := snUint64Opt(opts, "--valid_from_epoch")
 	if err != nil {
@@ -543,9 +648,6 @@ func bindHead(opts docopt.Opts) {
 
 	dryRun, _ := opts.Bool("--dry-run")
 	keyFile, _ := opts.String("--key_file")
-	if dryRun && keyFile == "" {
-		fmt.Printf("note: --dry-run has no effect without --key_file; printing the calldata for offline broadcast\n")
-	}
 	if keyFile != "" {
 		var rpcUrls []string
 		if rpcAny, ok := opts["--rpc"]; ok && rpcAny != nil {
@@ -617,53 +719,27 @@ func unbindHead(opts docopt.Opts) {
 	if rpcAny, ok := opts["--rpc"]; ok && rpcAny != nil {
 		rpcUrls = append(rpcUrls, rpcAny.([]string)...)
 	}
-	offline, _ := opts.Bool("--offline")
-	keyFile, _ := opts.String("--key_file")
+	if len(rpcUrls) == 0 {
+		fail(fmt.Errorf("--rpc: at least one endpoint required to read the fleet revoke digest"))
+	}
 
 	event := connect.NewEventWithContext(context.Background())
 	event.SetOnSignals(syscall.SIGINT, syscall.SIGQUIT, syscall.SIGTERM)
 	ctx, cancel := context.WithCancel(event.Ctx())
 	defer cancel()
 
-	dryRun, _ := opts.Bool("--dry-run")
-	if dryRun && keyFile == "" {
-		fmt.Printf("note: --dry-run has no effect without --key_file; printing the calldata for offline broadcast\n")
-	}
-
 	coordinatorHex := common.Address(manifest.Coordinator).Hex()
+	readCalldata := stCoordinator.PackFleetRevokeDigest(clientID, manifest.Generation, effective)
+	digest, rpcUrl, err := snReadFleetRevokeDigest(ctx, rpcUrls, coordinatorHex, readCalldata)
+	if err != nil {
+		fail(err)
+	}
 	want, err := (protocol.FleetRevoke{ChainID: manifest.ChainID, Netuid: manifest.Netuid, Coordinator: manifest.Coordinator, ClientID: clientID, Generation: manifest.Generation, EffectiveEpoch: effective}).Digest()
 	if err != nil {
 		fail(err)
 	}
-
-	// With --rpc, the digest read is a cross-check against the coordinator:
-	// it validates the manifest's chain id, netuid and coordinator — the
-	// three fields the contract substitutes — against the local signing
-	// domain. It CANNOT validate the generation or the effective epoch (both
-	// are caller-supplied ABI arguments the contract just echoes), and a
-	// hostile endpoint passes by echoing the local digest back. The offline
-	// path (below, gated behind --offline) drops even the manifest-field
-	// check, which is why it requires the explicit flag and prints the
-	// unverified-assertion warning.
-	var digest [32]byte
-	var rpcUrl string
-	if 0 < len(rpcUrls) {
-		readCalldata := stCoordinator.PackFleetRevokeDigest(clientID, manifest.Generation, effective)
-		digest, rpcUrl, err = snReadFleetRevokeDigest(ctx, manifest.ChainID, rpcUrls, coordinatorHex, readCalldata)
-		if err != nil {
-			fail(err)
-		}
-		if digest != want {
-			fail(errors.New("fleet revoke digest differs from the local signing domain"))
-		}
-	} else if keyFile != "" {
-		fail(fmt.Errorf("--rpc: at least one endpoint required to submit"))
-	} else if !offline {
-		fail(fmt.Errorf("--offline: signing without an on-chain cross-check requires the explicit --offline flag (air-gapped mode)"))
-	} else {
-		digest = want
-		rpcUrl = "offline (local domain)"
-		fmt.Printf("WARNING: offline mode — generation %d and effective epoch %d were NOT verified against any coordinator; verify the manifest commitment hash before broadcasting\n", manifest.Generation, effective)
+	if digest != want {
+		fail(errors.New("fleet revoke digest differs from the local signing domain"))
 	}
 
 	clientKey, err := snClientKeyOpt(opts)
@@ -673,17 +749,8 @@ func unbindHead(opts docopt.Opts) {
 	if !bytesEqualConst(clientKey.Public().(ed25519.PublicKey), member.ClientKey[:]) {
 		fail(errors.New("client key does not match the manifest member"))
 	}
-	if commitment, commitmentErr := manifest.CommitmentHash(); commitmentErr == nil {
-		fmt.Printf("manifest commitment hash: 0x%x (verify against the finalized Subtensor commitment before trusting this manifest)\n", commitment)
-	}
 	signature := ed25519.Sign(clientKey, digest[:])
 
-	if 0 < len(rpcUrls) && rpcUrl != "" {
-		// Pin the submit to the endpoint that answered the digest read, the
-		// way the reference narrows its rpc list — do not broadcast to a
-		// different node than the one the cross-check validated.
-		rpcUrls = []string{rpcUrl}
-	}
 	calldata, err := stCoordinator.TryPackRevokeFleetBinding(clientID, manifest.Generation, effective, signature)
 	if err != nil {
 		fail(fmt.Errorf("pack revokeFleetBinding: %s", err))
@@ -694,6 +761,8 @@ func unbindHead(opts docopt.Opts) {
 	fmt.Printf("coordinator: %s (chain id %d, netuid %d)\n", coordinatorHex, manifest.ChainID, manifest.Netuid)
 	fmt.Printf("digest: 0x%x (fleet-revoke-v1, via %s)\n", digest, rpcUrl)
 
+	dryRun, _ := opts.Bool("--dry-run")
+	keyFile, _ := opts.String("--key_file")
 	if keyFile != "" {
 		receipt, err := snFleetSubmit(ctx, manifest, rpcUrls, keyFile, calldata, dryRun)
 		if err != nil {
@@ -707,11 +776,7 @@ func unbindHead(opts docopt.Opts) {
 	}
 
 	fmt.Printf("revokeFleetBinding calldata:\n0x%x\n", calldata)
-	if seedFile, _ := opts.String("--client_seed_file"); strings.TrimSpace(seedFile) != "" {
-		fmt.Printf("submit with: provider unbind-head --manifest=<file> --effective_epoch=%d --client_id=0x%x --rpc=<rpc_url> --key_file=<evm_key_file> --client_seed_file=%s\n", effective, clientID, seedFile)
-	} else {
-		fmt.Printf("submit with: provider unbind-head --manifest=<file> --effective_epoch=%d --client_id=0x%x --rpc=<rpc_url> --key_file=<evm_key_file>\n", effective, clientID)
-	}
+	fmt.Printf("submit with: provider unbind-head --manifest=<file> --effective_epoch=%d --client_id=0x%x --rpc=<rpc_url> --key_file=<evm_key_file>\n", effective, clientID)
 }
 
 // snStatusCmd implements `provider sn-status [--json]`.

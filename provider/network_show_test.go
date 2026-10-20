@@ -159,17 +159,46 @@ func TestNetworkSwitchNoticeOnlyWhenAJwtExists(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "jwt"), []byte("x"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if got := networkSwitchNotice(dir, false); got != "" {
-		t.Errorf("unchanged network: want no notice, got %q", got)
-	}
 	got := networkSwitchNotice(dir, true)
 	if !strings.Contains(got, "issued by the previously selected network") || !strings.Contains(got, "provider auth") {
-		t.Errorf("with a jwt and a changed network: want the switch notice, got %q", got)
+		t.Errorf("with a jwt: want the switch notice, got %q", got)
 	}
 }
 
-// apiUrlChanged is the comparison behind the switch notice: the default
-// network when no config is saved, the saved api_url otherwise.
+func TestChooseNetworkPrintsTheNoticesAfterASave(t *testing.T) {
+	home := withTempHome(t)
+	dir := filepath.Join(home, ".urnetwork")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "jwt"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out := captureOutput(t, func() {
+		chooseNetworkCmd(docopt.Opts{"choose_network": true, "<api_url>": "http://127.0.0.1:1", "<connect_url>": "ws://127.0.0.1:2"})
+	})
+	if !strings.Contains(out, "network saved:") || !strings.Contains(out, "warning: api_url uses http") ||
+		!strings.Contains(out, "previously selected network") {
+		t.Errorf("save output must carry the saved line, the plaintext warning and the switch notice:\n%s", out)
+	}
+}
+
+func TestWriteNetworkConfigLeavesNoTempFile(t *testing.T) {
+	home := withTempHome(t)
+	if err := writeNetworkConfig("https://api.example.com", "wss://connect.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(filepath.Join(home, ".urnetwork"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			t.Errorf("leftover temp file %q after an atomic write", e.Name())
+		}
+	}
+}
+
 func TestApiUrlChanged(t *testing.T) {
 	t.Run("no saved config", func(t *testing.T) {
 		withTempHome(t)
@@ -207,8 +236,6 @@ func TestApiUrlChanged(t *testing.T) {
 	})
 }
 
-// Three commands write the api_url the provider is already on. None may print
-// the switch notice: following it would spend a single-use auth code.
 func TestChooseNetworkStaysQuietWhenTheEffectiveNetworkDoesNotChange(t *testing.T) {
 	newHomeWithJwt := func(t *testing.T) {
 		t.Helper()
@@ -265,8 +292,6 @@ func TestChooseNetworkStaysQuietWhenTheEffectiveNetworkDoesNotChange(t *testing.
 	})
 }
 
-// A real switch keeps the warning: resetting away from a saved custom network
-// points the existing jwt at a different api.
 func TestChooseNetworkResetToADifferentNetworkKeepsTheNotice(t *testing.T) {
 	home := withTempHome(t)
 	dir := filepath.Join(home, ".urnetwork")
@@ -284,39 +309,5 @@ func TestChooseNetworkResetToADifferentNetworkKeepsTheNotice(t *testing.T) {
 	})
 	if !strings.Contains(out, "previously selected network") || !strings.Contains(out, "provider auth") {
 		t.Errorf("a reset off a custom network must keep the switch notice:\n%s", out)
-	}
-}
-
-func TestChooseNetworkPrintsTheNoticesAfterASave(t *testing.T) {
-	home := withTempHome(t)
-	dir := filepath.Join(home, ".urnetwork")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "jwt"), []byte("x"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	out := captureOutput(t, func() {
-		chooseNetworkCmd(docopt.Opts{"choose_network": true, "<api_url>": "http://127.0.0.1:1", "<connect_url>": "ws://127.0.0.1:2"})
-	})
-	if !strings.Contains(out, "network saved:") || !strings.Contains(out, "warning: api_url uses http") ||
-		!strings.Contains(out, "previously selected network") {
-		t.Errorf("save output must carry the saved line, the plaintext warning and the switch notice:\n%s", out)
-	}
-}
-
-func TestWriteNetworkConfigLeavesNoTempFile(t *testing.T) {
-	home := withTempHome(t)
-	if err := writeNetworkConfig("https://api.example.com", "wss://connect.example.com"); err != nil {
-		t.Fatal(err)
-	}
-	entries, err := os.ReadDir(filepath.Join(home, ".urnetwork"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".tmp") {
-			t.Errorf("leftover temp file %q after an atomic write", e.Name())
-		}
 	}
 }
