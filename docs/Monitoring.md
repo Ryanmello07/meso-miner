@@ -202,6 +202,40 @@ The test file covers the two enabled rules. `prometheus.yml` lists `urnetwork.ym
 | `urnet_transport_pt_connects_total` | counter | `mode` | Packet-translation transport connections that authenticated |
 | `urnet_transport_pt_connect_failures_total` | counter | `mode` | Packet-translation transport connect attempts that failed |
 | `urnet_transport_pt_drops_total` | counter | `mode` | Packet-translation transport connections that ended while still wanted |
+| `urnet_dualstack_mode` | gauge | `mode`, `reason` | Direct-identity platform transport mode, value always 1: `group` (v4 pin, v6 pin and standby) or `legacy` (single), with the decision reason |
+| `urnet_dualstack_transport_state` | gauge | `transport`, `state` | Per-transport state: 1 for the state the transport is in (`ipv4`, `ipv6`, `standby`) |
+| `urnet_dualstack_connect_attempts_total` | counter | `family`, `mode` | Platform connect attempts of the native identity's transports |
+| `urnet_dualstack_connects_total` | counter | `family`, `mode` | Platform connects that authenticated |
+| `urnet_dualstack_connect_failures_total` | counter | `family`, `mode` | Platform connect attempts that failed |
+| `urnet_dualstack_drops_total` | counter | `family`, `mode`, `cause` | Sessions that ended on their own, by close cause |
+| `urnet_dualstack_sessions_up` | gauge | `family` | Platform sessions up right now |
+| `urnet_dualstack_connected_seconds_total` | counter | `family` | Seconds with at least one session up (overlapping carriers count once) |
+| `urnet_dualstack_last_connect_timestamp_seconds` | gauge | `family` | Unix time of the last connect, 0 if none yet |
+| `urnet_dualstack_last_drop_timestamp_seconds` | gauge | `family` | Unix time of the last session drop, 0 if none yet |
+| `urnet_dualstack_family_mismatch_total` | counter | `family` | Pinned transports that connected over the other family; anything above 0 is a bug |
+| `urnet_dualstack_session_lifetime_seconds` | histogram | `family` | Lifetime of ended sessions |
+| `urnet_dualstack_pinned_down` | gauge | | 1 while no pinned transport is connected, after the first connect |
+| `urnet_dualstack_pinned_down_events_total` | counter | | Times every pinned transport was down at once |
+| `urnet_dualstack_pinned_down_seconds_total` | counter | | Seconds with no pinned transport connected |
+| `urnet_dualstack_pinned_down_longest_seconds` | gauge | | Longest single stretch with no pinned transport connected |
+| `urnet_dualstack_standby_active` | gauge | | 1 while the family-agnostic standby is dialing because no pinned transport is connected |
+| `urnet_dualstack_standby_activations_total` | counter | | Times the standby started dialing |
+| `urnet_dualstack_standby_active_seconds_total` | counter | | Seconds the standby has been dialing |
+| `urnet_h1_max_message_bytes` | gauge | | Largest complete message read on any H1 transport (websocket or H1+); the read limit is 65535 |
+| `urnet_h1plus_enabled` | gauge | | 1 while H1+ upgrades are allowed (`h1_plus`, default on) |
+| `urnet_h1plus_attempts_total` | counter | | H1 dials that attempted the H1+ upgrade |
+| `urnet_h1plus_accepted_total` | counter | | H1 dials the server upgraded to the custom H1+ carrier |
+| `urnet_h1plus_websocket_selected_total` | counter | | H1 dials that ended on a plain websocket (a fallback, or H1+ off) |
+| `urnet_h1plus_fallbacks_total` | counter | `reason` | H1+ upgrades that fell back to a websocket: `rejected`, `invalid`, `io`, `proxy` |
+| `urnet_h1plus_handshake_failures_total` | counter | | H1+ upgrades that failed without falling back (TLS, authentication) |
+| `urnet_h1plus_auth_failures_total` | counter | | H1+ upgrades answered 401 or 403 |
+| `urnet_h1plus_handshake_seconds_total` | counter | | Time spent in H1+ handshakes, seconds |
+| `urnet_h1plus_messages_total` | counter | | Messages carried on H1+ connections |
+| `urnet_h1plus_bytes_total` | counter | | Message bytes carried on H1+ connections |
+| `urnet_h1plus_writes_total` | counter | | Physical writes on H1+ connections |
+| `urnet_h1plus_flushes_total` | counter | | Batched flushes on H1+ connections |
+| `urnet_h1plus_read_errors_total` | counter | | Read errors on H1+ connections |
+| `urnet_h1plus_write_errors_total` | counter | | Write errors on H1+ connections |
 | `urnet_proxy_pool_size` | gauge | `status` | Proxies by status: up, connecting, degraded, dead |
 | `urnet_proxy_bytes_total` | counter | `proxy`, `direction` | Bytes per proxy |
 | `urnet_proxy_billable_bytes_total` | counter | `proxy`, `direction` | Billable bytes per proxy |
