@@ -1677,11 +1677,15 @@ func (self *UdpSequence) startSharedSocket() bool {
 		self.cancel()
 		return true
 	}
+	// Publish the socket BEFORE registering: register makes the flow visible to
+	// the shard goroutine, which can call Close() on a terminal event. A Close
+	// that ran first would consume closeOnce with a nil socket and leak this one.
+	self.sharedSocket = socket
 	if self.socketReadPoller == nil || !self.socketReadPoller.register(self, socket) {
+		self.sharedSocket = nil
 		self.closeSocket(socket)
 		return false
 	}
-	self.sharedSocket = socket
 	return true
 }
 

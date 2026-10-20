@@ -164,10 +164,11 @@ func TestUdpSocketReadPollerDrainsFlowsInOrder(t *testing.T) {
 
 	// one flow retires while the others keep their registrations
 	flow := flows[0]
+	fd := flow.sequence.socketReadPollFd
 	poller.unregister(flow.sequence)
 	shard := &poller.shards[flow.sequence.socketReadPollShard]
 	shard.mutex.RLock()
-	_, registered := shard.byFd[int(flow.socket.(*net.UDPConn).LocalAddr().(*net.UDPAddr).Port)]
+	_, registered := shard.byFd[fd]
 	shard.mutex.RUnlock()
 	if registered {
 		t.Fatal("unregistered flow kept its descriptor registration")
