@@ -3725,3 +3725,26 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 **How to Identify in New Upstream**: `remoteDnsNext` / `localDnsNext` and the per-lookup attempt seed in `net_http_doh.go`, the 401 branch in `provider/network_refresh.go`, `ReliablePackHandoffTimeout` in `transfer.go`, and `returnQueued` / `drainReady` in `ip_udp_socket_poller.go`.
 
 **Status**: merged on `main`, unreleased.
+
+## 178. v2026.10.21: Counter Persistence, Go 1.27.3, Hub Report Removal and Installer Dependencies
+
+**Purpose**: Keep the cumulative `urnet_*_total` counters across a restart, ship the compromised-certificate block in the build, remove the code that fed the retired fleet hub, and let the Linux installer cope with a minimal host.
+
+**Files Modified**: `proxy_health.go`, `metrics_prometheus.go`, `net_http_doh.go`, `ip_security_cfaa_block.go`, `provider/hotswap.go`, `provider/loop_supervisor.go`, `provider/metrics_provider.go`, `provider/lifetime_metrics.go`, `provider/proxy_health_log.go`, `provider/control_socket.go`, `provider/control_state.go`, `internal/urnettools/cli.go`, `internal/urnettools/cobra.go`, `internal/urnettools/cli_docker.go`, `internal/urnettools/cobra_docker.go`, `internal/urnettools/control_client.go`, `internal/urnettools/restore_delegate.go`, `docker/scripts/urnet-tools.sh`, `go.mod`, `Dockerfile`, `monitoring/grafana/dashboards/urnetwork-providers.json`, the workflows, plus tests.
+
+**Files Added**: `metrics_persist.go`, `provider/metrics_persist.go`, `provider/proxy_delta.go`, `provider/node_name.go`, `provider/test_ca_test.go` (renamed from `provider/bandwidth_reporter_ca_test.go`), `.github/scripts/test_vt_scan.py`.
+
+**Files Removed**: `provider/bandwidth_reporter.go` and its tests.
+
+**Change**:
+- **Cumulative counters survive a restart**: the totals behind `/metrics` are stored in `~/.urnetwork/metrics_counters.json`, written every 45 seconds and on a clean shutdown, and added back before the listener serves. `urnet_process_start_time_seconds` is new and the shipped dashboards gate their rate panels for one window after it changes. A crash or hard kill loses at most the counts since the last write.
+- **HotSwap flushes the counters at both exits** (`provider/hotswap.go`): the old process writes its final totals at the end of its drain, and also when the candidate dies during the drain. The new process catches up at takeover and again after the drain window.
+- **`urnet_doh_failures_total` stops resetting on every scrape** (`net_http_doh.go`, `provider/metrics_provider.go`).
+- **A restored total is not read as traffic** (`provider/proxy_delta.go`): per-proxy rate and profit deltas skip a key's first sample.
+- **The build is Go 1.27.3** (`go.mod`, `Dockerfile`, the workflows) for `CVE-2026-111943`: only a binary built with it carries the block on the eight compromised eMudhra intermediates.
+- **The hub report code is removed**: `urnet-tools report`, `urnet-docker report`, the `report-url` and `report-interval` settings and `URNETWORK_REPORT_URL`, `URNETWORK_REPORT_INTERVAL` and `URNETWORK_HEARTBEAT_INTERVAL` are gone. A saved `report_url` is ignored on load.
+- **The Linux installer copes with a minimal host**: it installs a missing downloader or JSON parser through the package manager, with a `URNET_NO_AUTOINSTALL=1` opt-out, uses `yum` when `dnf` is absent, and keeps the root prompt off a non-interactive run.
+- **CI**: the VirusTotal scan covers every artifact and reports `INCOMPLETE` when one was not scanned, and release publication waits for the installer tier.
+- **CFAA blocklist refresh**: IPv4 41,425 → 41,202, IPv6 548 → 593, across two upstream syncs. Data-only.
+
+**Impact**: operators see the counters continue across a restart, a node that updates carries the certificate block, and a script that still calls a retired report command now fails. Nothing else changes provider traffic behaviour.
