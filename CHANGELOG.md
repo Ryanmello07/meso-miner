@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+---
+
+## [v2026.10.20-1076956260-meso] — 2026-10-20
+
 ### Added
 
 - **The v34 parity port brings the modern 33.1/34 connect generation into meso** ([#231](https://github.com/full-bars/meso-miner/pull/231)): a three-way merge of the fork's `release/34.0` at the shared merge-base, with the Go side taken from 3.23-fix and meso's branding, docs, workflows and scripts preserved. `transport_family.go` is family-pinned platform transports and the group that runs them: the direct identity runs a v4 pin, a v6 pin and a family-agnostic standby, and a pin dials only its own family, declares its family in the auth header or frame, never feeds the process-wide backend-degraded gate, is held rather than spun on a device with no path of its family, and idles under a contradicting Force. `transport_sessions.go` gives a session a lifetime and a close cause, `transport_authorization.go` and `transport_credential_refusal.go` park a refused credential instead of re-dialing into the same refusal, and `transport_family_stats.go` and `stream_metrics.go` add per-family and per-stream accounting. Transfer-side attempts are owned, and budget reservations are released by their owner on every path.
