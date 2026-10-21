@@ -11,7 +11,7 @@
 - **The HotSwap parent flushes the counters before it exits**: the drain path exits without running the normal shutdown block, so the promoted candidate could restore a value up to one interval old. The parent now flushes its final counters at the end of the drain, and the candidate still catches up after the drain window.
 
 ### Security
-- **The CFAA endpoint blocklist is refreshed from upstream**: 41,425 to 42,556 IPv4 entries and 548 to 543 IPv6 entries. Data only; it takes effect once a node runs this release.
+- **The CFAA endpoint blocklist is refreshed from upstream**: 41,425 to 41,202 IPv4 entries and 548 to 593 IPv6 entries. Data only; it takes effect once a node runs this release.
 - **Go 1.27.3 blocks the eight compromised eMudhra intermediates (`CVE-2026-111943`)**: `go.mod`, the Dockerfile builder and every `setup-go` pin Go 1.27.3, so binaries built from this release carry the denylist. A binary built before it may continue trusting the intermediates, although an updated operating-system trust store may already reject them.
 
 ### CI
