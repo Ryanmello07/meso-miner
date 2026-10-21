@@ -7,11 +7,15 @@
 - **The HotSwap parent flushes the counters before it exits**: the drain path exits without running the normal shutdown block, so the promoted candidate could restore a value up to one interval old. The parent now flushes its final counters at the end of the drain, and the candidate still catches up after the drain window.
 
 ### Security
+- **The CFAA endpoint blocklist is refreshed from upstream**: 41,425 to 42,556 IPv4 entries and 548 to 543 IPv6 entries. Data only; it takes effect once a node runs this release.
 - **Go 1.27.3 blocks the eight compromised eMudhra intermediates (`CVE-2026-111943`)**: `go.mod`, the Dockerfile builder and every `setup-go` pin Go 1.27.3, so binaries built from this release carry the denylist. A binary built before it may continue trusting the intermediates, although an updated operating-system trust store may already reject them.
 
 ### CI
 - **Every release artifact is scanned**: the VirusTotal job covers the full published set, gives a duplicate artifact the verdict of its source, honors an HTTP-date `Retry-After` with a capped wait, and runs its own tests in lint.
 - **The installer tier gates publication**: a job runs the real installer on four distributions and the release refuses to publish when it fails.
+
+### Removed
+- **The retired fleet hub's report commands and settings**: `urnet-tools report`, `urnet-docker report`, the `report-url` and `report-interval` settings, `URNETWORK_REPORT_URL`, `URNETWORK_REPORT_INTERVAL` and `URNETWORK_HEARTBEAT_INTERVAL` and the reporters behind them are gone. Nothing received the reports once the hub was removed. A saved `report_url` is ignored, so a node that had one still starts.
 
 ### Changed
 - **Docs rewritten for meso-miner**: a plain start-here, a Bittensor quick start, the head tier, a glossary, project-structure pages that match the real tree, and the Hub and report-URL pages removed. The changelog backfills `2026.9.9` and `2026.8.28`.
