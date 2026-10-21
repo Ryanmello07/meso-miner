@@ -266,7 +266,7 @@ These version numbers come from the 3.23-fix line this repository grew out of. m
 | 26.4 | GOMEMLIMIT added for turbo profiles. Degraded-proxy reaper runs automatically. No config change needed. |
 | 26.3 | `URNETWORK_SKIP_AUDIT` env var to skip startup system audit. choose_network, auto Tier 4 for 8 GiB+ RAM. |
 | 26.2 | Hot-reload, self-heal pool management (opt-in). |
-| 26.1 | Docker in-place updates, Go 1.26 toolchain, dl.fullbars.xyz URLs. |
+| 26.1 | Docker in-place updates, Go 1.26 toolchain, dedicated download-host URLs. |
 
 ---
 
