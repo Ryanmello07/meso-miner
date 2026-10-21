@@ -21,7 +21,7 @@ There is nothing to set up and no script to run. Use the normal update command:
 
 ```bash
 urnet-tools update                          # latest release
-urnet-tools update --tag v3.23.0-fix.31.2   # a specific release (a downgrade works the same way)
+urnet-tools update --tag v2026.10.20-1076956260-meso   # a specific release (a downgrade works the same way)
 ```
 
 `urnet-tools update` decides for itself: it hands off to the new binary when the node is eligible and falls back to a normal restart when it is not, and it prints which one it did and why. `update -n` is a dry run, but it currently prints only the target version, not whether the update will hotswap or restart.
@@ -31,7 +31,7 @@ urnet-tools update --tag v3.23.0-fix.31.2   # a specific release (a downgrade wo
 
 ### Which update hotswaps
 
-A node qualifies when the running provider and the new binary are both **v3.23.0-fix.31.0 or newer** and the provider was started by a systemd unit that is `Type=notify`. The installer writes a unit with no `Type=` line (systemd's default, `simple`), so a fresh or older node is not eligible yet. `urnet-tools update` fixes that for you:
+A node qualifies when the running provider and the new binary are both **v3.23.0-fix.31.0 or newer** (that version number is inherited from the 3.23-fix line this fork started from) and the provider was started by a systemd unit that is `Type=notify`. The installer writes a unit with no `Type=` line (systemd's default, `simple`), so a fresh or older node is not eligible yet. `urnet-tools update` fixes that for you:
 
 | Update | What `urnet-tools update` does | Downtime |
 |---|---|---|
@@ -47,7 +47,7 @@ systemctl --user show urnetwork.service -p Type,NotifyAccess   # drop --user for
 `Type=notify` and `NotifyAccess=all` means the next update will hotswap.
 
 > [!IMPORTANT]
-> Builds up to and including v3.23.0-fix.32.0 do not perform the unit migration on units with no `Type=` line, so on those the update always restarts. Once a node is on a build with the fix, the sequence above applies: the next update migrates and restarts, and the one after that hotswaps. If you would rather a node never hotswap, use `urnet-tools restart` after installing an update by hand.
+> Builds up to and including v3.23.0-fix.32.0 (inherited from the 3.23-fix line) do not perform the unit migration on units with no `Type=` line, so on those the update always restarts. Once a node is on a build with the fix, the sequence above applies: the next update migrates and restarts, and the one after that hotswaps. If you would rather a node never hotswap, use `urnet-tools restart` after installing an update by hand.
 
 ## What you will see
 
