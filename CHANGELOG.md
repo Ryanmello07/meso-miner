@@ -1,6 +1,23 @@
 ## [Unreleased]
 
+### Added
+- **Cumulative metrics counters persist across restarts**: the counters behind `/metrics` (`urnet_*_total`) are stored in `~/.urnetwork/metrics_counters.json` and restored before the listener serves, so a restart, reboot or update no longer resets a 24-hour attribution window to zero. The store is separate from `lifetime_metrics.json`; writes are atomic, every 45 seconds and on shutdown, and skipped when nothing changed. The bundled dashboard gates its rate panels for one window after a start-time change so a restored total is not read as a spike.
+
+### Fixed
+- **The HotSwap parent flushes the counters before it exits**: the drain path exits without running the normal shutdown block, so the promoted candidate could restore a value up to one interval old. The parent now flushes its final counters at the end of the drain, and the candidate still catches up after the drain window.
+
+### Security
+- **Go 1.27.3 blocks the eight compromised eMudhra intermediates (`CVE-2026-111943`)**: `go.mod`, the Dockerfile builder and every `setup-go` pin Go 1.27.3, so binaries built from this release carry the denylist. A binary built before it may continue trusting the intermediates, although an updated operating-system trust store may already reject them.
+
+### CI
+- **Every release artifact is scanned**: the VirusTotal job covers the full published set, gives a duplicate artifact the verdict of its source, honors an HTTP-date `Retry-After` with a capped wait, and runs its own tests in lint.
+- **The installer tier gates publication**: a job runs the real installer on four distributions and the release refuses to publish when it fails.
+
+### Changed
+- **Docs rewritten for meso-miner**: a plain start-here, a Bittensor quick start, the head tier, a glossary, project-structure pages that match the real tree, and the Hub and report-URL pages removed. The changelog backfills `2026.9.9` and `2026.8.28`.
+
 ---
+
 
 ## [v2026.10.20-1076956260-meso] — 2026-10-20
 
