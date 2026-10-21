@@ -407,7 +407,7 @@ jobs:
           rm -rf per-platform
 
           # Monitoring bundle: Prometheus + Grafana compose stack and dashboard
-          tar -czf urnetwork-monitoring-${VERSION}.tar.gz monitoring
+          tar -czf urnetwork-monitoring-${VERSION}.tar.gz --exclude=.gitignore monitoring
 
       - name: Set release body source
         id: body_src
