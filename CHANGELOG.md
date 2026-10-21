@@ -8,6 +8,7 @@
 - **Cumulative metrics counters persist across restarts**: the counters behind `/metrics` (`urnet_*_total`) are stored in `~/.urnetwork/metrics_counters.json` and restored before the listener serves, so a restart, reboot or update no longer resets a 24-hour attribution window to zero. The store is separate from `lifetime_metrics.json`; writes are atomic, every 45 seconds and on shutdown, and skipped when nothing changed. The bundled dashboard gates its rate panels for one window after a start-time change so a restored total is not read as a spike.
 
 ### Fixed
+- **`urnet_doh_failures_total` no longer drops to zero on every scrape**: the exported counter was fed by a read that swaps the count to zero for the health heartbeat, so a scrape saw the series fall back to zero. A cumulative counter now backs it.
 - **The HotSwap parent flushes the counters before it exits**: the drain path exits without running the normal shutdown block, so the promoted candidate could restore a value up to one interval old. The parent now flushes its final counters at the end of the drain, and the candidate still catches up after the drain window.
 
 ### Security
