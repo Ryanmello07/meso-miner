@@ -3,7 +3,7 @@
 ```
 meso-miner/
 ├── *.go                          # Core network stack (root package)
-├── go.mod / go.sum               # Module: github.com/urnetwork/connect (Go 1.27)
+├── go.mod / go.sum               # Module: github.com/urnetwork/connect (Go 1.27.3)
 ├── Dockerfile                    # Alpine multi-arch provider image
 ├── CHANGELOG.md                  # Version history with per-release notes
 ├── FORK_CHANGES.md               # Delta summary vs upstream urnetwork/connect
