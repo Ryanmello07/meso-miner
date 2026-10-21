@@ -13,6 +13,9 @@
 - **Every release artifact is scanned**: the VirusTotal job covers the full published set, gives a duplicate artifact the verdict of its source, honors an HTTP-date `Retry-After` with a capped wait, and runs its own tests in lint.
 - **The installer tier gates publication**: a job runs the real installer on four distributions and the release refuses to publish when it fails.
 
+### Removed
+- **The retired fleet hub's report commands and settings**: `urnet-tools report`, `urnet-docker report`, the `report-url` and `report-interval` settings, `URNETWORK_REPORT_URL`, `URNETWORK_REPORT_INTERVAL` and `URNETWORK_HEARTBEAT_INTERVAL` and the reporters behind them are gone. Nothing received the reports once the hub was removed. A saved `report_url` is ignored, so a node that had one still starts.
+
 ### Changed
 - **Docs rewritten for meso-miner**: a plain start-here, a Bittensor quick start, the head tier, a glossary, project-structure pages that match the real tree, and the Hub and report-URL pages removed. The changelog backfills `2026.9.9` and `2026.8.28`.
 

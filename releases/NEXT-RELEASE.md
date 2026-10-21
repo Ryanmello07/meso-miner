@@ -1,7 +1,7 @@
 # NEXT RELEASE
 
 > [!NOTE]
-> This is a patch on `v2026.10.20-1076956260-meso`. The provider's cumulative metrics counters now survive a restart, the HotSwap parent flushes them before it exits, the build moves to Go 1.27.3 for the compromised-certificate block, the VirusTotal scan covers every release artifact, and the docs are rewritten for meso-miner. There is nothing to configure and no operator action beyond the normal update and restart. Provider traffic behavior is unchanged.
+> This is a patch on `v2026.10.20-1076956260-meso`. The provider's cumulative metrics counters now survive a restart, the HotSwap parent flushes them before it exits, the build moves to Go 1.27.3 for the compromised-certificate block, the VirusTotal scan covers every release artifact, the docs are rewritten for meso-miner, and the commands and settings for the retired fleet hub are removed. There is nothing to configure and no operator action beyond the normal update and restart. Provider traffic behavior is unchanged.
 
 ## The metrics counters survive a restart
 
@@ -18,6 +18,10 @@ The VirusTotal scan now covers every artifact a release publishes, not a subset,
 ## Installers
 
 The Linux installer now installs missing download and JSON dependencies, uses `yum` when `dnf` is absent, keeps the root prompt off a non-interactive run, and honors the autoinstall opt-out. A CI job runs the real installer on four distributions, and the release gate refuses to publish when the installer tier fails.
+
+## Report commands removed
+
+The fleet hub that received bandwidth reports and heartbeats is gone, so `urnet-tools report`, `urnet-docker report`, the `report-url` and `report-interval` settings, and `URNETWORK_REPORT_URL`, `URNETWORK_REPORT_INTERVAL` and `URNETWORK_HEARTBEAT_INTERVAL` are removed, along with the reporters that sent the data. A script or cron job that still calls them now fails or has the variable ignored; remove the call. A `report_url` already saved in `provider_state.json` or `pending_overrides.json` is ignored, so nodes that had one still start. Use `urnet-tools metrics on` and the monitoring bundle for fleet visibility.
 
 ## Docs
 
