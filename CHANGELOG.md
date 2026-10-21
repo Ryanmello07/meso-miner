@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+---
+
+## [v2026.10.21-1077734740-meso] — 2026-10-21
+
 ### Added
 - **Cumulative metrics counters persist across restarts**: the counters behind `/metrics` (`urnet_*_total`) are stored in `~/.urnetwork/metrics_counters.json` and restored before the listener serves, so a restart, reboot or update no longer resets a 24-hour attribution window to zero. The store is separate from `lifetime_metrics.json`; writes are atomic, every 45 seconds and on shutdown, and skipped when nothing changed. The bundled dashboard gates its rate panels for one window after a start-time change so a restored total is not read as a spike.
 
@@ -21,7 +25,6 @@
 - **Docs rewritten for meso-miner**: a plain start-here, a Bittensor quick start, the head tier, a glossary, project-structure pages that match the real tree, and the Hub and report-URL pages removed. The changelog backfills `2026.9.9` and `2026.8.28`.
 
 ---
-
 
 ## [v2026.10.20-1076956260-meso] — 2026-10-20
 
