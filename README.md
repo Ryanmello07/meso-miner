@@ -38,9 +38,19 @@ Not sure which guide to read? Pick your level:
 - **Many providers per machine.** One provider per OS user, with `urnet-tools providers` to list them.
 - **Move a node.** `urnet-tools session save` and `session load` carry your identity and proxies to another machine.
 - **Runs almost anywhere.** Linux (systemd and Alpine/OpenRC), macOS, Windows, FreeBSD and Docker.
-- **Bittensor subnet 25 tools.** `urnet-tools sn-status` and `provider claim`. See [Bittensor Operations](docs/Bittensor-Operations.md).
+- **Bittensor subnet 25 tools.** Sign one wallet message to get paid, then check with `provider wallet status`. See the [Bittensor Quick Start](docs/Bittensor-Quick-Start.md).
 
 The complete list of differences from upstream is in [FORK_CHANGES.md](FORK_CHANGES.md).
+
+## ₿ Bittensor Subnet 25
+
+Most operators need to do one thing: sign a single wallet message, once, from their own computer. Your nodes do not change. Everything else here (hotkeys, claim daemons, fleets, multiple operators) is optional or advanced, and skipping it costs you nothing. Nothing here runs unless you start it.
+
+- [Bittensor Quick Start](docs/Bittensor-Quick-Start.md): start here. Check where you stand, sign once, and see which commands you can ignore.
+- [Bittensor operations](docs/Bittensor-Operations.md): the overview, from the two tiers and wallet consent through claims and the FAQ.
+- [Bittensor head tier](docs/Bittensor-Head-Tier.md): the optional, advanced tier. Most operators should skip it.
+- [Bittensor glossary](docs/Bittensor-Glossary.md): plain meanings of the words.
+- [Bittensor claim daemons](docs/Bittensor-Claim-Daemons.md), [fleet](docs/Bittensor-Fleet.md), [hotkey delegation](docs/Bittensor-Hotkey-Delegation.md) and [multi-operator](docs/Multi-Operator.md): optional or advanced.
 
 ---
 
@@ -48,6 +58,7 @@ The complete list of differences from upstream is in [FORK_CHANGES.md](FORK_CHAN
 
 | If you want to... | Go here |
 | :--- | :--- |
+| **Get paid on Bittensor SN25 (do I need to do anything?)** | [Bittensor Quick Start](docs/Bittensor-Quick-Start.md) |
 | Install on a Linux host as a user-level service | [Installation Guide](docs/Installation.md) |
 | Run one Docker container | [Docker Deployment](docs/Docker-Deployment.md) |
 | Run multiple containers on one host | [Multi-Container Scaling](docs/Multi-Container-Scaling.md) |
@@ -296,7 +307,8 @@ dashboard. See [Monitoring](docs/Monitoring.md).
 - [High-Volume Performance Tuning](docs/High-Volume-Performance-Tuning.md)
 - [Monitoring](docs/Monitoring.md)
 - [Troubleshooting](docs/Troubleshooting.md)
-- [Bittensor Operations](docs/Bittensor-Operations.md)
+- [Bittensor Quick Start](docs/Bittensor-Quick-Start.md) · [Bittensor Operations](docs/Bittensor-Operations.md) · [Head Tier](docs/Bittensor-Head-Tier.md) · [Glossary](docs/Bittensor-Glossary.md)
+- [Bittensor Claim Daemons](docs/Bittensor-Claim-Daemons.md) · [Bittensor Fleet](docs/Bittensor-Fleet.md) · [Bittensor Hotkey Delegation](docs/Bittensor-Hotkey-Delegation.md) · [Multi-Operator](docs/Multi-Operator.md)
 - [Project Structure](docs/Project-Structure.md)
 - [Log Message Reference](LOG_REFERENCE.md)
 - [Go urnet-tools Reference](docs/urnet-tools-go.md)
