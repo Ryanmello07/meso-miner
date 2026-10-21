@@ -95,7 +95,7 @@ urnet-tools session load backup.urnsession
 urnetwork auth
 urnet-tools proxy add ~/proxies.txt
 urnet-tools proxy refresh
-urnet-tools proxy summary
+urnet-tools summary
 ```
 
 > [!NOTE]
@@ -191,7 +191,7 @@ urnet-tools start
 # Manage proxies
 urnet-tools proxy add "$env:USERPROFILE\Downloads\proxies.txt"
 urnet-tools proxy refresh
-urnet-tools proxy summary
+urnet-tools summary
 
 # View logs
 urnet-tools logs

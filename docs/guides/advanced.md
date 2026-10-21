@@ -8,7 +8,7 @@ This guide covers multi-server fleet management, performance tuning, fleet monit
 > This guide is Linux/Docker-focused because some commands are Linux-specific for hardware reasons:
 > - **`optimize`** is Linux-kernel-specific (sysctl tuning, conntrack kernel module, ZRAM, distro package installs) and has no realistic macOS/Windows equivalent.
 > - **`ramlogs`** depends on `/dev/shm` (Linux's tmpfs convention). No built-in equivalent on macOS or Windows today.
-> - **`turbo`/`eco`** are *not* kernel-dependent. The Go `urnet-tools` binary supports `turbo` and `eco` on all three platforms as of v3.23.0-fix.27.0. On Linux/macOS they write a persistent environment override; on Windows they set the equivalent registry/env value. You can also set `URNETWORK_PROFILE` directly in any environment.
+> - **`turbo`/`eco`** are *not* kernel-dependent. The Go `urnet-tools` binary supports `turbo` and `eco` on all three platforms. On Linux/macOS they write a persistent environment override; on Windows they set the equivalent registry/env value. You can also set `URNETWORK_PROFILE` directly in any environment.
 >
 > `self-heal`, `proxy *`, `status`, `logs`, and `summary` work identically on all three platforms.
 
@@ -142,7 +142,7 @@ The provider diffs against the current running set and applies only the changes 
 
 ### Profiles and memory limits
 
-Since v3.23.0-fix.26.4, all profiles have a GOMEMLIMIT safety ceiling except the default (unset) profile. Turbo profiles (v4/v8) set 80% RAM. Eco sets 75% RAM. Lowmem sets 85% RAM.
+All profiles have a GOMEMLIMIT safety ceiling except the default (unset) profile. Turbo profiles (v4/v8) set 80% RAM. Eco sets 75% RAM. Lowmem sets 85% RAM.
 
 This prevents the unbounded heap growth that could occur during sustained outages with thousands of degraded proxies.
 
@@ -248,22 +248,24 @@ tail -f /dev/shm/urnetwork.log
 
 ```sh
 # Check a specific node
-ssh user@<node-ip> "urnet-tools proxy summary"
+ssh user@<node-ip> "urnet-tools summary"
 ```
 
 ---
 
-## 🔁 Release upgrade notes
+## 🔁 Release upgrade notes (inherited history)
+
+These version numbers come from the 3.23-fix line this repository grew out of. meso-miner releases are tagged `v<YYYY.M.D>-<unix>-meso`; read [CHANGELOG.md](../../CHANGELOG.md) for the current ones.
 
 | Version | Impact |
 |---------|--------|
 | 30.0 | Cross-platform parity (Windows schtasks, macOS launchd), urnet-docker Design 2 host-side proxy ops. |
-| 29.0 | Go urnet-tools provider discovery, report URL runtime config, hot-restart subcommands. |
+| 29.0 | Go urnet-tools provider discovery, hot-restart subcommands. |
 | 28.0 | Standalone `urnet-docker` CLI for host-side Docker container discovery and delegation. |
 | 27.0 | Initial Go rewrite of urnet-tools suite with targeting refusal safety model. |
 | 26.4 | GOMEMLIMIT added for turbo profiles. Degraded-proxy reaper runs automatically. No config change needed. |
-| 26.3 | `URNETWORK_SKIP_AUDIT` env var to skip startup system audit. Hub PAKE auth, choose_network, auto Tier 4 for 8 GiB+ RAM. |
-| 26.2 | Hot-reload for hub commands, self-heal pool management (opt-in). |
+| 26.3 | `URNETWORK_SKIP_AUDIT` env var to skip startup system audit. choose_network, auto Tier 4 for 8 GiB+ RAM. |
+| 26.2 | Hot-reload, self-heal pool management (opt-in). |
 | 26.1 | Docker in-place updates, Go 1.26 toolchain, dl.fullbars.xyz URLs. |
 
 ---
