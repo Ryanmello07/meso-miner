@@ -7,6 +7,10 @@
 
 The cumulative counters behind `/metrics` (`urnet_*_total`) used to start at zero every time the provider started, so a 24-hour attribution window silently undercounted after every restart, reboot or update. They are now stored in `~/.urnetwork/metrics_counters.json` and added back before the metrics listener serves, so a restart shows up as a step in `urnet_process_start_time_seconds`, not as a drop to zero. The file is a separate store from `lifetime_metrics.json`, which keeps its delta-based all-time accounting. Writes are atomic (temp, fsync, rename, directory fsync), happen every 45 seconds and on shutdown, and are skipped entirely when nothing changed, so an idle node does not rewrite the file. A HotSwap candidate restores the stored totals but does not write while the parent serves; the parent flushes its final counters at the end of its drain, and the candidate catches up on takeover and again after the drain window. The bundled Grafana dashboard gates the rate panels for one window after a node's start time changes, so a restored total does not read as a spike.
 
+## CFAA blocklist refresh
+
+The compiled CFAA endpoint blocklist is refreshed from upstream: 41,425 to 42,556 IPv4 entries and 548 to 543 IPv6 entries. Data only, no code change; it takes effect once a node runs this release.
+
 ## Go 1.27.3 and CVE-2026-111943
 
 Go 1.27.3 and 1.26.10 block eight compromised eMudhra intermediate CA keys at certificate verification (`CVE-2026-111943`). `go.mod`, the Dockerfile builder and every `setup-go` now pin Go 1.27.3, so binaries built from this release carry the denylist. A binary built before it may continue trusting the intermediates, although an updated operating-system trust store may already reject them. The installed fleet only receives the block when it runs a binary rebuilt from this release, so the update is the delivery mechanism, not the version bump by itself.
