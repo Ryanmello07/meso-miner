@@ -24,7 +24,6 @@ Everything the provider binary does that is not the shared network stack.
 - Transport choices: `family_transport.go` (dual-stack for the direct identity), `h3_*.go` (HTTP/3), `direct.go`.
 - Bittensor and claim commands: `sn*.go`, `claim_*.go`, `bt_*.go`, `fleet*.go`, `hotkey_wallet.go`.
 - Logging and diagnostics: `tlog.go`, `shmlog_*.go`, `important_log.go`, `audit_ring.go`, `node_snapshot*.go`, `metrics_*.go` (Prometheus), `incident_capture.go`.
-- `bandwidth_reporter.go` is a leftover from the removed hub. It has no receiver and does nothing useful.
 
 ## Operator tool (`cmd/urnet-tools/`, `cmd/urnet-docker/`, `internal/`)
 
@@ -81,4 +80,4 @@ Test files sit beside the code they test (`*_test.go`).
 
 ## What was removed
 
-The Hub (fleet dashboard server) and its commands were removed in v31.3. Fleet visibility now comes from Prometheus `/metrics` (`urnet-tools metrics on`) with the monitoring bundle and Grafana.
+The Hub (fleet dashboard server) and its commands were removed in v32.0. Fleet visibility now comes from Prometheus `/metrics` (`urnet-tools metrics on`) with the monitoring bundle and Grafana.

@@ -28,7 +28,7 @@ The user needs an auth code from [app.ur.network](https://app.ur.network), [ur.i
 
 ```bash
 urnetwork auth                  # prompts for the code
-urnet-tools auth <auth-code>    # same, non-interactive
+urnet-tools auth                # same; paste the code at the prompt, never on the command line
 ```
 
 Docker deployments can use `URNETWORK_AUTH_CODE` or an email and password instead. See [Docker Deployment](docs/Docker-Deployment.md).
@@ -74,7 +74,7 @@ urnet-tools status | start | stop | restart
 urnet-tools logs [N]               # last N lines, then follow
 urnet-tools top                    # live full-screen view
 urnet-tools update                 # upgrade the provider
-urnet-tools hotswap                # swap to a new binary with no gap
+urnet-tools hotswap                # swap to a new binary without dropping the provider process
 urnet-tools self-update            # update urnet-tools itself
 urnet-tools uninstall
 

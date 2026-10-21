@@ -30,7 +30,7 @@ Not sure which guide to read? Pick your level:
 ## ✨ What meso-miner adds
 
 - **Proxy handling made easy.** Load proxies from a file or a live URL, add or remove them while the provider runs, and see which ones are healthy (`urnet-tools proxy health`) with an A to F grade.
-- **Updates without a gap.** `urnet-tools update` hands over to the new version with automatic rollback. See [HotSwap](docs/HotSwap.md).
+- **Updates without a process gap.** On an eligible node `urnet-tools update` hands over to the new version with automatic rollback, so there is no window without a provider process. Proxy connections rebuild over about 30 seconds after the handover, and the update falls back to a restart when HotSwap cannot run. See [HotSwap](docs/HotSwap.md).
 - **Change settings live.** `urnet-tools set` changes tuning without editing service files or restarting.
 - **Built-in traffic numbers.** `urnet-tools usage` shows billable traffic against control traffic, with history graphs.
 - **Monitoring.** Turn on Prometheus metrics with `urnet-tools metrics on` and use the ready-made Grafana bundle. See [Monitoring](docs/Monitoring.md).
@@ -44,7 +44,7 @@ The complete list of differences from upstream is in [FORK_CHANGES.md](FORK_CHAN
 
 ## ₿ Bittensor Subnet 25
 
-Most operators need to do one thing: sign a single wallet message, once, from their own computer. Your nodes do not change. Everything else here (hotkeys, claim daemons, fleets, multiple operators) is optional or advanced, and skipping it costs you nothing. Nothing here runs unless you start it.
+Most operators need to do one thing: sign a single wallet message, once, from their own computer. Your nodes do not change. Everything else here (hotkeys, claim daemons, fleets, multiple operators) is optional or advanced. Nothing here runs unless you start it, though leaving early settlement-v1 claims unclaimed can still cost you them.
 
 - [Bittensor Quick Start](docs/Bittensor-Quick-Start.md): start here. Check where you stand, sign once, and see which commands you can ignore.
 - [Bittensor operations](docs/Bittensor-Operations.md): the overview, from the two tiers and wallet consent through claims and the FAQ.
@@ -280,7 +280,7 @@ The `monitoring/` bundle runs Prometheus and Grafana with a ready-made fleet
 dashboard. See [Monitoring](docs/Monitoring.md).
 
 > [!NOTE]
-> **No fleet dashboard in the app.** The old hub dashboard was removed in v31.3. To watch many machines at once, turn on Prometheus metrics (`urnet-tools metrics on`) and use the [Monitoring bundle](docs/Monitoring.md) or your own Grafana.
+> **No fleet dashboard in the app.** The old hub dashboard was removed in v32.0. To watch many machines at once, turn on Prometheus metrics (`urnet-tools metrics on`) and use the [Monitoring bundle](docs/Monitoring.md) or your own Grafana.
 
 ---
 
