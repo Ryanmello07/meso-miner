@@ -6,7 +6,7 @@
 ## The short version
 
 - URnetwork is **Subnet 25 (SN25)** on Bittensor. Your nodes can earn the SN25 token (alpha, branded $UR) on top of normal URnetwork earnings.
-- You get paid by signing **one** consent with your Bittensor wallet (your coldkey). It says "pay every node on my URnetwork account to this coldkey". One signature covers all your nodes, now and later.
+- You get paid by signing **one** consent with your Bittensor wallet (your coldkey). It says "pay every node on my URnetwork account to this coldkey". One signature covers every node on your URnetwork account, now and later.
 - Check where you stand with `provider wallet status`. Words you do not know are in the [Glossary](Bittensor-Glossary.md).
 
 ## Pool or head: which one am I?
@@ -39,7 +39,7 @@ Your pool earnings are credited to your coldkey. A **claim** is a small blockcha
 The Quick Start has the steps. In short:
 
 ```bash
-provider auth <auth_code>              # on your own computer
+provider auth                          # on your own computer; paste the code at the prompt
 provider wallet sign <coldkey_ss58>    # opens a local page for your wallet extension
 provider wallet status                 # confirm
 ```
@@ -47,7 +47,7 @@ provider wallet status                 # confirm
 Options:
 
 - `provider wallet sign [<coldkey_ss58>] [--port=<port>] [--no-open]`. Leave the address out to choose the account on the page.
-- No browser: `provider wallet challenge <coldkey_ss58>` prints the exact text (it signs nothing). Sign it elsewhere, then run `provider wallet set <coldkey_ss58> --message=<text> --signature=<hex>`.
+- No browser: `provider wallet challenge <coldkey_ss58>` prints the exact text (it signs nothing). Sign it elsewhere, then run `provider wallet set <coldkey_ss58> --message="<text>" --signature=<hex>`, quoting the message as one shell argument exactly as `challenge` printed it: an unquoted message can split on spaces or be altered by the shell, and a valid signature then fails verification.
 - `provider wallet set <coldkey_ss58> --coldkey_seed_file=<path>` signs from a seed file. Use it only on your own computer, never on a node. `urnet-tools wallet sign` and `wallet set --coldkey_seed_file` refuse on a node unless you pass `--i-am-on-my-own-workstation`.
 - `--wallet-from-epoch=<e> --wallet-through-epoch=<e>` pick an exact window. A window that would leave epochs unpaid is refused unless you set `URNETWORK_WALLET_ALLOW_ODD_INTERVAL=1`. The window spans at most 65,536 epochs. A newer consent must start at a later epoch than the one it replaces.
 - A consent for one node only (a per-provider consent) wins over the network consent for that node, and it is listed per client in `wallet status`.
@@ -126,7 +126,7 @@ Not unless you do the head tier or sign in with a hotkey.
 No. It lasts 65,536 epochs. Sign again only to change the wallet.
 
 ### What happens to claims while a claim daemon is stopped?
-Nothing is lost. Signed entries are saved and finished after a restart. See [Claim Daemons](Bittensor-Claim-Daemons.md).
+Signed transactions are saved and reconciled after a restart. Claims that were never signed are not queued, and settlement-v1 claims could expire (see the settlement notes above), so a daemon that stays stopped can miss claims in that window. Settlement v2 credit does not expire. See [Claim Daemons](Bittensor-Claim-Daemons.md).
 
 ### Is the head tier worth it?
 For most operators, no. See [Head Tier](Bittensor-Head-Tier.md) for what it takes and the current blockers.

@@ -6,8 +6,8 @@ This page is for regular operators. You run URnetwork nodes and you may have hea
 
 - Your nodes keep running exactly as they are. **Do not change anything on your nodes.**
 - To get paid on SN25 you sign **one message** with your Bittensor wallet (your "coldkey"). You do it **once**, from **your own computer**. Never from a node.
-- That one signature covers all your nodes, now and later. You do not renew it.
-- Everything else in the Bittensor docs (hotkeys, claim daemons, fleets, multi-operator) is optional or advanced. Skipping it costs you nothing.
+- That one signature covers every node on your URnetwork account, now and later. You do not renew it. A hotkey that auto-registers creates a separate account, which this consent does not cover.
+- Everything else in the Bittensor docs (hotkeys, claim daemons, fleets, multi-operator) is optional or advanced.
 
 ## Step 1: Check where you stand
 
