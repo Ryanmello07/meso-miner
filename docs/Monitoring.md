@@ -167,41 +167,46 @@ The test file covers the two enabled rules. `prometheus.yml` lists `urnetwork.ym
 
 **Panels are empty right after starting.** Rates need two scrapes, so allow about a minute.
 
+Cumulative counters survive a provider restart. Traffic, transport, contract, error, DoH, control-command and loop-restart totals are written to `~/.urnetwork/metrics_counters.json` every 45 seconds and on a clean shutdown, and a starting provider adds the stored totals before it serves its first scrape. A restart (upgrade, reboot, crash) therefore continues every series instead of resetting it to zero, and a 24-hour delta computed from `/metrics` alone stays correct across one. A clean shutdown flushes the final totals; a crash can lose the increments since the last successful flush, which bounds one write interval of accuracy rather than resetting the series. A HotSwap candidate restores the store but does not write to it while the parent is still serving; on takeover it catches up to the parent's last write and becomes the writer.
+
+Because a series continues instead of resetting, `rate()` or `increase()` computed across a restart would read the restored total as one step of traffic. The shipped dashboards therefore drop a node's series for the five minutes after `urnet_process_start_time_seconds` changes, so the restart is not shown as a spike; hand-written queries that rate these counters should do the same. Gauges are process-scoped and are not restored. `urnet_process_start_time_seconds` marks when the current process started, and `urnet_uptime_seconds` remains the current process's uptime.
+
 ## Metrics reference
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `urnet_info` | gauge | `version` | Always 1; carries the provider version |
 | `urnet_uptime_seconds` | gauge | | Provider uptime |
-| `urnet_billable_bytes_total` | counter | `direction` | Billable bytes, all proxies |
-| `urnet_bytes_total` | counter | `direction` | All bytes, all proxies |
+| `urnet_process_start_time_seconds` | gauge | | Unix time the current provider process started |
+| `urnet_billable_bytes_total` | counter | `direction` | Billable bytes, all proxies, persisted across restarts |
+| `urnet_bytes_total` | counter | `direction` | All bytes, all proxies, persisted across restarts |
 | `urnet_clients_active` | gauge | | Active clients, all proxies |
 | `urnet_connections_active` | gauge | | Active connections |
-| `urnet_transport_frames_total` | counter | `mode`, `dir` | Payload frames carried by each platform transport mode (`h1`, `h3`, `h3dns`, `h3dnspump`) per direction. Keepalives and speed or latency echoes are excluded |
-| `urnet_transport_payload_bytes_total` | counter | `mode`, `dir` | Payload bytes carried by each platform transport mode, before framing |
-| `urnet_transport_direct_h1_frames_total` | counter | `dir` | Payload frames carried by H1 for the direct identity only. This is the fair comparison for H3, which runs for that identity alone; `urnet_transport_frames_total{mode="h1"}` is every proxy identity together |
-| `urnet_transport_direct_h1_payload_bytes_total` | counter | `dir` | Payload bytes carried by H1 for the direct identity only |
+| `urnet_transport_frames_total` | counter | `mode`, `dir` | Payload frames carried by each platform transport mode (`h1`, `h3`, `h3dns`, `h3dnspump`) per direction. Keepalives and speed or latency echoes are excluded, persisted across restarts |
+| `urnet_transport_payload_bytes_total` | counter | `mode`, `dir` | Payload bytes carried by each platform transport mode, before framing, persisted across restarts |
+| `urnet_transport_direct_h1_frames_total` | counter | `dir` | Payload frames carried by H1 for the direct identity only. This is the fair comparison for H3, which runs for that identity alone; `urnet_transport_frames_total{mode="h1"}` is every proxy identity together, persisted across restarts |
+| `urnet_transport_direct_h1_payload_bytes_total` | counter | `dir` | Payload bytes carried by H1 for the direct identity only, persisted across restarts |
 | `urnet_h3_up` | gauge | | H3 connections up now |
-| `urnet_h3_connect_attempts_total` | counter | | H3 connect attempts |
-| `urnet_h3_connects_total` | counter | | H3 connections that authenticated |
-| `urnet_h3_connect_failures_total` | counter | | H3 connect attempts that failed |
-| `urnet_h3_drops_total` | counter | | H3 connections that ended while still wanted. Switching `h3` or `h3_datagram` is not one |
-| `urnet_h3_datagram_offered_total` | counter | | H3 connections that offered QUIC DATAGRAM |
-| `urnet_h3_datagram_accepted_total` | counter | | H3 connections where the server accepted DATAGRAM. Offered without accepted means an old server |
-| `urnet_h3_datagram_rx_messages_total` | counter | | Messages received over DATAGRAM |
-| `urnet_h3_datagram_rx_bytes_total` | counter | | Bytes of messages received over DATAGRAM |
-| `urnet_h3_datagram_rx_dropped_total` | counter | | Received DATAGRAM messages dropped because the receive route was full |
-| `urnet_h3_datagram_rx_rejected_total` | counter | `reason` | DATAGRAMs refused by the datagram layer: `malformed`, `duplicate`, `checksum` |
-| `urnet_h3_datagram_tx_messages_total` | counter | | Messages sent over DATAGRAM |
-| `urnet_h3_datagram_tx_bytes_total` | counter | | Bytes of messages sent over DATAGRAM |
-| `urnet_h3_datagram_tx_stream_messages_total` | counter | | Messages sent on the reliable stream of a connection that negotiated DATAGRAM, so the lane split is tx_messages against this |
-| `urnet_h3_datagram_tx_errors_total` | counter | | DATAGRAM send errors |
-| `urnet_h3_datagram_blackholes_total` | counter | | Connections whose datagram send was switched off because datagrams went out and none came back |
+| `urnet_h3_connect_attempts_total` | counter | | H3 connect attempts, persisted across restarts |
+| `urnet_h3_connects_total` | counter | | H3 connections that authenticated, persisted across restarts |
+| `urnet_h3_connect_failures_total` | counter | | H3 connect attempts that failed, persisted across restarts |
+| `urnet_h3_drops_total` | counter | | H3 connections that ended while still wanted. Switching `h3` or `h3_datagram` is not one, persisted across restarts |
+| `urnet_h3_datagram_offered_total` | counter | | H3 connections that offered QUIC DATAGRAM, persisted across restarts |
+| `urnet_h3_datagram_accepted_total` | counter | | H3 connections where the server accepted DATAGRAM. Offered without accepted means an old server, persisted across restarts |
+| `urnet_h3_datagram_rx_messages_total` | counter | | Messages received over DATAGRAM, persisted across restarts |
+| `urnet_h3_datagram_rx_bytes_total` | counter | | Bytes of messages received over DATAGRAM, persisted across restarts |
+| `urnet_h3_datagram_rx_dropped_total` | counter | | Received DATAGRAM messages dropped because the receive route was full, persisted across restarts |
+| `urnet_h3_datagram_rx_rejected_total` | counter | `reason` | DATAGRAMs refused by the datagram layer: `malformed`, `duplicate`, `checksum`, persisted across restarts |
+| `urnet_h3_datagram_tx_messages_total` | counter | | Messages sent over DATAGRAM, persisted across restarts |
+| `urnet_h3_datagram_tx_bytes_total` | counter | | Bytes of messages sent over DATAGRAM, persisted across restarts |
+| `urnet_h3_datagram_tx_stream_messages_total` | counter | | Messages sent on the reliable stream of a connection that negotiated DATAGRAM, so the lane split is tx_messages against this, persisted across restarts |
+| `urnet_h3_datagram_tx_errors_total` | counter | | DATAGRAM send errors, persisted across restarts |
+| `urnet_h3_datagram_blackholes_total` | counter | | Connections whose datagram send was switched off because datagrams went out and none came back, persisted across restarts |
 | `urnet_transport_pt_up` | gauge | `mode` | Packet-translation (`h3dns`, `h3dnspump`) transport connections up now |
-| `urnet_transport_pt_connect_attempts_total` | counter | `mode` | Packet-translation transport connect attempts |
-| `urnet_transport_pt_connects_total` | counter | `mode` | Packet-translation transport connections that authenticated |
-| `urnet_transport_pt_connect_failures_total` | counter | `mode` | Packet-translation transport connect attempts that failed |
-| `urnet_transport_pt_drops_total` | counter | `mode` | Packet-translation transport connections that ended while still wanted |
+| `urnet_transport_pt_connect_attempts_total` | counter | `mode` | Packet-translation transport connect attempts, persisted across restarts |
+| `urnet_transport_pt_connects_total` | counter | `mode` | Packet-translation transport connections that authenticated, persisted across restarts |
+| `urnet_transport_pt_connect_failures_total` | counter | `mode` | Packet-translation transport connect attempts that failed, persisted across restarts |
+| `urnet_transport_pt_drops_total` | counter | `mode` | Packet-translation transport connections that ended while still wanted, persisted across restarts |
 | `urnet_dualstack_mode` | gauge | `mode`, `reason` | Direct-identity platform transport mode, value always 1: `group` (v4 pin, v6 pin and standby) or `legacy` (single), with the decision reason |
 | `urnet_dualstack_transport_state` | gauge | `transport`, `state` | Per-transport state: 1 for the state the transport is in (`ipv4`, `ipv6`, `standby`) |
 | `urnet_dualstack_connect_attempts_total` | counter | `family`, `mode` | Platform connect attempts of the native identity's transports |
@@ -237,8 +242,8 @@ The test file covers the two enabled rules. `prometheus.yml` lists `urnetwork.ym
 | `urnet_h1plus_read_errors_total` | counter | | Read errors on H1+ connections |
 | `urnet_h1plus_write_errors_total` | counter | | Write errors on H1+ connections |
 | `urnet_proxy_pool_size` | gauge | `status` | Proxies by status: up, connecting, degraded, dead |
-| `urnet_proxy_bytes_total` | counter | `proxy`, `direction` | Bytes per proxy |
-| `urnet_proxy_billable_bytes_total` | counter | `proxy`, `direction` | Billable bytes per proxy |
+| `urnet_proxy_bytes_total` | counter | `proxy`, `direction` | Bytes per proxy, persisted across restarts |
+| `urnet_proxy_billable_bytes_total` | counter | `proxy`, `direction` | Billable bytes per proxy, persisted across restarts |
 | `urnet_proxy_clients` | gauge | `proxy` | Active clients per proxy |
 | `urnet_proxy_session_age_seconds` | gauge | `proxy` | Length of the current client presence window per proxy |
 | `urnet_proxies_known` | gauge | | Proxies in the provider's proxy state |
@@ -249,9 +254,9 @@ The test file covers the two enabled rules. `prometheus.yml` lists `urnetwork.ym
 | `urnet_proxy_auth_failures` | gauge | | Auth failures summed over current proxies |
 | `urnet_url_proxy_grades` | gauge | `tier` | URL-sourced proxies by grade |
 | `urnet_url_proxy_ungraded` | gauge | | URL-sourced proxies not yet graded |
-| `urnet_contracts_total` | counter | `result` | Contract outcomes since start |
-| `urnet_errors_total` | counter | `category` | Errors since start |
-| `urnet_doh_failures_total` | counter | | DNS-over-HTTPS failures |
+| `urnet_contracts_total` | counter | `result` | Contract outcomes since start, persisted across restarts |
+| `urnet_errors_total` | counter | `category` | Errors since start, persisted across restarts |
+| `urnet_doh_failures_total` | counter | | DNS-over-HTTPS failures, persisted across restarts |
 | `urnet_sessions_pqe` | gauge | | Active post-quantum sessions |
 | `urnet_sessions_classical` | gauge | | Active classical sessions |
 | `urnet_sessions_opened_total` | counter | `encryption` | Sessions opened, lifetime |
@@ -262,7 +267,7 @@ The test file covers the two enabled rules. `prometheus.yml` lists `urnetwork.ym
 | `urnet_lifetime_billable_bytes_total` | counter | | Billable bytes, persisted across restarts |
 | `urnet_lifetime_errors_total` | counter | `category` | Errors, persisted across restarts |
 | `urnet_hotswap_outcomes_total` | counter | `reason` | HotSwap attempt outcomes |
-| `urnet_control_commands_total` | counter | `cmd` | Control socket commands |
+| `urnet_control_commands_total` | counter | `cmd` | Control socket commands, persisted across restarts |
 | `urnet_startup_clean_shutdown` | gauge | | 1 if the previous run shut down cleanly |
 | `urnet_startup_restarted` | gauge | | 1 if the previous run did not shut down cleanly |
 | `urnet_startup_upgraded` | gauge | | 1 if the version changed since the previous run |
@@ -284,5 +289,5 @@ The test file covers the two enabled rules. `prometheus.yml` lists `urnetwork.ym
 | `urnet_tcp_orphans` | gauge | | Orphaned TCP sockets (Linux) |
 | `urnet_goroutines` | gauge | | Goroutines |
 | `urnet_pool_latency_ms` | gauge | | Message pool average latency |
-| `urnet_loop_restarts_total` | counter | `loop` | Times a supervised background loop ended unexpectedly and was restarted |
+| `urnet_loop_restarts_total` | counter | `loop` | Times a supervised background loop ended unexpectedly and was restarted, persisted across restarts |
 | `urnet_loop_up` | gauge | `loop` | 1 while a supervised loop is running, 0 while it is stopped or backing off |

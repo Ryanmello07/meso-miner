@@ -1,5 +1,33 @@
 ## [Unreleased]
 
+---
+
+## [v2026.10.21-1077734740-meso] — 2026-10-21
+
+### Added
+- **Cumulative metrics counters persist across restarts**: the counters behind `/metrics` (`urnet_*_total`) are stored in `~/.urnetwork/metrics_counters.json` and restored before the listener serves, so a restart, reboot or update no longer resets a 24-hour attribution window to zero. The store is separate from `lifetime_metrics.json`; writes are atomic, every 45 seconds and on shutdown, and skipped when nothing changed. The bundled dashboard gates its rate panels for one window after a start-time change so a restored total is not read as a spike.
+
+### Fixed
+- **The HotSwap parent flushes the counters before it exits**: the drain path exits without running the normal shutdown block, so the promoted candidate could restore a value up to one interval old. The parent now flushes its final counters at the end of the drain, and the candidate still catches up after the drain window.
+
+### Security
+- **The CFAA endpoint blocklist is refreshed from upstream**: 41,425 to 42,556 IPv4 entries and 548 to 543 IPv6 entries. Data only; it takes effect once a node runs this release.
+- **Go 1.27.3 blocks the eight compromised eMudhra intermediates (`CVE-2026-111943`)**: `go.mod`, the Dockerfile builder and every `setup-go` pin Go 1.27.3, so binaries built from this release carry the denylist. A binary built before it may continue trusting the intermediates, although an updated operating-system trust store may already reject them.
+
+### CI
+- **Every release artifact is scanned**: the VirusTotal job covers the full published set, gives a duplicate artifact the verdict of its source, honors an HTTP-date `Retry-After` with a capped wait, and runs its own tests in lint.
+- **The installer tier gates publication**: a job runs the real installer on four distributions and the release refuses to publish when it fails.
+
+### Removed
+- **The retired fleet hub's report commands and settings**: `urnet-tools report`, `urnet-docker report`, the `report-url` and `report-interval` settings, `URNETWORK_REPORT_URL`, `URNETWORK_REPORT_INTERVAL` and `URNETWORK_HEARTBEAT_INTERVAL` and the reporters behind them are gone. Nothing received the reports once the hub was removed. A saved `report_url` is ignored, so a node that had one still starts.
+
+### Changed
+- **Docs rewritten for meso-miner**: a plain start-here, a Bittensor quick start, the head tier, a glossary, project-structure pages that match the real tree, and the Hub and report-URL pages removed. The changelog backfills `2026.9.9` and `2026.8.28`.
+
+---
+
+## [v2026.10.20-1076956260-meso] — 2026-10-20
+
 ### Added
 
 - **The v34 parity port brings the modern 33.1/34 connect generation into meso** ([#231](https://github.com/full-bars/meso-miner/pull/231)): a three-way merge of the fork's `release/34.0` at the shared merge-base, with the Go side taken from 3.23-fix and meso's branding, docs, workflows and scripts preserved. `transport_family.go` is family-pinned platform transports and the group that runs them: the direct identity runs a v4 pin, a v6 pin and a family-agnostic standby, and a pin dials only its own family, declares its family in the auth header or frame, never feeds the process-wide backend-degraded gate, is held rather than spun on a device with no path of its family, and idles under a contradicting Force. `transport_sessions.go` gives a session a lifetime and a close cause, `transport_authorization.go` and `transport_credential_refusal.go` park a refused credential instead of re-dialing into the same refusal, and `transport_family_stats.go` and `stream_metrics.go` add per-family and per-stream accounting. Transfer-side attempts are owned, and budget reservations are released by their owner on every path.
@@ -243,6 +271,18 @@
 ### Fixed
 - **Docker publish GHCR-only (PR #97)**: the Docker Hub login leg had no credentials on this repo and failed every main push; the GHCR image (`ghcr.io/full-bars/meso-miner`) is the registry the fleet and installers pull from.
 - JWT build mode autodetect: passing an auth code positionally (or `URNETWORK_AUTH_CODE`) selects jwt mode automatically; explicit `BUILD=` still overrides.
+
+---
+
+## [v2026.9.9-1788916951-meso] — 2026-09-09
+
+Full parity with the 3.23-fix v30.9 line: warm proxy prioritization, `sn-status`, and security hardening. The same code was also published as `v2026.9.9-1788917009-meso-hub`, a variant that kept the old hub; the hub has since been removed.
+
+---
+
+## [v2026.8.28-1031582360-meso] — 2026-08-28
+
+Fixes the endless retry loop on dead proxies, makes Docker self-update fetch from this repository, and adds Pelican egg support. Two earlier builds the same day, `v2026.8.28-1031544720-meso` and `v2026.8.28-1031579830-meso`, carry the same release notes. See `releases/v2026.8.28-1031582360-meso.md`.
 
 ---
 

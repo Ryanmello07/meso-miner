@@ -84,15 +84,12 @@ Quick jump:
 | :--- | :--- | :--- |
 | `ENABLE_VNSTAT` | `true` | Enables the traffic monitor on port 8080. |
 | `ENABLE_IP_CHECKER` | `false` | Diagnostic only. Prints your full public IP to container logs on startup via an external script. Distinct from dashboard identity reporting, which sends only a redacted IP. |
-| `/metrics` endpoint | `:9091` | **Since v3.23.0-fix.31.2**, the Prometheus metrics endpoint is enabled by default on port `9091`. No `URNETWORK_METRICS` environment variable is required — the provider starts the metrics listener automatically. Scrape `http://<host>:9091/metrics` from Prometheus or any compatible collector. To disable it, set `URNETWORK_METRICS=0`. |
+| `/metrics` endpoint | `:9091` | **Since v3.23.0-fix.31.2 (inherited from the 3.23-fix line)**, the Prometheus metrics endpoint is enabled by default on port `9091`. No `URNETWORK_METRICS` environment variable is required — the provider starts the metrics listener automatically. Scrape `http://<host>:9091/metrics` from Prometheus or any compatible collector. To disable it, set `URNETWORK_METRICS=0`. |
 | `URNETWORK_PUBLIC_IP` | `<auto-detected>` | Override the public IP shown in the dashboard identity label. Display only; does not change the actual egress IP. Auto-detected via `ip.me` on native/systemd installs; auto-set by Docker startup scripts. Create `~/.urnetwork/disable_ip_autodetect` or run `urnet-tools ip-detect off` to prevent autodetection. See [Node-Identity.md](Node-Identity.md). |
 | `URNETWORK_HEALTH_INTERVAL` | `5m` | How often to emit a `[health]` heartbeat log line. Includes uptime, RAM stats, and active connection count. Accepts Go duration strings such as `10m` or `1h`. Minimum `1m`. |
 | `URNETWORK_PPROF` | - | Set to a `host:port` to enable the loopback-only diagnostics server (e.g. `127.0.0.1:6060`). Off by default. Serves `/debug/pprof/*`, `/metrics/pool`, and `/metrics/errors`; only literal loopback IPs are accepted (hostnames are rejected). Pull profiles via an SSH tunnel, e.g. `ssh -L 6060:127.0.0.1:6060 host` then `go tool pprof http://127.0.0.1:6060/debug/pprof/profile`. |
 | `URNETWORK_PROXY_BENCHMARK` | - | Set to `true` to enable per-proxy latency monitoring. Off by default. Probes: TCP connect every 5 min (raw RTT to proxy port), SOCKS5 CONNECT every 15 min (end-to-end through proxy). Staggered startup jitter prevents thundering herd. ~104 GB/month at 10k proxies. |
 | `URNETWORK_PROXY_BENCHMARK_ENDPOINT` | `connect.bringyour.com:443` | Target for the SOCKS5 CONNECT latency probe. Measured end-to-end through each proxy. |
-| `URNETWORK_REPORT_URL` | - | *(Deprecated v31.3+)* HTTP URL of a bandwidth hub server. Was used to POST JSON reports with per-proxy metrics. See `docs/Hub-Dashboard.md` for historical reference. |
-| `URNETWORK_REPORT_INTERVAL` | `5m` | *(Deprecated v31.3+)* How often bandwidth reports were posted to `URNETWORK_REPORT_URL`. No longer functional. |
-| `URNETWORK_HEARTBEAT_INTERVAL` | `15s` | *(Deprecated v31.3+)* Provider heartbeat cadence to the hub. No longer functional. |
 | `URNETWORK_AUTH_UNLIMITED` | `false` | Bypass the auth rate limiter; every auth attempt fires immediately. Equivalent to creating `~/.urnetwork/fast_auth`. Only for trusted or benchmark environments. |
 | `URNETWORK_PUBLIC_IP` | `<detected>` | Override the public IP shown in the dashboard identity label. Display only; does not change the actual egress IP. Auto-set by Docker startup scripts. |
 | `URNETWORK_SHM_LOG` | `/dev/shm/urnetwork.log` | Path for the RAM log. |
@@ -131,7 +128,7 @@ Example, disabling the gate entirely:
 
 ## 📝 Critical Event Log
 
-Since v3.23.0-fix.25.14, the provider writes a per-process event log to `~/.urnetwork/events.log` (on disk, not RAM — survives restarts). It records STARTUP, SIGNAL, PROVIDER EXIT, PANIC, and FATAL events. Capped at 1 MiB with automatic rotation.
+Since v3.23.0-fix.25.14 (inherited from the 3.23-fix line), the provider writes a per-process event log to `~/.urnetwork/events.log` (on disk, not RAM — survives restarts). It records STARTUP, SIGNAL, PROVIDER EXIT, PANIC, and FATAL events. Capped at 1 MiB with automatic rotation.
 
 ```bash
 cat ~/.urnetwork/events.log
@@ -149,8 +146,8 @@ cat ~/.urnetwork/events.log
 
 ```bash
 urnet-tools set                     # list current overrides
-urnet-tools set report-interval 300 # change one, live, no restart
-urnet-tools set report-interval off # clear it
+urnet-tools set node-name atl-1  # change one, live, no restart
+urnet-tools set node-name off    # clear it
 ```
 
 **Capacity and dialer settings (v3.23.0-fix.32.8).** Two settings are control keys with their own commands. Both are live, persisted and re-applied at startup.
@@ -175,7 +172,7 @@ Read every capacity decision with `urnet-tools autopilot log [limit]`. The log l
 change, which is the authoritative signal rather than the CLI's exit code:
 
 ```text
-⚙️ [control] set report-interval=300 (was unset)
+⚙️ [control] set node-name=atl-1 (was unset)
 ⚙️ [control] applied 2 queued override(s) from pending_overrides.json: profile=v8, cleared gogc
 ❌ [control] set gogc=abc rejected: ...
 ```

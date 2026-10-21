@@ -75,7 +75,7 @@ urnet-tools proxy add ~/proxies.txt
 
 ```sh
 urnet-tools start
-urnet-tools proxy summary
+urnet-tools summary
 ```
 
 The summary displays proxy source breakdown (file/URL/internal), health state counts (Up/Connecting/Degraded/Dead), and URL feed cache status.
@@ -111,7 +111,7 @@ Same behavior as Linux — JWT saved to `~/.urnetwork/jwt`, hot-restart on by de
 
 ### 3. Add proxies
 
-Same file format as the systemd method above. Since v3.23.0-fix.27.0, `urnet-tools` is the provider-aware Go binary on every platform — macOS, Linux, and Windows share one codebase with the full command surface (no more platform-specific wrapper limitations):
+Same file format as the systemd method above. `urnet-tools` is the provider-aware Go binary on every platform — macOS, Linux, and Windows share one codebase with the full command surface (no more platform-specific wrapper limitations):
 
 ```sh
 urnet-tools proxy add ~/proxies.txt
@@ -121,7 +121,7 @@ urnet-tools proxy add ~/proxies.txt
 
 ```sh
 urnet-tools start
-urnet-tools proxy summary
+urnet-tools summary
 ```
 
 Logs live at `~/Library/Logs/com.urnetwork.provider/stdout.log` and `stderr.log` instead of `journalctl`.
@@ -164,7 +164,7 @@ Windows Defender may flag this one-liner. See the note below.
 
 No admin rights required. This installs:
 - The provider binary at `%LOCALAPPDATA%\urnetwork\provider\urnetwork.exe`
-- The `urnet-tools` Go management binary (v3.23.0-fix.27.0+; the legacy `urnet-tools.ps1` wrapper has been retired)
+- The `urnet-tools` Go management binary (the legacy `urnet-tools.ps1` wrapper has been retired)
 - A Task Scheduler logon task so the provider launches on login (registered when you accept auto-start)
 - Configuration directory at `%USERPROFILE%\.urnetwork\`
 
@@ -192,10 +192,10 @@ urnet-tools proxy add C:\Users\You\proxies.txt
 
 ```powershell
 urnet-tools start
-urnet-tools proxy summary
+urnet-tools summary
 ```
 
-Auto-update is enabled by default on install (`urnet-tools auto-update-enable` / `auto-update-disable` to control it). Stream logs with `urnet-tools logs`.
+Auto-update is enabled by default on install (`urnet-tools auto-update daily|weekly|monthly|off` to change it). Stream logs with `urnet-tools logs`.
 
 ---
 
@@ -279,7 +279,7 @@ These work across all platforms via the Go `urnet-tools` binary (or on Docker vi
 
 | Command | What it does |
 |---------|-------------|
-| `urnet-tools proxy summary` | Fleet summary: source breakdown (file/URL/internal), health state, URL feed cache |
+| `urnet-tools summary` | Fleet summary: source breakdown (file/URL/internal), health state, URL feed cache |
 | `urnet-tools proxy traffic` | Live proxy traffic snapshot and max age |
 | `urnet-tools status` | Provider process status and uptime |
 | `urnet-tools proxy health` | Per-proxy up, dropped, and never-up status |
