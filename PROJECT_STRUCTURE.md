@@ -1,146 +1,84 @@
 # Project Structure
 
-This document outlines the high-level architecture and directory structure of the **URNetwork 3.23-fix** fork. It highlights the major subsystems and the custom components introduced in this fork (the Hub hub, the Go-based urnet-tools management utility, proxy health tracking, tuning, and the DNS-over-HTTPS resolver).
+A map of the meso-miner repository, grouped by what each part is for. You do not need any of this to run a node. It is here for people who want to read or change the code.
 
-## Directory Layout
+meso-miner is the production-oriented fork of the URnetwork provider. The Go module is still named `github.com/urnetwork/connect`, so import paths look like upstream. Go 1.27.
 
-```
-urnetwork-3.23-fix/
-├── provider/                         # Provider binary (the relay node)
-│   ├── main.go                       # Provider entrypoint, settings parsing, graceful shutdown
-│   ├── auth_rate_limiter.go          # Global adaptive auth rate limiter (AIMD: 20-200 req/s)
-│   ├── proxy_admission_gate.go       # Weighted-lottery admission gate for auth slots
-│   ├── proxy_failure_history.go      # Persistent per-proxy failure count (across requeues)
-│   ├── proxy_auth_history.go         # Proven-proxy set for rate limiter gating
-│   ├── proxy_probe.go                # Dual-stage SOCKS5 probe (TCP + API CONNECT)
-│   ├── proxy_url.go                  # Proxy URL state persistence (proxy_url.json)
-│   ├── proxy_url_source.go           # URL fetcher, merge, periodic refresh, reaper, blacklist
-│   ├── proxy_reload.go               # Hot-reload engine via .reload trigger files + give-up cooldown
-│   ├── proxy_state.go                # On-disk proxy state management (proxy.state)
-│   ├── proxy_id.go                   # Stable monotonic proxy ID assignment (e.g., proxy[0])
-│   ├── proxy_health_log.go           # Durable state persistence for proxy health (disk writer)
-│   ├── proxy_slow_retry.go           # Slow-retry state: 24h daily gate, 14-day drop (file proxies)
-│   ├── proxy_benchmark.go            # Opt-in staggered latency probing (TCP and SOCKS5)
-│   ├── proxy_match.go                # Pattern-based proxy removal (proxy remove --match)
-│   ├── contract_metrics.go           # Fleet-wide per-proxy contract history tracking
-│   ├── client_jwt_hotrestart.go      # Client JWT renew + identity snapshot across hot restarts
-│   ├── claim_credential.go           # `provider claim` credential choice (store client, client jwt file, legacy coldkey)
-│   ├── sn.go                         # Subnet commands (wallet set + unsigned-request gate, claim, bind-head)
-│   ├── thrash_watchdog.go            # Swap-thrash watchdog, supervised exit-75 restart, container opt-in
-│   ├── family_transport.go           # Dual-stack platform transport for the direct identity (v4/v6 pins + standby, `ip_version`)
-│   ├── network_refresh.go            # Network JWT renewal at POST /auth/network-refresh, with the code-create fallback
-│   ├── proxy_udp_check.go            # Per-proxy SOCKS5 UDP relay check, and TCP/UDP exit-address comparison
-│   ├── socks5_udp.go                 # SOCKS5 UDP relay packet conn, so a proxied identity's H3 exits through its proxy
-│   ├── doh_cache.go                  # Persistent DNS-over-HTTPS cache with server-score persistence
-│   ├── net_http_doh.go               # DNS-over-HTTPS resolver (server scoring, serve-stale)
-│   ├── bandwidth_reporter.go         # Pushes periodic JSON telemetry to the Hub
-│   ├── important_log.go              # Important-event log (/dev/shm/urnetwork-important.log)
-│   ├── tlog.go                       # Thread-safe timestamped logging helpers
-│   ├── shmlog.go                     # Rolling ring-buffer RAM log (/dev/shm/urnetwork.log)
-│   └── ...                           # (network stack, transport, IP layer — see root)
-│
-├── cmd/                              # Go command entrypoints
-│   ├── urnet-tools/                  # Manager/CLI binary (main.go)
-│   └── urnet-docker/                 # Docker wrapper binary (main.go)
-│
-├── internal/
-│   └── urnettools/                   # urnet-tools implementation (Go)
-│       ├── cli.go                    # CLI dispatch, help, and target-flag parsing
-│       ├── cobra.go                  # Cobra command tree (all subcommands)
-│       ├── discover.go               # Provider discovery (systemd, docker, /proc)
-│       ├── discover_unix.go          # Linux systemd + user-unit discovery
-│       ├── update.go                 # Provider + tool update, digest verify, backup/prune
-│       ├── lifecycle_cmds.go         # start/stop/restart/uninstall/reinstall, safe deletes
-│       ├── lifecycle_unix.go         # systemd unit + timer management, linger check
-│       ├── legacy_cmds.go            # logs, optimize, set, fast-auth, hub install, report
-│       ├── proxy.go                  # proxy add/clear/summary, provider-user read checks
-│       ├── session_cmds.go           # encrypted identity session save/load (AES-256-GCM)
-│       ├── self_heal.go              # self-heal marker toggle (provider-scoped)
-│       ├── hub_cmds.go               # Hub install/link/init/onboard (hub lane only)
-│       ├── provider.go               # Provider struct, version-from-buildinfo
-│       ├── target.go                 # Target resolution / selection
-│       ├── select_multi.go           # Batch selection (--all/--include/--exclude)
-│       ├── release.go                # GitHub release + digest resolution
-│       ├── exec_timeout.go           # bounded subprocess helper
-│       ├── fsync_unix.go / _other.go # cross-platform fsync + file-ownership helpers
-│       ├── restart_escalation.go     # staged-tool restart routing
-│       ├── log_stream.go             # native log follower (tail + follow, rotation and truncation aware)
-│       ├── log_follow_open_*.go      # per-OS open for the follower (Windows: delete sharing, long paths)
-│       ├── restore_delegate.go       # set/fast-auth state-dir chown
-│       ├── provider_recover_*.go     # per-platform user/UID recovery
-│       ├── docker.go                 # container discovery + docker CLI seam
-│       └── ...                       # platform-specific lifecycle + test files
-│
-├── hub/                              # Bandwidth Hub server (hub lane only)
-│   ├── main.go                       # Standalone server; :8080 JSON API + HTML dashboard
-│   ├── broadcaster.go                # SSE event broadcaster for live dashboard updates
-│   ├── proxy_api.go                  # /api/proxies/* leaderboard and history endpoints
-│   ├── proxy_delta.go                # Delta-based proxy bandwidth ingestion and rollups
-│   └── store_db.go                   # SQLite persistence for node/proxy history and snapshots
-│
-├── docker/
-│   └── scripts/
-│       ├── entrypoint.sh             # BUILD selector; execs start_stable/start_nightly/start_jwt
-│       ├── provider_common.sh        # Shared startup: bootstrap, proxy setup, arch detect, identity, IP checker
-│       ├── provider_env.sh           # v33 operator env vars -> `provider provide` flags
-│       ├── start_*.sh                # Thin wrappers: set the mode and binary flavour, then source provider_common.sh
-│       └── ...                       # urnet-tools, proxy-*, update_verify, pelican and jwt helpers
-│
-├── Dockerfile                        # Alpine-based, multi-stage, multi-arch build with vnStat
-├── CHANGELOG.md                      # Human-readable release changelog
-├── FORK_CHANGES.md                   # Comprehensive reference of all fork modifications
-├── PROJECT_STRUCTURE.md              # This document
-├── LOG_REFERENCE.md                  # Log-line format reference
-│
-# Core Library Components (Root)
-├── connect.go                        # Core types: TransferPath, Id (16-byte ULID), ByteCount
-├── net.go                            # TCP/TLS dialing with SOCKS5 proxy support (trackedConn)
-├── net_http.go                       # Control-plane dialing & ClientStrategy
-├── net_http_doh.go                   # DNS-over-HTTPS resolver with caching
-├── net_http_internal_doh.go          # In-process DoH name path for the protected network-space domains
-├── net_dial_udp_candidates.go        # Progressive UDP dial candidates: first usable family wins, later answers retained
-├── egress_dial.go                    # Egress-bound name resolution, so a control dial stays outside the tunnel it builds
-├── egress_darwin.go                  # macOS socket interface pinning (IP_BOUND_IF / IPV6_BOUND_IF)
-├── control_family.go                 # Control-plane address-family policy and the demotion ledger
-├── control_family_dial.go            # Family-aware control dial: one cross-family retry on a handshake timeout
-├── transport.go                      # PlatformTransport: WebSocket (H1) + QUIC/H3 + DNS PT
-├── transport_family.go               # Family-pinned v4/v6 platform transports and the dual-stack group
-├── transport_family_stats.go         # Per-family attempts, connects, failures, drops by cause, session lifetimes
-├── transport_h1plus.go               # H1+ writer: drains the H1 lanes and limits through the shared framer
-├── http_upgrade.go                   # H1 -> framed carrier upgrade (h1_plus), with a plain websocket fallback
-├── framed_message_conn.go            # Binary-message conn the upgraded carrier is spoken on
-├── message_framer_xl.go              # urnetwork-framerxl/1 wire format (uint32 length header, batched writes)
-├── transport_sessions.go             # Platform transport session lifetimes and close cause
-├── transport_authorization.go        # Authorization close codes -> transport close reason
-├── transport_credential_refusal.go   # Held dials after the platform definitively refuses a credential
-├── stream_metrics.go                 # Stream and transport counters: kind, lifetime, end reason, open-request outcome
-├── platform_transport_budget.go      # Aggregate transport budget: exact claims, make-before-break pairing
-├── transport_p2p.go / _webrtc.go     # P2P WebRTC transport
-├── ice_resolve_net.go                # Peer-generation-scoped ICE (STUN/TURN) address resolution
-├── transport_pt.go                   # Pluggable transport: DNS packet translation
-├── transfer*.go                      # Client state machine, contracts, encryption, routing
-├── transfer_memory_budget.go         # Composable byte budget shared by transfer queues across sequences
-├── routing_class.go                  # Traffic-class vocabulary for flow classification
-├── routing_classifier_light.go       # Light flow classifier (inert: no consumer installed)
-├── ip.go / ip_security*.go           # IP-layer NAT, security policy, DPI classification
-├── ip_udp_socket_poller*.go          # Shared UDP socket lifecycle with epoll/kqueue/unsupported backends
-├── tuning.go                         # System auto-profiling (Tier1/Tier2/Tier3) by cgroup RAM
-├── audit.go                          # Passive host kernel setting validator
-├── message_pool.go                   # Dynamic allocation pool for relay payloads
-├── jwt.go                            # JWT auth token management
-└── api.go                            # Platform API client (auth, OOB control)
-```
+## The three programs you actually run
 
-## Architectural Concepts
+| Program | Source | What it is |
+|---|---|---|
+| `provider` | `provider/` | The relay node. Logs in, connects your proxies, earns. |
+| `urnet-tools` | `cmd/urnet-tools/` + `internal/urnettools/` | The operator tool: status, logs, update, proxies, tuning. Used on Linux, macOS, Windows and FreeBSD hosts. |
+| `urnet-docker` | `cmd/urnet-docker/` | The same tool for Docker hosts. It runs on the host and reaches into your containers. |
 
-### The Provider Node (`provider/`)
-The main worker. Binds to `api.bringyour.com` to authenticate and fetch a list of proxies. The fork extends it with client-JWT hot-restart identity reuse, a production-grade DoH resolver with a persistent scored cache, proxy health tracking, auto-tuning, and hot-reload of proxies without a full restart.
+`cmd/fake-provider/` is a stand-in provider used only by CI lifecycle tests. `connectctl/` is an upstream developer tool and is not used in production.
 
-### The Hub (`hub/`) — hub lane only
-A custom, zero-dependency Go binary for fleet observability without a full Prometheus/Grafana stack. Providers push their `[earn]` and bandwidth telemetry to the Hub, which aggregates and serves an HTML dashboard to operators. The hub-stripped lane (`meso-miner` main) omits `hub/` and `internal/urnettools/hub_cmds.go`.
+## Provider (`provider/`)
 
-### urnet-tools (`cmd/urnet-tools` + `internal/urnettools/`)
-The operator's management utility, rewritten from a shell script into a Go binary. It discovers providers across systemd units, user sessions, and containers; manages their lifecycle and drop-ins; updates provider and tool binaries with digest verification; and exposes proxy, session, self-heal, and hub management commands. It is the fork's control plane and the primary subject of the 30.9 security audit remediation.
+Everything the provider binary does that is not the shared network stack.
 
-### The platform transport generation (`transport_family.go` + `provider/family_transport.go`)
-The platform transport is no longer one connection. `transport_family.go` runs a family-pinned v4 transport, a family-pinned v6 transport and a family-agnostic standby as a single group, so the platform can categorize a provider as dual-stack; `provider/family_transport.go` decides once per identity launch whether the direct identity gets that group (a proxied identity never does, because a pin dials from the host), and the `ip_version` control key re-pins it live. On top of the group sit H1+ (`http_upgrade.go`, `framed_message_conn.go`, `message_framer_xl.go`, `transport_h1plus.go`), session lifetime and close-cause accounting (`transport_sessions.go`, `transport_authorization.go`, `transport_credential_refusal.go`) and the operator counters (`transport_family_stats.go`, `stream_metrics.go`). `control_family.go` and `control_family_dial.go` steer only the control-plane dials and never the tunnelled data plane, and `platform_transport_budget.go` admits the whole group against one aggregate budget. Three pieces are ported but inert: the shared UDP socket lifecycle (`ip_udp_socket_poller*.go`) needs `SocketReadShardCount`, `transfer_memory_budget.go` needs a queue budget setting, and the light classifier (`routing_class.go`, `routing_classifier_light.go`) has no consumer installed.
+- Entry point and runtime: `main.go`, `startup_banner.go`, `control_socket.go`, `control_state.go`, `pending_overrides.go`, `hotswap*.go`, `thrash_watchdog.go`, `liveness_watchdog.go`, `loop_supervisor.go`.
+- Proxy handling: `proxy_url*.go` (URL sources), `proxy_reload.go` (hot reload), `proxy_state.go`, `proxy_id.go`, `proxy_health_log.go`, `proxy_slow_retry.go`, `proxy_probe.go`, `proxy_benchmark.go`, `proxy_grade_*.go`, `proxy_trim*.go`, `proxy_udp_check.go`, `socks5_udp.go`, `ssrf_guard.go`.
+- Login and identity: `auth_rate_limiter.go`, `proxy_admission_gate.go`, `client_jwt_*.go`, `network_refresh.go`, `renewal_watcher.go`, `wallet_*.go`.
+- Transport choices: `family_transport.go` (dual-stack for the direct identity), `h3_*.go` (HTTP/3), `direct.go`.
+- Bittensor and claim commands: `sn*.go`, `claim_*.go`, `bt_*.go`, `fleet*.go`, `hotkey_wallet.go`.
+- Logging and diagnostics: `tlog.go`, `shmlog_*.go`, `important_log.go`, `audit_ring.go`, `node_snapshot*.go`, `metrics_*.go` (Prometheus), `incident_capture.go`.
+- `bandwidth_reporter.go` is a leftover from the removed hub. It has no receiver and does nothing useful.
+
+## Operator tool (`cmd/urnet-tools/`, `cmd/urnet-docker/`, `internal/`)
+
+- `internal/urnettools/` holds all the logic: command tree (`cobra.go`), provider discovery (`discover*.go`), update with checksum verification (`update.go`, `release.go`), start/stop/restart (`lifecycle*.go`), proxy commands (`proxy.go`), session save/load, self-heal, log following, and Docker support (`cli_docker.go`, `docker.go`).
+- `internal/tui/` is the terminal drawing kit behind `urnet-tools top`.
+- `internal/verdictfeed/` reads the signed backend-health feed (off by default).
+- `internal/promtext/`, `internal/durable*/` are small support packages for metrics checks and durable state.
+
+## Network stack (repository root)
+
+The Go files in the root directory are the shared engine. By prefix:
+
+| Prefix | What it covers |
+|---|---|
+| `transfer*.go` | Contracts, encryption, routing, queues, retries |
+| `transport*.go`, `http_upgrade*.go`, `message_framer*.go` | Connections to the platform: WebSocket (H1), H1+, QUIC/H3, WebRTC, pluggable tunnel |
+| `net*.go`, `egress*.go`, `control_family*.go` | Dialing, DNS-over-HTTPS, resilient connections, dual-stack |
+| `ip*.go` | IP packet relay, NAT, fragments, ICMP, UDP |
+| `ip_security*.go` | Traffic policy, including the CFAA, DMCA and messaging rules |
+| `proxy_*.go` (root) | Proxy scoring and target-family logic shared with the provider |
+| `reconnect_*.go`, `transport_flap_guard.go` | Protection against reconnect storms |
+| `message_pool*.go`, `memory_budget.go`, `sysmem_*.go`, `tuning.go` | Memory use and auto-tuning |
+| `jwt.go`, `api*.go` | Platform API client and tokens |
+| `log*.go`, `metrics_prometheus.go`, `trace.go` | Logging and Prometheus metrics |
+
+Test files sit beside the code they test (`*_test.go`).
+
+## Supporting code
+
+- `protocol/`: protocol buffer definitions (`*.proto`) and generated Go. Do not edit the generated files; run `make` in that folder.
+- `api/`: platform API definitions.
+- `extender/`: extender transport.
+- `blocker/`: tool that builds the default block lists. `security/`: source list URLs for the IP blocklist.
+- `hotkeywallet/`, `durablesys/`, `durablevolume/`: Bittensor wallet storage and durable-disk support.
+- `emoji/`, `res/`: small assets.
+- `third_party/`: vendored Go packages (Substrate RPC client, Windows named pipes). Licenses are in `THIRD_PARTY_LICENSES.md`.
+
+## Install, packaging and deployment
+
+- `scripts/`: installers and uninstallers (`Provider_Install_Linux.sh`, `_Mac.sh`, `_Win32.ps1`, `_FreeBSD.sh`), the Docker host installer (`install-urnet-docker.sh`), and release helpers (`pre-tag-check.sh`, `compute-meso-tag.sh`).
+- `Dockerfile` and `docker/scripts/`: the container image. `entrypoint.sh` picks the start script from the `BUILD` setting.
+- `pelican/`: egg for the Pelican game-server panel.
+- `monitoring/`: ready-made Prometheus and Grafana stack. See [Monitoring](docs/Monitoring.md).
+- `.github/workflows/`: CI. `build.yml` builds and tests, `release.yml` publishes releases, plus installer, OpenRC, FreeBSD, CodeQL and soak checks.
+
+## Documentation
+
+- [README.md](README.md): start here.
+- `docs/`: one page per topic. `docs/guides/` has beginner, intermediate and advanced walkthroughs. `docs/design/` is design history for maintainers.
+- [CHANGELOG.md](CHANGELOG.md) and `releases/`: what changed in each release. Release notes before the `v2026...` ones are inherited from the 3.23-fix line.
+- [FORK_CHANGES.md](FORK_CHANGES.md): everything this fork changed compared with upstream.
+- [LOG_REFERENCE.md](LOG_REFERENCE.md): what each log line means.
+- [CODESTYLE.md](CODESTYLE.md), [AI.md](AI.md): conventions and a guide for AI assistants.
+
+## What was removed
+
+The Hub (fleet dashboard server) and its commands were removed in v31.3. Fleet visibility now comes from Prometheus `/metrics` (`urnet-tools metrics on`) with the monitoring bundle and Grafana.

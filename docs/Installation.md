@@ -95,7 +95,7 @@ urnet-tools session load backup.urnsession
 urnetwork auth
 urnet-tools proxy add ~/proxies.txt
 urnet-tools proxy refresh
-urnet-tools proxy summary
+urnet-tools summary
 ```
 
 > [!NOTE]
@@ -111,7 +111,7 @@ Unlike traditional services that run as root, this build defaults to a **systemd
 
 ## 🛠️ Post-Install Commands
 
-The installation includes the `urnet-tools` suite for management. Since v3.23.0-fix.27.0 this is the **provider-aware Go binary** — on multi-provider machines, pass a target (`--unit` / `--user` / `--network` / `--network-id` / `--state-dir`) or the tool refuses. See [urnet-tools-go.md](urnet-tools-go.md).
+The installation includes the `urnet-tools` suite for management. Since v3.23.0-fix.27.0 (inherited from the 3.23-fix line) this is the **provider-aware Go binary** — on multi-provider machines, pass a target (`--unit` / `--user` / `--network` / `--network-id` / `--state-dir`) or the tool refuses. See [urnet-tools-go.md](urnet-tools-go.md).
 
 | Command | Description |
 | :--- | :--- |
@@ -191,7 +191,7 @@ urnet-tools start
 # Manage proxies
 urnet-tools proxy add "$env:USERPROFILE\Downloads\proxies.txt"
 urnet-tools proxy refresh
-urnet-tools proxy summary
+urnet-tools summary
 
 # View logs
 urnet-tools logs
