@@ -48,7 +48,7 @@ Both are cross-compiled from one Go source — the shell↔PowerShell drift is g
 | `usage [graphs\|graph <view>] [target]` | Display traffic & billing accounting: billable relay bytes vs control-plane protocol overhead, with rolling time-series summaries. Available across `urnet-tools` and `urnet-docker`. |
 | `choose-network <api> <connect> [target]` | Point provider to custom API and WebSocket signaling endpoints. Use `--reset` to restore default bringyour endpoints. |
 | `fast-auth [on\|off\|status] [target]` | Toggle or check `~/.urnetwork/fast_auth` marker to bypass auth rate limiter. Confirm-gated. |
-| `set [help \| <key> <val> \| <key> off \| <key>] [target]` | Get, set, or clear runtime provider state overrides (`node-name`, `report-interval`, `proxy-url-max`, `proxy-url-refresh`, `cleanup-scope`, `cleanup-interval`, `fast-auth`, `ip-version`, `proxy-target-family`, `h1-plus`, `h3`, `h3-datagram`, `h3-datagram-send`). `h3` accepts `off`, `direct`, `on`, a positive proxy count, `all` or `auto`; `ip-version` accepts `dual`, `ipv4`, `ipv6` or `legacy`; `proxy-target-family` accepts `v4` or `proxy`. Sent live over the provider control socket, or queued to `pending_overrides.json` if the provider is stopped. Confirm-gated. |
+| `set [help \| <key> <val> \| <key> off \| <key>] [target]` | Get, set, or clear runtime provider state overrides (`node-name`, `proxy-url-max`, `proxy-url-refresh`, `cleanup-scope`, `cleanup-interval`, `fast-auth`, `ip-version`, `proxy-target-family`, `h1-plus`, `h3`, `h3-datagram`, `h3-datagram-send`). `h3` accepts `off`, `direct`, `on`, a positive proxy count, `all` or `auto`; `ip-version` accepts `dual`, `ipv4`, `ipv6` or `legacy`; `proxy-target-family` accepts `v4` or `proxy`. Sent live over the provider control socket, or queued to `pending_overrides.json` if the provider is stopped. Confirm-gated. |
 | `rename <name> [target]` | Set the dashboard identity label on the backend. Alias for `set node-name <name>`. Writes `~/.urnetwork/node_name`, re-read on next tick — no restart. Use `off` to clear. Available across `urnet-tools` and `urnet-docker`. |
 | `session save <file> [target]` | Export encrypted AES-256-CBC bundle of provider JWT identity and state. Prompts for passphrase. |
 | `session load <file> [target] [--allow-different-account]` | Decrypt and load identity bundle into provider. Automatically backs up current state first. Verifies account identity unless bypassed. |
@@ -78,25 +78,6 @@ On a host where OpenRC is the running init system, the lifecycle commands (`star
 | `proxy remove-dead [target]` | Interactively prune dead and degraded proxies. Honors `--dry-run`. |
 | `summary [target]` | Fleet-style summary of proxy counts by source (url, file, internal). Top-level command, not a `proxy` subcommand. |
 
-### Hub Command Family (v3.23.0-fix.30.4+)
-
-> [!WARNING]
-> **Deprecated (v31.3+):** The hub commands have been removed from `urnet-tools`. This section is retained for historical reference only.
-
-| Command | What it does |
-|---|---|
-| `hub init` | Initialize and configure the bandwidth hub service on this machine. Prompts for password (min 8 chars) or reads from stdin. |
-| `hub link <url>` | Pair provider with a remote bandwidth hub. Verifies TLS CA or SHA-256 certificate fingerprint (TOFU security). Confirm-gated on identity change. |
-| `hub unlink` | Unlink provider from bandwidth hub. |
-| `hub test` | Test reachability and TLS certificate chain validation to the configured hub. |
-| `hub onboard-cmd` | Generate one-line onboarding command with URL-escaped tokens for remote providers. |
-| `hub show-password` | Display current hub admin access password. |
-| `hub open-port` | Configure firewall rules (ufw/iptables/firewalld) to open hub listener port. Confirm-gated. |
-| `hub update` | Update bandwidth hub binary to latest release. |
-| `hub set <url>` | Set raw reporting endpoint URL in `~/.urnetwork/report_url`. |
-| `hub off` | Disable hub reporting by clearing `report_url`. |
-| `hub install` | Install bandwidth hub binary and systemd service. |
-
 ### System & Performance Tuning
 
 | Command | What it does |
@@ -106,7 +87,6 @@ On a host where OpenRC is the running init system, the lifecycle commands (`star
 | `eco [on\|off]` | Enable or disable Eco profile (RAM-constrained hosts). |
 | `turbo [v4\|v8\|off]` | Enable Turbo V4 or Turbo V8 high-throughput modes. |
 | `ramlogs [on\|off]` | Enable or disable RAM-disk logging (`/dev/shm`). |
-| `report <url>` | Set live bandwidth reporting URL (`report off` disables). Writes an override file the provider's bandwidth reporter re-reads on its next tick, so no restart is needed. |
 | `profile [name]` | **(New in 31.0)** Show or set the memory and GC tuning profile (`auto`, `turbo-v4`, `turbo-v8`, `eco`, `lowmem`; `v4` and `v8` are accepted aliases). With no argument, prints the current profile and what each one is for. |
 | `metrics [status\|on\|off\|listen <ip:port\|auto>]` | Show where the Prometheus `/metrics` endpoint listens and the address to scrape, turn it on or off, or choose its listen address. Live, no restart, and persisted. See [Monitoring](Monitoring.md). |
 
@@ -208,30 +188,6 @@ urnet-tools session load /path/to/backup.urnsession --allow-different-account
 - **Pre-Load Safety Backup:** Automatically creates a timestamped copy of `~/.urnetwork/` (e.g. `~/.urnetwork.bak.1724288000`) before modifying live files.
 - **Permission Hardening:** Unpacks files with `0700` directory permissions and `0600` file permissions, automatically chowning them to the unit owner when run with elevated privileges.
 
-### 3. Hub Setup and Verification
-
-> [!WARNING]
-> **Deprecated (v31.3+):** The hub commands and bandwidth reporting have been removed. This section is retained for historical reference.
-
-Full lifecycle management for centralized bandwidth reporting:
-
-```bash
-# Initialize hub service on the server
-urnet-tools hub init
-
-# Link a provider to the hub with TOFU TLS verification
-urnet-tools hub link https://hub.example.com:8080
-
-# Verify certificate chain and reachability
-urnet-tools hub test
-
-# Open firewall ports for hub traffic
-urnet-tools hub open-port
-```
-
-- **TLS Pinning:** Verifies TLS against `hub_ca.pem` or pinned SHA-256 public key fingerprints.
-- **Identity Safety:** Prompts with typed confirmation if linking would overwrite existing provider hub registration.
-
 ### 4. Persisted Default Provider
 
 Avoid passing `--unit` or `--network` on every invocation:
@@ -257,13 +213,13 @@ and is the single writer of `~/.urnetwork/provider_state.json`.
 
 ```bash
 # Change a setting on a running provider. No restart.
-urnet-tools set report-interval 300
+urnet-tools set node-name atl-1
 
 # Read one back
-urnet-tools set report-interval
+urnet-tools set node-name
 
 # Clear it
-urnet-tools set report-interval off
+urnet-tools set node-name off
 ```
 
 **When the provider is stopped**, the change is written to
@@ -276,8 +232,8 @@ request was accepted. The provider logs the change itself, which is the
 authoritative confirmation:
 
 ```text
-⚙️ [control] set report-interval=300 (was unset)
-⚙️ [control] cleared report-interval (was 300)
+⚙️ [control] set node-name=atl-1 (was unset)
+⚙️ [control] cleared node-name (was atl-1)
 ⚙️ [control] applied 2 queued override(s) from pending_overrides.json: profile=v8, cleared gogc
 ```
 

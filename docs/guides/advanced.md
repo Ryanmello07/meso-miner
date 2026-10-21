@@ -10,7 +10,7 @@ This guide covers multi-server fleet management, performance tuning, fleet monit
 > - **`ramlogs`** depends on `/dev/shm` (Linux's tmpfs convention). No built-in equivalent on macOS or Windows today.
 > - **`turbo`/`eco`** are *not* kernel-dependent. The Go `urnet-tools` binary supports `turbo` and `eco` on all three platforms as of v3.23.0-fix.27.0. On Linux/macOS they write a persistent environment override; on Windows they set the equivalent registry/env value. You can also set `URNETWORK_PROFILE` directly in any environment.
 >
-> `self-heal`, `proxy *`, `status`, `logs`, `summary`, and `report` work identically on all three platforms.
+> `self-heal`, `proxy *`, `status`, `logs`, and `summary` work identically on all three platforms.
 
 ---
 
@@ -18,7 +18,6 @@ This guide covers multi-server fleet management, performance tuning, fleet monit
 
 - [Performance Profiles](#-performance-profiles)
 - [Fleet Management](#-fleet-management)
-- [Hub Dashboard (Deprecated)](#-hub-dashboard-deprecated) *(v31.3+ — retained for reference)*
 - [Hot-Reload & Proxy Management](#-hot-reload--proxy-management)
 - [Memory & GC Tuning](#-memory--gc-tuning)
 - [Logging & Forensics](#-logging--forensics)
@@ -107,40 +106,6 @@ When enabled, the provider monitors PSI pressure, memory availability, load aver
 - Sheds dead and degraded proxies first, then healthy ones by lowest traffic
 
 The emergency goroutine pin at >= 25000 goroutines provides an extra safety net.
-
----
-
-## 📊 Hub Dashboard (Deprecated)
-
-> [!WARNING]
-> **Deprecated (v31.3+):** The hub dashboard has been removed. For fleet-wide visibility, use Prometheus metrics (`urnet-tools metrics on`) and the Grafana monitoring bundle. Historical hub documentation: [Hub Setup](../Hub-Setup.md), [Hub Dashboard](../Hub-Dashboard.md).
-
-> [!CAUTION]
-> **The hub commands and setup instructions below are historical and non-actionable.** The `hub/` package has been removed from this codebase. The commands shown here (`hub install`, `hub init`, `hub link`, etc.) no longer exist. They are retained only as a reference for operators who previously ran the hub and may need to understand the old setup.
-
-```sh
-# Historical — these commands no longer exist in v31.3+
-urnet-tools hub install
-urnet-tools hub init
-urnet-tools hub onboard-cmd    # mints a one-time onboard token
-```
-
-Then on each provider node (historical):
-
-```sh
-# Historical — these commands no longer exist in v31.3+
-urnet-tools hub link <https://hub-host:port> --token <onboard-token>
-```
-
-The hub dashboard (port 8080) **used to** show:
-- Live Mbps throughput per node
-- Billable traffic (hourly/daily/monthly)
-- Contract win rates
-- Per-proxy drilldown by address
-- Active client sessions
-
-> [!WARNING]
-> **These instructions are historical.** The hub has been fully removed — no deployment, port mapping, or colocated-host guidance applies any longer.
 
 ---
 
