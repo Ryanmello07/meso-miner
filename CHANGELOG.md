@@ -250,6 +250,18 @@
 
 ---
 
+## [v2026.9.9-1788916951-meso] — 2026-09-09
+
+Full parity with the 3.23-fix v30.9 line: warm proxy prioritization, `sn-status`, and security hardening. The same code was also published as `v2026.9.9-1788917009-meso-hub`, a variant that kept the old hub; the hub has since been removed.
+
+---
+
+## [v2026.8.28-1031582360-meso] — 2026-08-28
+
+Fixes the endless retry loop on dead proxies, makes Docker self-update fetch from this repository, and adds Pelican egg support. Two earlier builds the same day, `v2026.8.28-1031544720-meso` and `v2026.8.28-1031579830-meso`, carry the same release notes. See `releases/v2026.8.28-1031582360-meso.md`.
+
+---
+
 ## Inherited from urnetwork-3.23-fix (carried by the parity port)
 
 ## [v3.23.0-fix.31.4]
