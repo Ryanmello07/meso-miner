@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+---
+
+## [v2026.10.21-1077734740-meso] — 2026-10-21
+
 ### Added
 - **Cumulative metrics counters persist across restarts**: the counters behind `/metrics` (`urnet_*_total`) are stored in `~/.urnetwork/metrics_counters.json` and restored before the listener serves, so a restart, reboot or update no longer resets a 24-hour attribution window to zero. The store is separate from `lifetime_metrics.json`; writes are atomic, every 45 seconds and on shutdown, and skipped when nothing changed. The bundled dashboard gates its rate panels for one window after a start-time change so a restored total is not read as a spike.
 
@@ -7,7 +11,7 @@
 - **The HotSwap parent flushes the counters before it exits**: the drain path exits without running the normal shutdown block, so the promoted candidate could restore a value up to one interval old. The parent now flushes its final counters at the end of the drain, and the candidate still catches up after the drain window.
 
 ### Security
-- **The CFAA endpoint blocklist is refreshed from upstream**: 41,425 to 42,556 IPv4 entries and 548 to 543 IPv6 entries. Data only; it takes effect once a node runs this release.
+- **The CFAA endpoint blocklist is refreshed from upstream**: 41,425 to 41,202 IPv4 entries and 548 to 593 IPv6 entries. Data only; it takes effect once a node runs this release.
 - **Go 1.27.3 blocks the eight compromised eMudhra intermediates (`CVE-2026-111943`)**: `go.mod`, the Dockerfile builder and every `setup-go` pin Go 1.27.3, so binaries built from this release carry the denylist. A binary built before it may continue trusting the intermediates, although an updated operating-system trust store may already reject them.
 
 ### CI
@@ -21,7 +25,6 @@
 - **Docs rewritten for meso-miner**: a plain start-here, a Bittensor quick start, the head tier, a glossary, project-structure pages that match the real tree, and the Hub and report-URL pages removed. The changelog backfills `2026.9.9` and `2026.8.28`.
 
 ---
-
 
 ## [v2026.10.20-1076956260-meso] — 2026-10-20
 
