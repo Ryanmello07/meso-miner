@@ -336,9 +336,20 @@ install_downloader ()
     command -v curl > /dev/null && return 0
     command -v wget > /dev/null && return 0
 
-    if [ "$(id -u)" -ne 0 ]; then
-        pr_info "Not running as root; cannot install a downloader automatically."
+    if [ "${URNET_NO_AUTOINSTALL:-0}" = "1" ]; then
+        pr_info "URNET_NO_AUTOINSTALL=1: not installing a downloader"
         return 1
+    fi
+
+    SUDO=""
+    if [ "$(id -u)" -ne 0 ]; then
+        if command -v sudo > /dev/null 2>&1 && sudo -n true > /dev/null 2>&1; then
+            SUDO="sudo"
+            pr_info "Not root; using passwordless sudo to install the downloader."
+        else
+            pr_info "Not running as root; cannot install a downloader automatically."
+            return 1
+        fi
     fi
 
     dl_id=""
@@ -348,14 +359,22 @@ install_downloader ()
     fi
 
     case "$dl_id" in
-        arch)          pacman -Sy --noconfirm curl || true ;;
-        debian|ubuntu|linuxmint) apt-get update && apt-get install -y curl || true ;;
-        fedora|rhel|centos|rocky|almalinux|amzn) dnf install -y curl || true ;;
-        alpine)        apk add --no-cache curl || true ;;
-        opensuse*|sles) zypper install -y curl || true ;;
+        arch)          $SUDO pacman -Sy --noconfirm curl || true ;;
+        debian|ubuntu|linuxmint) $SUDO apt-get update && $SUDO apt-get install -y curl || true ;;
+        fedora|rhel|centos|rocky|almalinux|amzn)
+            # Amazon Linux 2 has yum and no dnf; the newer RHEL family is the
+            # other way round.
+            if command -v dnf > /dev/null 2>&1; then
+                $SUDO dnf install -y curl || true
+            else
+                $SUDO yum install -y curl || true
+            fi
+            ;;
+        alpine)        $SUDO apk add --no-cache curl || true ;;
+        opensuse*|sles) $SUDO zypper install -y curl || true ;;
         *)
             pr_warn "Unsupported distro ID '%s'; attempting 'curl' by name." "${dl_id:-unknown}"
-            command -v apk > /dev/null && apk add --no-cache curl || true
+            command -v apk > /dev/null && $SUDO apk add --no-cache curl || true
             ;;
     esac
 
@@ -449,6 +468,11 @@ install_json_parser ()
     command -v jq > /dev/null && return 0
     command -v python3 > /dev/null && return 0
 
+    if [ "${URNET_NO_AUTOINSTALL:-0}" = "1" ]; then
+        pr_info "URNET_NO_AUTOINSTALL=1: not installing a JSON parser"
+        return 1
+    fi
+
     pr_info "Neither 'jq' nor 'python3' found; installing a JSON parser..."
 
     # A package manager needs root. On the OpenRC path the install is run AS
@@ -482,7 +506,11 @@ install_json_parser ()
             $SUDO apt-get update && $SUDO apt-get install -y jq || $SUDO apt-get install -y python3 || true
             ;;
         fedora|rhel|centos|rocky|almalinux|amzn)
-            $SUDO dnf install -y jq || $SUDO dnf install -y python3 || true
+            if command -v dnf > /dev/null 2>&1; then
+                $SUDO dnf install -y jq || $SUDO dnf install -y python3 || true
+            else
+                $SUDO yum install -y jq || $SUDO yum install -y python3 || true
+            fi
             ;;
         alpine)
             # community may be absent from a minimal image's repositories; the
@@ -2064,9 +2092,13 @@ func_root_guard ()
     pr_info "needs a session bus that root lacks. As root the service cannot be enabled"
     pr_info "and you will hit 'Failed to connect to bus' errors."
 
-    # Non-interactive (curl | sh with no terminal): cannot prompt. Preserve the
+    # Non-interactive (curl | sh with no terminal, -f, or a container whose
+    # /dev/tty node exists but cannot be opened): cannot prompt. Preserve the
     # documented root tools-only path, but warn loudly and show the fix.
-    if [ ! -r /dev/tty ]; then
+    # `[ -r /dev/tty ]` is not enough: under `docker run` the node is readable
+    # but opening it fails with ENXIO, so the old guard fell through to a read
+    # that returned an empty choice and exited 1. Probe by OPENING it.
+    if [ "${FORCE:-0}" = "1" ] || ! { : < /dev/tty ; } 2>/dev/null; then
         pr_warn "No interactive terminal; continuing with tools only (no service)."
         pr_info "To run the provider service, create a user and install as them:"
         pr_info "    useradd -m -s /bin/sh urnet && loginctl enable-linger urnet"

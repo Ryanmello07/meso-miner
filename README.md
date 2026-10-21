@@ -1,4 +1,4 @@
-# ⛓ UrNetwork v3.23 Fix
+# meso-miner
 
 [![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/urfoundation/meso-miner?utm_source=oss&utm_medium=github&utm_campaign=urfoundation%2Fmeso-miner&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)](https://coderabbit.ai)
 [![CI](https://github.com/urfoundation/meso-miner/actions/workflows/build.yml/badge.svg)](https://github.com/urfoundation/meso-miner/actions)
@@ -7,50 +7,68 @@
 ![Language](https://img.shields.io/github/languages/top/urfoundation/meso-miner?labelColor=171717&color=FF570A)
 ![Activity](https://img.shields.io/github/commit-activity/m/urfoundation/meso-miner?labelColor=171717&color=FF570A)
 
-A high-performance, high-visibility fork of the **UrNetwork Connect** provider, based on the stable **v3.23** engine. Tuned for professional providers managing large proxy lists, high throughput, and production-grade operations.
+meso-miner runs a URnetwork provider: a small program on your server or home computer that shares your bandwidth with the network and earns for it. This is the meso-miner build, a production-focused fork made for people who run many proxies and many machines. It installs as a normal background service and updates itself with one command.
 
-## 🆚 What this fork changes vs upstream
+## 🚦 Start here
 
-| | Upstream | This fork |
-| :--- | :--- | :--- |
-| Control-plane dial visibility | Debug-level glog (silent by default) | INFO — one line per successful backend dial (`[net][s]select`, control-plane not relay traffic) |
-| Contract sizing | Fixed 1 MiB initial, 4-contract ramp to 128 MiB standard | Profile-tuned initial size (256 KiB lowmem/balanced, 1 MiB default) with a faster 3-contract ramp |
-| Proxy startup | All at once | Jittered stagger with live `[pace]` warmup, plus a shared adaptive rate limiter that bounds aggregate auth load on the API |
-| Proxy changes | Restart required | Hot-reload via trigger file, zero downtime, with full added-proxy listing |
-| Dead proxy handling | Retry forever (15 min loop, no ceiling) | 24 h daily retry, 14-day drop (file) or 65 min cleanup (URL), persisted state |
-| Proxy source | Static file only | File and/or live URL feed, with scoped auto-cleanup |
-| Error noise | Log-level throttle (suppresses repeated lines) | Shared auth rate limiter reduces the error source itself — fewer API calls hit the failure path |
-| Proxy health grading | None | A–F reachability grade per proxy with continuous re-probing (`proxy health`, `proxy trim`) |
-| Fleet visibility & accounting | None | Built-in CLI accounting (`usage`, `proxy traffic`), persistent byte splits, and Prometheus metrics (`urnet-tools metrics on`) |
-| Performance profiles | None | Auto / Turbo V4 / Turbo V8 / Eco / Lowmem — memory, window, and GC tuned per profile |
-| Crash diagnostics | Journal-only, logs lost on restart | Shared-memory RAM logs (`shmlog`) + disk-based critical event log, panic hooks |
-| Custom API/connect backend | One-off `--api_url`/`--connect_url` flags only, re-passed on every invocation | `choose_network` persists the URLs to disk; flags still override per-call |
-| Runtime settings | Edit systemd drop-ins by hand, then restart | Live control socket (`~/.urnetwork/provider.sock`); changes apply without a restart and are queued in `pending_overrides.json` when the provider is stopped |
-| Binary upgrade | Stop, swap, start (20–60 s of downtime) | HotSwap handoff to a verified candidate, with automatic rollback: no gap where no provider process is running, though proxy connections still ramp back over about 30 s (requires a `Type=notify` unit, which `urnet-tools update` sets up; see [docs/HotSwap.md](docs/HotSwap.md)) |
-| Node identity on the dashboard | Hostname only | `rename` sets the display label and `show-ip` appends the public IP, both without a restart |
-| Multi-provider boxes | One provider per host, no targeting | One provider per OS user, with `providers` / `providers --all` inventory and cross-user `sudo` self-elevation |
-| Session migration | None | `session save` / `session load` exports identity + proxy state as an encrypted bundle for cross-machine transfer |
-| Subnet 25 telemetry | None | `sn-status` command with STSubnet operations guide, wallet registration, and head-fleet tiering docs |
-| Subnet 25 claims | Network token only | `provider claim` takes an explicit client credential (`--store-client`, `--provider-jwt` or `--legacy-coldkey`), and a failed renewal no longer replaces a client identity |
-| Memory-thrash recovery | None | Swap-thrash watchdog with a supervised exit-75 restart (systemd and containers both restart it; self-heal is the one switch) |
-| Windows operations | Not provided | `urnet-tools` runs natively on Windows: no `tail`, `sudo` or WSL, and its log follower survives rotation |
+New to this? Three steps:
+
+1. **Get an auth code** from [app.ur.network](https://app.ur.network), [ur.io](https://ur.io/), or the URnetwork mobile app.
+2. **Install** with the one-liner for your system (see [Install](#install) below), then run `urnetwork auth` and paste the code.
+3. **Check it works** with `urnet-tools status`.
+
+That is all you need to start. Nothing has to be opened on your firewall, because the provider only makes outbound connections.
+
+Not sure which guide to read? Pick your level:
+
+| If you are... | Read |
+| :--- | :--- |
+| Brand new, want the shortest path | [🐣 Beginner](docs/guides/beginner.md) |
+| Choosing between Docker and a normal install, adding your own proxies | [🧭 Intermediate](docs/guides/intermediate.md) |
+| Running several servers and tuning them | [🚀 Advanced](docs/guides/advanced.md) |
+
+## ✨ What meso-miner adds
+
+- **Proxy handling made easy.** Load proxies from a file or a live URL, add or remove them while the provider runs, and see which ones are healthy (`urnet-tools proxy health`) with an A to F grade.
+- **Updates without a gap.** `urnet-tools update` hands over to the new version with automatic rollback. See [HotSwap](docs/HotSwap.md).
+- **Change settings live.** `urnet-tools set` changes tuning without editing service files or restarting.
+- **Built-in traffic numbers.** `urnet-tools usage` shows billable traffic against control traffic, with history graphs.
+- **Monitoring.** Turn on Prometheus metrics with `urnet-tools metrics on` and use the ready-made Grafana bundle. See [Monitoring](docs/Monitoring.md).
+- **Safer under pressure.** Memory profiles (`auto`, `turbo`, `eco`, `lowmem`), a swap-thrash watchdog that restarts a stuck provider, and protection against reconnect storms during platform outages.
+- **Many providers per machine.** One provider per OS user, with `urnet-tools providers` to list them.
+- **Move a node.** `urnet-tools session save` and `session load` carry your identity and proxies to another machine.
+- **Runs almost anywhere.** Linux (systemd and Alpine/OpenRC), macOS, Windows, FreeBSD and Docker.
+- **Bittensor subnet 25 tools.** Sign one wallet message to get paid, then check with `provider wallet status`. See the [Bittensor Quick Start](docs/Bittensor-Quick-Start.md).
+
+The complete list of differences from upstream is in [FORK_CHANGES.md](FORK_CHANGES.md).
+
+## ₿ Bittensor Subnet 25
+
+Most operators need to do one thing: sign a single wallet message, once, from their own computer. Your nodes do not change. Everything else here (hotkeys, claim daemons, fleets, multiple operators) is optional or advanced, and skipping it costs you nothing. Nothing here runs unless you start it.
+
+- [Bittensor Quick Start](docs/Bittensor-Quick-Start.md): start here. Check where you stand, sign once, and see which commands you can ignore.
+- [Bittensor operations](docs/Bittensor-Operations.md): the overview, from the two tiers and wallet consent through claims and the FAQ.
+- [Bittensor head tier](docs/Bittensor-Head-Tier.md): the optional, advanced tier. Most operators should skip it.
+- [Bittensor glossary](docs/Bittensor-Glossary.md): plain meanings of the words.
+- [Bittensor claim daemons](docs/Bittensor-Claim-Daemons.md), [fleet](docs/Bittensor-Fleet.md), [hotkey delegation](docs/Bittensor-Hotkey-Delegation.md) and [multi-operator](docs/Multi-Operator.md): optional or advanced.
 
 ---
 
-## 🗺 Start Here
+## 🗺 Find a topic
 
 | If you want to... | Go here |
 | :--- | :--- |
-| **Start here — pick your skill level** | [🐣 Beginner](docs/guides/beginner.md) · [🧭 Intermediate](docs/guides/intermediate.md) · [🚀 Advanced](docs/guides/advanced.md) |
+| **Get paid on Bittensor SN25 (do I need to do anything?)** | [Bittensor Quick Start](docs/Bittensor-Quick-Start.md) |
 | Install on a Linux host as a user-level service | [Installation Guide](docs/Installation.md) |
 | Run one Docker container | [Docker Deployment](docs/Docker-Deployment.md) |
 | Run multiple containers on one host | [Multi-Container Scaling](docs/Multi-Container-Scaling.md) |
 | Choose profiles, turbo mode, or host tuning | [Performance Tuning](docs/High-Volume-Performance-Tuning.md) |
 | Understand environment variables | [Configuration Reference](docs/Configuration.md) |
-| Interpret provider logs | [Log Message Reference](LOG_REFERENCE.md) |
+| Understand what a log line means | [Log Message Reference](LOG_REFERENCE.md) |
 | Track traffic usage (billable vs control overhead) | [Docker Deployment](docs/Docker-Deployment.md) · [CLI Reference](docs/urnet-tools-go.md) |
 | Load a proxy file into the provider (per-OS) | [Adding Proxies](docs/Adding-Proxies.md) |
 | Feed the provider a live proxy list URL | [Proxy URL Sources](docs/Proxy-URL-Sources.md) |
+| Fix a problem | [Troubleshooting](docs/Troubleshooting.md) |
 | Import into a Pelican game-server panel | [Pelican Panel](docs/Docker-Deployment.md#-pelican-panel) · [Egg README](pelican/README.md) |
 
 ---
@@ -112,7 +130,7 @@ Windows Defender may flag this one-liner. See the note below.
 - `Trojan:Script/Wacatac.B!ml`, `Trojan:Script/Wacatac.C!ml`: Defender's machine-learning label for the PowerShell installer script fetching and extracting a remote payload.
 - `Trojan:Win32/Wacatac.B!ml`, `Trojan:Win32/Wacatac.C!ml`: Defender's machine-learning label for files whose shape looks like a packed trojan. Our Go binaries are stripped, statically linked and unsigned, which reads as a packed payload. The B and C variants are different model generations, so one binary can be flagged under more than one name. `Trojan:Win32/Execution.A!ml` is another label from the same family on some builds.
 - `Trojan:Win32/Commando.A!ml`: fires on the download-and-run command line itself (the `irm ... | iex` one-liner), not on the installed files. Fetching a remote script and piping it into execution reads as a trojan-downloader pattern to the model.
-- `Trojan:Win32/Bearfoos.A!ml`: a behavioural label for scheduled-task activity. The installer registers Task Scheduler tasks — a weekly update task (on `latest` installs) and, if you accept auto-start, a logon task so the provider starts at login — and a behavioural model cannot tell that apart from persistence malware.
+- `Trojan:Win32/Bearfoos.A!ml`: a behavioural label for scheduled-task activity. The installer registers Task Scheduler tasks - a weekly update task (on `latest` installs) and, if you accept auto-start, a logon task so the provider starts at login - and a behavioural model cannot tell that apart from persistence malware.
 
 </details>
 
@@ -132,7 +150,7 @@ On Windows, run the same commands in PowerShell but use a Windows path, e.g.
 walkthrough, including the `.txt.txt` extension trap: [Adding Proxies](docs/Adding-Proxies.md).
 
 > [!NOTE]
-> Since v3.23.0-fix.27.0, `urnet-tools` is a provider-aware Go binary (the legacy POSIX shell + PowerShell variants are retired). It discovers every provider on the box and **refuses to act on an ambiguous target** — on multi-provider machines, pass `--unit` / `--user` / `--network` / `--network-id` / `--state-dir`. See [docs/urnet-tools-go.md](docs/urnet-tools-go.md).
+> `urnet-tools` is a provider-aware Go binary. It discovers every provider on the box and **refuses to act on an ambiguous target** - on multi-provider machines, pass `--unit` / `--user` / `--network` / `--network-id` / `--state-dir`. See [docs/urnet-tools-go.md](docs/urnet-tools-go.md).
 >
 > Docker-only deployments: the provider runs in a container, but the management tool (`urnet-docker`) runs **on the docker host, outside the container**. Install it with the one-liner above (use `curl -fSsL https://raw.githubusercontent.com/urfoundation/meso-miner/refs/heads/main/scripts/install-urnet-docker.sh | sh -s -- urnet-tools` for the systemd variant). The tool self-updates afterward (`urnet-docker update`).
 
@@ -146,7 +164,7 @@ curl -fSsL https://raw.githubusercontent.com/urfoundation/meso-miner/refs/heads/
 
 **🍎 macOS**
 
-Manual — see [docs/Installation.md](docs/Installation.md).
+Manual - see [docs/Installation.md](docs/Installation.md).
 
 **🪟 Windows (PowerShell)**
 
@@ -169,7 +187,7 @@ rm ~/.local/bin/urnet-docker     # non-root install
 
 ### 🐋 Docker (Production-Ready)
 
-Recommended for real deployments — includes auto-tuning, in-memory logs, and persistent config with zero listening ports:
+Recommended for real deployments - includes auto-tuning, in-memory logs, and persistent config with zero listening ports:
 
 ```bash
 docker run -d \
@@ -191,11 +209,11 @@ docker run -d \
 ```
 
 **Key env vars:**
-- `URNETWORK_PROFILE=auto` — Auto-tunes based on available RAM (balanced, lowmem, etc.)
-- `URNETWORK_RAMLOGS=1` — In-memory logging for fast diagnostics (view with `urnet-docker logs`)
-- `URNETWORK_AUTH_CODE` — Auth code is exchanged for your JWT token, obtained from https://ur.io (single-use on first run; saved to volume)
-- `PROXY_URL` — Optional live proxy list URL (comma-separated for multiple), additive with the mounted `proxy.txt`. See [Proxy URL Sources](docs/Proxy-URL-Sources.md).
-- `UR_API_URL` / `UR_CONNECT_URL` — Point at a custom API + connect backend instead of `bringyour.com`. Must be set together; saved to the `~/.urnetwork` volume so it survives restarts. See [Configuration Reference](docs/Configuration.md).
+- `URNETWORK_PROFILE=auto` - Auto-tunes based on available RAM (balanced, lowmem, etc.)
+- `URNETWORK_RAMLOGS=1` - In-memory logging for fast diagnostics (view with `urnet-docker logs`)
+- `URNETWORK_AUTH_CODE` - Auth code is exchanged for your JWT token, obtained from https://ur.io (single-use on first run; saved to volume)
+- `PROXY_URL` - Optional live proxy list URL (comma-separated for multiple), additive with the mounted `proxy.txt`. See [Proxy URL Sources](docs/Proxy-URL-Sources.md).
+- `UR_API_URL` / `UR_CONNECT_URL` - Point at a custom API + connect backend instead of `bringyour.com`. Must be set together; saved to the `~/.urnetwork` volume so it survives restarts. See [Configuration Reference](docs/Configuration.md).
 
 > [!TIP]
 > Providers do not require any listening ports. Outbound connections handle all traffic. If you wish to enable the optional vnstat web monitor, see [Running with vnstat](docs/Docker-Deployment.md#-optional-running-with-vnstat-bandwidth-monitor).
@@ -203,7 +221,7 @@ docker run -d \
 See [Docker Deployment](docs/Docker-Deployment.md) for Docker Compose, email/password auth, Watchtower, multi-container, and advanced options.
 
 > [!NOTE]
-> **Docker Management** — Use `urnet-docker` directly on the host (no `docker exec` wrapping needed):
+> **Docker Management** - Use `urnet-docker` directly on the host (no `docker exec` wrapping needed):
 > - `urnet-docker status`
 > - `urnet-docker direct status` (or `urnet-docker direct off` for proxy-only mode)
 > - `urnet-docker usage` (or `urnet-docker usage graphs` for time-series history)
@@ -251,9 +269,9 @@ See [Docker Deployment](docs/Docker-Deployment.md) for Docker Compose, email/pas
 
 ---
 
-## 📡 Telemetry & Legacy Fleet Dashboard
+## 📡 Telemetry and monitoring
 
-UrNetwork Connect provides rich standalone metrics directly via `urnet-tools usage` and `urnet-docker usage` (billable vs control plane accounting with hour/day/month historical graphs).
+Traffic numbers are built in: `urnet-tools usage` and `urnet-docker usage` (billable vs control plane accounting with hour/day/month historical graphs).
 
 Prometheus metrics are built in. `urnet-tools metrics on` turns them on without a
 restart and prints the address to scrape: loopback plus the machine's Tailscale
@@ -262,14 +280,14 @@ The `monitoring/` bundle runs Prometheus and Grafana with a ready-made fleet
 dashboard. See [Monitoring](docs/Monitoring.md).
 
 > [!NOTE]
-> **Fleet Dashboard (Deprecated):** The multi-node aggregation hub dashboard has been removed as of v31.3+. For fleet-wide visibility, use Prometheus metrics (`urnet-tools metrics on`) with the [Monitoring bundle](docs/Monitoring.md), or Grafana for custom dashboards. Historical documentation is retained at [Hub Setup](docs/Hub-Setup.md) and [Hub Dashboard](docs/Hub-Dashboard.md) for reference.
+> **No fleet dashboard in the app.** The old hub dashboard was removed in v31.3. To watch many machines at once, turn on Prometheus metrics (`urnet-tools metrics on`) and use the [Monitoring bundle](docs/Monitoring.md) or your own Grafana.
 
 ---
 
 ## 💡 Recommended Defaults
 
 - Use the **Linux installer** for a host-managed systemd service
-- Use **Docker** if you prefer containers — both are fully documented
+- Use **Docker** if you prefer containers - both are fully documented
 - Leave profile on **`auto`** unless you have a specific reason to override
 - Mount `/root/.urnetwork` as a persistent volume in Docker deployments
 - Run `urnet-tools optimize` after adding a large proxy list, or when the System Auditor flags kernel limits
@@ -288,8 +306,9 @@ dashboard. See [Monitoring](docs/Monitoring.md).
 - [Proxy Management & Hot-Reload](docs/Proxy-Management.md)
 - [High-Volume Performance Tuning](docs/High-Volume-Performance-Tuning.md)
 - [Monitoring](docs/Monitoring.md)
-- [Hub Setup](docs/Hub-Setup.md) *(deprecated — removed in v31.3+)*
-- [Hub Dashboard](docs/Hub-Dashboard.md) *(deprecated — removed in v31.3+)*
+- [Troubleshooting](docs/Troubleshooting.md)
+- [Bittensor Quick Start](docs/Bittensor-Quick-Start.md) · [Bittensor Operations](docs/Bittensor-Operations.md) · [Head Tier](docs/Bittensor-Head-Tier.md) · [Glossary](docs/Bittensor-Glossary.md)
+- [Bittensor Claim Daemons](docs/Bittensor-Claim-Daemons.md) · [Bittensor Fleet](docs/Bittensor-Fleet.md) · [Bittensor Hotkey Delegation](docs/Bittensor-Hotkey-Delegation.md) · [Multi-Operator](docs/Multi-Operator.md)
 - [Project Structure](docs/Project-Structure.md)
 - [Log Message Reference](LOG_REFERENCE.md)
 - [Go urnet-tools Reference](docs/urnet-tools-go.md)
@@ -304,7 +323,7 @@ dashboard. See [Monitoring](docs/Monitoring.md).
 
 ## 🏗 Build Info
 
-- **Base engine:** UrNetwork v3.23
+- **Base engine:** the URnetwork connect engine, brought up to the 33.1/34 generation (see [CHANGELOG.md](CHANGELOG.md)). This line began as a fork of the 3.23-fix line and has its own release numbers, such as `v2026.10.20-1076956260-meso`
 - **Language:** Go 1.27.3, compiled on Alpine
 - **Platforms:** Linux (systemd, and Alpine/OpenRC with a native boot-start service), macOS, Windows and FreeBSD. Alpine setup: [docs/OpenRC.md](docs/OpenRC.md); FreeBSD setup: [docs/FreeBSD.md](docs/FreeBSD.md)
 - **Images:** Multi-arch `linux/amd64` + `linux/arm64`, `darwin/amd64` + `darwin/arm64` via GitHub Actions → GHCR

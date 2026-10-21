@@ -1,159 +1,169 @@
-# AI Guide — Meso-Miner Provider
+# AI Guide: URnetwork Provider (meso-miner)
 
-This file is designed for an AI agent to read so it can help users install, configure, and manage the provider. It references the project's existing documentation rather than duplicating it. Give this file to your AI alongside the linked docs below.
+This file is for an AI assistant that helps a user install, configure and manage the provider. It points at the project docs instead of repeating them. Give it to your AI together with the linked pages.
 
-## Project Layout
+Always check a command against `urnet-tools help <command>` or the linked doc before running anything that changes a live system.
 
-See [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for the full directory layout. Quick orientation:
+## Project layout
 
-- `provider/` — the traffic-relay binary that serves proxies and earns money
-- `cmd/urnet-tools` + `cmd/urnet-docker` + `internal/urnettools/` — the provider-aware Go fleet-ops tool (v3.23.0-fix.27.0+; the shell installer `scripts/Provider_Install_Linux.sh` remains the installer but no longer doubles as the CLI)
-- `docs/` — user-facing documentation (Installation, Configuration, Proxies, etc.)
-- `Dockerfile` — provider Docker image
+See [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for the full map. In short:
 
-## Quick Start: Install the Provider
+- `provider/` is the relay binary that serves proxies and earns.
+- `cmd/urnet-tools`, `cmd/urnet-docker` and `internal/urnettools/` are the operator tool. The shell installer `scripts/Provider_Install_Linux.sh` only installs; it is not the CLI.
+- `docs/` holds the user documentation.
+- `Dockerfile` and `docker/scripts/` build the container image.
+- `monitoring/` is the Prometheus and Grafana bundle.
+
+## Install the provider
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/urfoundation/meso-miner/refs/heads/main/scripts/Provider_Install_Linux.sh | bash
+curl -fsSL https://raw.githubusercontent.com/urfoundation/meso-miner/refs/heads/main/scripts/Provider_Install_Linux.sh | sh
 ```
 
-The same script becomes the `urnet-tools` CLI after installation. Full install docs: [docs/Installation.md](docs/Installation.md).
+This installs the provider and the `urnet-tools` command. macOS, Windows, FreeBSD and Alpine (OpenRC) have their own installers. Full details: [docs/Installation.md](docs/Installation.md).
 
 ### Authenticate
 
-You need an **auth code** from the URnetwork website. The provider exchanges it for a JWT.
+The user needs an auth code from [app.ur.network](https://app.ur.network), [ur.io](https://ur.io/) or the mobile app.
 
 ```bash
-urnet-tools auth                    # interactive — paste auth code at prompt
-urnet-tools auth <auth-code>        # non-interactive
-urnet-tools auth <jwt>              # or paste a JWT directly
+urnetwork auth                  # prompts for the code
+urnet-tools auth <auth-code>    # same, non-interactive
 ```
 
-Docker deployments can use email/password instead (see [Docker Deployment](docs/Docker-Deployment.md)), which the container exchanges for a JWT internally.
+Docker deployments can use `URNETWORK_AUTH_CODE` or an email and password instead. See [Docker Deployment](docs/Docker-Deployment.md).
 
-### Add Proxies
+### Add proxies
 
 ```bash
-urnet-tools proxy add file proxies.txt     # one ip:port per line
-urnet-tools proxy add url https://...      # auto-refreshing URL source
-urnet-tools proxy summary                  # fleet-wide proxy overview
+urnet-tools proxy add proxies.txt           # one proxy per line
+urnet-tools proxy add-source https://...    # live URL source that refreshes itself
+urnet-tools summary                         # sources, health and counts
+urnet-tools proxy refresh                   # reload live, no restart
 ```
 
-Full proxy docs: [docs/Proxy-Management.md](docs/Proxy-Management.md), [docs/Proxy-URL-Sources.md](docs/Proxy-URL-Sources.md).
+Docs: [Proxy Management](docs/Proxy-Management.md), [Proxy URL Sources](docs/Proxy-URL-Sources.md), [Adding Proxies](docs/Adding-Proxies.md).
 
-## Docker Deployment
+## Docker
 
 Full guide: [docs/Docker-Deployment.md](docs/Docker-Deployment.md).
 
 ```bash
 docker pull ghcr.io/urfoundation/meso-miner:latest
-docker run -d \
-  -e USER_AUTH=email@example.com \
-  -e PASSWORD=secret \
-  -v /path/to/proxies.txt:/app/proxies.txt:ro \
-  ghcr.io/urfoundation/meso-miner:latest
 ```
 
-## Performance Tuning
+Manage containers from the host with `urnet-docker` (install with `scripts/install-urnet-docker.sh`). It takes the same commands as `urnet-tools`.
+
+## Performance tuning
 
 Full guide: [docs/High-Volume-Performance-Tuning.md](docs/High-Volume-Performance-Tuning.md).
 
 ```bash
+urnet-tools auto on           # pick a profile from detected RAM
 urnet-tools turbo v8          # high-throughput profile
-urnet-tools auto on           # auto-tune based on detected RAM
 urnet-tools eco on            # low-memory GC tuning
-urnet-tools optimize          # apply OS kernel limits (ulimit, conntrack, etc.)
-urnet-tools ramlogs on        # redirect logs to /dev/shm (RAM disk)
+urnet-tools optimize          # raise OS limits (ulimit, conntrack)
+urnet-tools ramlogs on        # logs in RAM (/dev/shm)
 ```
 
-## Reference: All urnet-tools Commands
+## Common urnet-tools commands
 
 ```bash
-# Auth & Setup
-urnet-tools auth                    # interactive — paste auth code
-urnet-tools auth <auth-code>        # non-interactive
-urnet-tools update                  # update provider binary
-urnet-tools reinstall              # full reinstall
-urnet-tools choose_network <api_url> <connect_url>  # save a custom API/connect backend
-urnet-tools choose_network --reset  # clear saved custom network, revert to main network
+# Service
+urnet-tools status | start | stop | restart
+urnet-tools logs [N]               # last N lines, then follow
+urnet-tools top                    # live full-screen view
+urnet-tools update                 # upgrade the provider
+urnet-tools hotswap                # swap to a new binary with no gap
+urnet-tools self-update            # update urnet-tools itself
+urnet-tools uninstall
 
-# Proxy Management
-urnet-tools proxy add file <path>  # bulk add from file
-urnet-tools proxy add url <url>    # auto-refreshing URL source
-urnet-tools proxy remove <addr>    # remove specific proxy
-urnet-tools proxy remove --match <pattern>  # pattern-based removal
-urnet-tools proxy remove-dead      # interactive dead proxy cleanup
-urnet-tools proxy refresh          # hot-reload proxies (no restart)
-urnet-tools proxy clear            # remove all proxies
-urnet-tools proxy summary          # fleet-wide proxy overview
-urnet-tools proxy health           # dead/degraded proxy list
-urnet-tools proxy traffic          # real-time bandwidth & clients
+# Proxies
+urnet-tools proxy add <file> | paste | clear | remove | refresh
+urnet-tools proxy health           # up, degraded and dead proxies
+urnet-tools proxy traffic          # live bandwidth per proxy
+urnet-tools proxy trim <N>         # hold at N proxies, shed the worst first
+urnet-tools proxy remove-dead      # interactive cleanup
 
-# Performance
-urnet-tools turbo v4|v8|off        # throughput profile
-urnet-tools auto on|off            # auto-tune profile
-urnet-tools eco on|off             # low-memory GC mode
-urnet-tools lowmode on|off         # reduced buffer allocations
-urnet-tools optimize               # apply Golden Fleet OS limits
-urnet-tools ramlogs on|off         # RAM-disk logging
+# Settings
+urnet-tools set [<key> [<value>|off]]   # show or change a runtime setting
+urnet-tools config [--json]             # every setting and where it came from
+urnet-tools profile [<name>]            # memory and GC profile
+urnet-tools metrics on|off              # Prometheus /metrics
+urnet-tools usage [graphs]              # billable vs control traffic
+urnet-tools choose-network <api_url> <connect_url>   # custom backend
+urnet-tools choose-network --reset
 
-# Maintenance
-urnet-tools start|stop|restart|status  # service management
-urnet-tools logs [all|dump|-i]     # stream logs (-i = important only)
-urnet-tools uninstall              # full removal
-
-# Experimental
-urnet-tools hot-restart on|off     # client JWT reuse (default off)
-urnet-tools fast-auth on|off       # bypass auth rate limiter
+# Identity
+urnet-tools rename <name>               # dashboard display label
+urnet-tools session save|load <file>    # move a node between machines
+urnet-tools providers [--all]           # list providers on this box
+urnet-tools sn-status                   # Bittensor subnet 25 status
 ```
 
-## Environment Variables
+On a box with more than one provider, add a target flag such as `--unit`, `--user`, `--network`, `--network-id` or `--state-dir`. Full reference: [docs/urnet-tools-go.md](docs/urnet-tools-go.md).
+
+## Environment variables
 
 Full reference: [docs/Configuration.md](docs/Configuration.md).
 
-Key variables:
 | Variable | Purpose |
 |----------|---------|
-| `USER_AUTH` / `PASSWORD` | Email/password auth |
-| `URNETWORK_AUTH_CODE` | JWT auth code (first-run) |
-| `UR_API_URL` / `UR_CONNECT_URL` | Custom API/connect backend (must be set together, Docker only) |
-| `ENABLE_VNSTAT` | Traffic monitor on port 8080 |
-| `URNETWORK_PROFILE` | `auto` (tiers: low/balanced/perf/extreme), `lowmem`, `eco`, `turbo-v4`, `turbo-v8` |
-| `PROXY_URL` | Live proxy URL feed (comma-separated) |
-| `URNETWORK_HEALTH_INTERVAL` | Health heartbeat interval |
-| `URNETWORK_RAMLOGS` | `1` = log to /dev/shm |
-| `URNETWORK_SKIP_AUDIT` | `1` = skip startup system audit (disk speed, ulimit, conntrack checks) |
-| `URNETWORK_HOT_RESTART` | `1` = experimental client JWT reuse |
+| `BUILD` | Docker start mode: `stable`, `nightly` or `jwt` |
+| `USER_AUTH` / `PASSWORD` | Email and password login |
+| `URNETWORK_AUTH_CODE` | Auth code for first run |
+| `UR_API_URL` / `UR_CONNECT_URL` | Custom API and connect backend (set both, Docker) |
+| `URNETWORK_PROFILE` | `auto`, `lowmem`, `eco`, `turbo-v4`, `turbo-v8` |
+| `PROXY_URL` | Live proxy list URL, comma-separated for several |
+| `URNETWORK_RAMLOGS` | `1` logs to `/dev/shm` |
+| `URNETWORK_HEALTH_INTERVAL` | How often the `[health]` line is logged |
+| `URNETWORK_SKIP_AUDIT` | `1` skips the startup system audit |
+| `URNETWORK_HOT_RESTART` | Reuse the client login across restarts. On by default; `0` turns it off |
 
-## Release & Versioning
+## Monitoring
 
-- `urnet-tools update` resolves "latest" to the newest release tag
-- `urnet-tools update` resolves "latest" to the newest release tag
-- Release notes in `releases/` directory
+The old hub dashboard no longer exists. For many machines, run `urnet-tools metrics on` on each and use the bundle in `monitoring/`. See [docs/Monitoring.md](docs/Monitoring.md).
 
-## Key Files
+## Releases
+
+- Release tags look like `v<YYYY.M.D>-<unix>-meso`, for example `v2026.10.20-1076956260-meso`.
+- The Docker image is `ghcr.io/urfoundation/meso-miner`; `:latest` follows the newest release.
+- `urnet-tools update` resolves "latest" from this repository's releases.
+- Notes: [CHANGELOG.md](CHANGELOG.md) and `releases/`.
+
+## Key files
 
 | Path | Purpose |
 |------|---------|
 | `~/.local/share/urnetwork-provider/bin/urnetwork` | Provider binary |
-| `~/.local/share/urnetwork-provider/bin/urnet-tools` | CLI tool |
-| `~/.config/systemd/user/urnetwork.service` | Provider systemd unit |
-| `~/.config/systemd/user/urnetwork.service.d/override.conf` | Provider env overrides |
-| `/dev/shm/urnetwork.log` | Provider ramdisk log (when ramlogs enabled) |
+| `~/.local/share/urnetwork-provider/bin/urnet-tools` | Operator tool |
+| `~/.urnetwork/provider.sock` | Control socket used by `urnet-tools` |
+| `~/.urnetwork/provider_state.json` | Saved runtime settings |
+| `~/.urnetwork/pending_overrides.json` | Changes queued while the provider is stopped |
+| `~/.config/systemd/user/urnetwork.service` | Provider systemd unit (user install) |
+| `~/.config/systemd/user/urnetwork.service.d/override.conf` | Environment overrides |
+| `/dev/shm/urnetwork.log` | RAM log when ramlogs is on |
 
 ## Troubleshooting
 
-## Documentation Index
+1. Run `urnet-tools status` and `urnet-tools logs`.
+2. Check proxies with `urnet-tools proxy health`.
+3. Look the log line up in [LOG_REFERENCE.md](LOG_REFERENCE.md).
+4. See [docs/Troubleshooting.md](docs/Troubleshooting.md).
+
+## Documentation index
 
 | Doc | Covers |
 |-----|--------|
-| [Installation](docs/Installation.md) | Bare-metal install, post-install setup |
-| [Docker Deployment](docs/Docker-Deployment.md) | Docker run, Compose, Watchtower, scaling |
-| [Configuration](docs/Configuration.md) | Complete env var reference, profiles |
-| [Proxy Management](docs/Proxy-Management.md) | Hot-reload, stable slots, dead cleanup |
-| [Proxy URL Sources](docs/Proxy-URL-Sources.md) | Live proxy feeds, dedup, cleanup |
-| [Performance Tuning](docs/High-Volume-Performance-Tuning.md) | Profiles, optimizer, parameters |
-| [Troubleshooting](docs/Troubleshooting.md) | Exit codes, errors, resource issues |
-| [Project Structure](PROJECT_STRUCTURE.md) | Directory layout, architecture |
-| [Log Reference](LOG_REFERENCE.md) | Every log line documented |
-| [Fork Changes](FORK_CHANGES.md) | All ~66 modifications from upstream |
+| [Installation](docs/Installation.md) | Install and post-install setup |
+| [Docker Deployment](docs/Docker-Deployment.md) | Docker run, Compose, scaling |
+| [Configuration](docs/Configuration.md) | Environment variables and profiles |
+| [Proxy Management](docs/Proxy-Management.md) | Hot reload, health, cleanup |
+| [Proxy URL Sources](docs/Proxy-URL-Sources.md) | Live proxy feeds |
+| [Performance Tuning](docs/High-Volume-Performance-Tuning.md) | Profiles and the optimizer |
+| [Monitoring](docs/Monitoring.md) | Prometheus and Grafana |
+| [Troubleshooting](docs/Troubleshooting.md) | Errors and resource problems |
+| [Bittensor Operations](docs/Bittensor-Operations.md) | Subnet 25 tools |
+| [Project Structure](PROJECT_STRUCTURE.md) | Directory layout |
+| [Log Reference](LOG_REFERENCE.md) | Every log line |
+| [Fork Changes](FORK_CHANGES.md) | Changes from upstream |
