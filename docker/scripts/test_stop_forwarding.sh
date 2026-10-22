@@ -122,6 +122,43 @@ fi
 # provider crash (wait returns non-zero) must not abort the supervisor, and
 # the crash must be logged with its real exit code.
 out="$tmp/crash"; mkdir -p "$out"
+# 3. Hotswap successor: a provider started by an earlier supervisor is not this
+# shell's child, so `wait` cannot reap it. The stop trap must signal it too, or
+# PID 1 exits and Docker SIGKILLs the successor in the middle of its shutdown.
+# The stand-in is a real process whose argv matches the pgrep pattern, so this
+# exercises func_forward_stop's sweep rather than a stub of it.
+mkdir -p "$tmp/app"
+bash -c "exec -a \"$tmp/app/urnetwork_fake provide\" sleep 30" &
+successor=$!
+i=0
+while [ "$i" -lt 50 ] && ! pgrep -f "^$tmp/app/urnetwork_fake provide" >/dev/null 2>&1; do
+    sleep 0.1; i=$((i+1))
+done
+if ! pgrep -f "^$tmp/app/urnetwork_fake provide" >/dev/null 2>&1; then
+    bad "successor stand-in never appeared in pgrep"
+    kill -KILL "$successor" 2>/dev/null
+else
+    out="$tmp/successor"; mkdir -p "$out"
+    OUT="$out" STUB="$tmp/app/urnetwork_stub" sh "$tmp/harness.sh" >"$out/stdout" 2>&1 &
+    sup=$!
+    if wait_file "$out/stub.pid"; then
+        kill -TERM "$sup"
+        i=0
+        while kill -0 "$sup" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i+1)); done
+        kill -KILL "$sup" 2>/dev/null
+        if kill -0 "$successor" 2>/dev/null; then
+            bad "hotswap successor survived the stop"
+            kill -KILL "$successor" 2>/dev/null
+        else
+            ok "hotswap successor was signalled and is gone"
+        fi
+    else
+        bad "successor case: supervisor never started"
+        kill -KILL "$sup" 2>/dev/null
+        kill -KILL "$successor" 2>/dev/null
+    fi
+fi
+
 # helper-copy drift guard: provider_common.sh is the canonical copy, and
 # pelican_panel.sh carries a standalone copy because the Pelican egg sources
 # it directly; the copies drift silently otherwise. Every script that defines
@@ -170,7 +207,7 @@ else
     bad "crash scenario stub never started"
 fi
 
-# 3. Docker: the same shell as PID 1, stopped with `docker stop` (default 10s
+# 4. Docker: the same shell as PID 1, stopped with `docker stop` (default 10s
 # timeout). Without the trap PID 1 ignores SIGTERM and the stop takes the full
 # timeout. The container harness is a separate file with APP_DIR=/app: inside
 # its own PID namespace /app cannot be answered by a host process, so the
