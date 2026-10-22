@@ -53,6 +53,7 @@ except (json.JSONDecodeError, KeyError, ValueError):
         null|None|"") return 1 ;;
     esac
     printf '%s\n' "$UPD_raw"
+    unset UPD_raw
 }
 
 # upd_asset_digest_from_json <release-json> <asset-name>
@@ -77,12 +78,14 @@ upd_asset_digest_from_json() {
 # jq is required (the image installs it and every update path already uses
 # it). Selection is pure: the caller owns the network and the logging.
 
-# upd_select_stable_release_json <releases-array-json>
+# upd_select_stable_release_json <releases-array-json> [arch]
 # Prints the first eligible stable release object (compact JSON), or nothing
-# when the page holds no eligible release. Exit status is jq's: non-zero only
-# when the JSON cannot be parsed.
+# when the page holds no eligible release. With [arch] set, a release must also
+# carry the linux-<arch> tarball: urnet-tools installs that binary, so a
+# fat-tarball-only release is not installable there. Exit status is jq's:
+# non-zero only when the JSON cannot be parsed.
 upd_select_stable_release_json() {
-    printf '%s' "$1" | jq -c '
+    printf '%s' "$1" | jq -c --arg req "${2:-}" '
       [ .[]
         | select(type == "object")
         | select((.draft // false) == false)
@@ -93,13 +96,56 @@ upd_select_stable_release_json() {
         | . as $r
         | ("urnetwork-provider-" + $r.tag_name + ".tar.gz") as $want
         | select([$r.assets[]? | select(.name == $want and ((.digest // "") | test("^sha256:[0-9a-fA-F]+$")))] | length > 0)
+        | select($req == ""
+                 or ([$r.assets[]? | select(.name == ("urnetwork-provider-" + $r.tag_name + "-linux-" + $req + ".tar.gz"))] | length > 0))
       ] | first // empty'
 }
 
 # upd_release_select_cleanup: POSIX sh has no function-local scope; drop the
 # UPD_ globals the selection walk uses (mirrors the digest helpers' rule).
 upd_release_select_cleanup() {
-    unset UPD_root UPD_per_page UPD_max_pages UPD_page UPD_page_json UPD_selected UPD_count
+    unset UPD_root UPD_want_arch UPD_per_page UPD_max_pages UPD_page UPD_page_json UPD_selected UPD_count
+}
+
+# --- Tarball asset selection -----------------------------------------------
+# A release ships one per-arch tarball per platform/GOARCH (name carries an
+# -<os>-<goarch> token: linux, freebsd, darwin, windows, ...) plus one OS-less
+# multi-arch fat tarball (urnetwork-provider-vX.tar.gz). Every platform is a
+# wanted build; the updater either takes the linux-<arch> tarball for this
+# container or, for tooling, the fat tarball. Both jq pickers resolve
+# EXACT names keyed on the release tag (upd_select_stable_release_json
+# already guarantees the fat tarball asset exists with a sha256 digest), so
+# decoy or wrong-platform assets can never win no matter how they sort or
+# what new platform gets added. UPD_PER_ARCH_OS_RES only feeds the no-jq
+# grep fallback, which cannot parse tag names.
+UPD_PER_ARCH_OS_RES="darwin|freebsd|linux|windows"
+
+# UPD_release_tag <release-json>: prints the tag_name (UPD_ global because
+# POSIX sh has no function-local scope).
+UPD_release_tag() {
+    printf '%s' "$1" | jq -r '.tag_name // empty' 2>/dev/null
+}
+
+# upd_pick_arch_tarball_name <release-json> <goarch>
+# Prints the name of the linux-<goarch> per-arch tarball, or nothing when the
+# release carries none (the caller then falls back to the fat tarball).
+upd_pick_arch_tarball_name() {
+    UPD_tag="$(UPD_release_tag "$1")"
+    [ -n "$UPD_tag" ] || return 0
+    printf '%s' "$1" | jq -r --arg want "urnetwork-provider-${UPD_tag}-linux-${2}.tar.gz" \
+        '.assets[] | .name | select(. == $want)
+      ' 2>/dev/null | head -n1
+}
+
+# upd_pick_fat_tarball_name <release-json>
+# Prints the name of the OS-less multi-arch fat tarball, or nothing when the
+# release carries none.
+upd_pick_fat_tarball_name() {
+    UPD_tag="$(UPD_release_tag "$1")"
+    [ -n "$UPD_tag" ] || return 0
+    printf '%s' "$1" | jq -r --arg want "urnetwork-provider-${UPD_tag}.tar.gz" \
+        '.assets[] | .name | select(. == $want)
+      ' 2>/dev/null | head -n1
 }
 
 # upd_fetch_stable_release_json <api-root>
@@ -109,6 +155,7 @@ upd_release_select_cleanup() {
 # exists in the walked pages.
 upd_fetch_stable_release_json() {
     UPD_root="$1"
+    UPD_want_arch="${2:-}"
     UPD_per_page="${UPD_RELEASE_PER_PAGE:-100}"
     UPD_max_pages="${UPD_RELEASE_MAX_PAGES:-10}"
     UPD_page=1
@@ -119,7 +166,7 @@ upd_fetch_stable_release_json() {
             upd_release_select_cleanup
             return 1
         fi
-        if ! UPD_selected="$(upd_select_stable_release_json "$UPD_page_json")"; then
+        if ! UPD_selected="$(upd_select_stable_release_json "$UPD_page_json" "$UPD_want_arch")"; then
             echo "upd_verify: could not parse release listing page $UPD_page" >&2
             upd_release_select_cleanup
             return 1
