@@ -11,10 +11,9 @@
 #      download source in mismatch output.
 #   3. POSIX discipline: no `local`, sources clean under dash.
 #   4. Tarball asset pickers: the arch picker takes the linux-<arch> per-arch
-#      tarball for this container (platform-correct selection; freebsd and the
-#      other platforms are wanted per-arch builds), the fat picker takes the
-#      OS-less multi-arch tarball, both consumers call the shared helpers, and
-#      the stale inline OS list is gone.
+#      tarball over any other platform's (freebsd first, the v34 regression),
+#      the fat picker takes the OS-less multi-arch tarball, both consumers
+#      call the shared helpers, and the stale inline OS list is gone.
 #   5. Source guard: no docker script names an upstream urnetwork repo in fetch URLs.
 #
 # HARNESS CONTRACT (regression-hardened): every assertion is evaluated INSIDE the t()
@@ -158,9 +157,6 @@ upd_verify_digest "$tmp/bad.bin" "$good_sum" "primary" >/dev/null 2>&1
 t "verify_digest rejects tampered content" test $? -ne 0
 
 # Source label must appear in mismatch output (error-indistinction fix).
-# Both commands must run inside one function defined in this file so the
-# assertion genuinely fails iff either command fails (sh -c would lose the
-# sourced helpers).
 mismatch_names_source() {
     upd_verify_digest "$tmp/bad.bin" "$good_sum" "mirror-fallback" 2> "$tmp/err.txt"
     grep -q "mirror-fallback" "$tmp/err.txt"
@@ -209,15 +205,90 @@ t "helper works when sourced by strict /bin/sh (dash-compatible)" test "$(cat "$
 t "helper globals cleaned after successful call" \
     sh -c ". '$HERE/update_verify.sh' && upd_asset_digest_from_json '$JSON_OK' '$ASSET' >/dev/null; test -z \"\${UPD_raw:-}\" && test -z \"\${UPD_json_clean:-}\" && test -z \"\${UPD_actual:-}\""
 
+# --- Stable release selection (upd_select_stable_release_json) ---
+# Regression: releases/latest returns the newest non-draft, non-prerelease
+# release whether or not it carries a provider tarball, so a docs-only or
+# tool-only release stalls every updater on that tag. An rc published with
+# the prerelease flag unset is returned as latest too and was installed as
+# stable. The selector must page past both.
+HEX_A="$(printf 'a%.0s' $(seq 1 64))"
+HEX_C="$(printf 'c%.0s' $(seq 1 64))"
+REL_STABLE='{"tag_name":"v3.23.0-fix.32.10","draft":false,"prerelease":false,"assets":[{"name":"urnetwork-provider-v3.23.0-fix.32.10.tar.gz","digest":"sha256:'"$HEX_B"'"}]}'
+REL_NOTES='{"tag_name":"v3.23.0-fix.33.1-notes","draft":false,"prerelease":false,"assets":[{"name":"urnet-tools-linux-amd64","digest":"sha256:'"$HEX_A"'"}]}'
+REL_RC_UNFLAGGED='{"tag_name":"v3.23.0-fix.33.0-rc5","draft":false,"prerelease":false,"assets":[{"name":"urnetwork-provider-v3.23.0-fix.33.0-rc5.tar.gz","digest":"sha256:'"$HEX_C"'"}]}'
+REL_RC_FLAGGED='{"tag_name":"v3.23.0-fix.33.0-rc6","draft":false,"prerelease":true,"assets":[{"name":"urnetwork-provider-v3.23.0-fix.33.0-rc6.tar.gz","digest":"sha256:'"$HEX_C"'"}]}'
+REL_DRAFT='{"tag_name":"v3.23.0-fix.33.2","draft":true,"prerelease":false,"assets":[{"name":"urnetwork-provider-v3.23.0-fix.33.2.tar.gz","digest":"sha256:'"$HEX_C"'"}]}'
+REL_NO_DIGEST='{"tag_name":"v3.23.0-fix.32.11","draft":false,"prerelease":false,"assets":[{"name":"urnetwork-provider-v3.23.0-fix.32.11.tar.gz","digest":""}]}'
+
+sel_tag() { upd_select_stable_release_json "$1" | jq -r '.tag_name // empty'; }
+
+t "selector skips a newer release without a provider asset" \
+    test "$(sel_tag "[$REL_NOTES,$REL_STABLE]")" = "v3.23.0-fix.32.10"
+t "selector never selects an unflagged rc tag as stable" \
+    test "$(sel_tag "[$REL_RC_UNFLAGGED,$REL_STABLE]")" = "v3.23.0-fix.32.10"
+t "selector skips a prerelease-flagged release" \
+    test "$(sel_tag "[$REL_RC_FLAGGED,$REL_STABLE]")" = "v3.23.0-fix.32.10"
+t "selector skips a draft release" \
+    test "$(sel_tag "[$REL_DRAFT,$REL_STABLE]")" = "v3.23.0-fix.32.10"
+t "selector skips a provider tarball without a sha256 digest" \
+    test "$(sel_tag "[$REL_NO_DIGEST,$REL_STABLE]")" = "v3.23.0-fix.32.10"
+t "selector keeps the newest stable release with an asset (normal case)" \
+    test "$(sel_tag "[$REL_STABLE]")" = "v3.23.0-fix.32.10"
+sel_none="$(upd_select_stable_release_json "[$REL_NOTES,$REL_RC_UNFLAGGED]")"
+t "selector yields nothing when no release is eligible" test -z "$sel_none"
+
+# Paging: a full first page of ineligible releases must not end the walk.
+# curl is stubbed (shell function) so the walk is fully offline.
+PAGE_ONE="[$REL_NOTES,$REL_RC_UNFLAGGED]"
+PAGE_TWO="[$REL_STABLE]"
+paging_out="$(
+    . "$HERE/update_verify.sh"
+    PAGE_ONE="$PAGE_ONE" PAGE_TWO="$PAGE_TWO" CALLS_FILE="$tmp/paging_calls.txt"
+    export PAGE_ONE PAGE_TWO CALLS_FILE
+    : > "$CALLS_FILE"
+    curl() {
+        printf '%s\n' "$*" >> "$CALLS_FILE"
+        case "$*" in
+            *"page=1"*) printf '%s' "$PAGE_ONE" ;;
+            *"page=2"*) printf '%s' "$PAGE_TWO" ;;
+            *) return 22 ;;
+        esac
+    }
+    UPD_RELEASE_PER_PAGE=2 UPD_RELEASE_MAX_PAGES=3 upd_fetch_stable_release_json "https://api.invalid/repo"
+)"
+t "paging walk reaches page 2 and returns the eligible release" \
+    test "$(printf '%s' "$paging_out" | jq -r '.tag_name // empty')" = "v3.23.0-fix.32.10"
+t "paging walk requested both pages" \
+    sh -c "grep -q 'page=2' '$tmp/paging_calls.txt'"
+
+paging_none="$(
+    . "$HERE/update_verify.sh"
+    curl() { printf '%s' "[$REL_NOTES,$REL_RC_UNFLAGGED]"; }
+    UPD_RELEASE_PER_PAGE=2 UPD_RELEASE_MAX_PAGES=2 upd_fetch_stable_release_json "https://api.invalid/repo" 2>/dev/null
+)"
+t "paging walk gives up after max pages without an eligible release" \
+    test -z "$paging_none"
+
+# Every update path must use the paged selector, never the single
+# /releases/latest endpoint.
+for f in start_update.sh urnet-tools.sh provider_common.sh; do
+    grep -q "/releases/latest" "$HERE/$f"
+    t "$f does not query the latest-release endpoint" test $? -ne 0
+    t "$f uses upd_fetch_stable_release_json" grep -q "upd_fetch_stable_release_json" "$HERE/$f"
+done
+
 # --- Tarball asset pickers (upd_pick_arch_tarball_name / upd_pick_fat_tarball_name) ---
+# Regression: the old inline filters listed only darwin/linux/windows as
+# per-arch OS tokens, so the freebsd-amd64 tarball (shipped since v34) looked
+# like the OS-less fat tarball and sorted ahead of it; the nightly updater
+# installed a FreeBSD binary into a linux container and nightly login failed.
 # The pickers live in update_verify.sh and both update consumers call them.
-# Regression: the old deny-list fat picker treated every provider tarball
-# without a listed OS token as the OS-less fat tarball, so a decoy artifact,
-# an unlisted new platform's tarball, or a musl-suffix variant of the arch
-# asset could win depending on how the assets sorted.
-# Fixture shaped like a real release: decoys and other platforms sort BEFORE
-# the linux assets the container wants. The pickers resolve EXACT names keyed
-# on tag_name, so none of the decoys can win.
+# Fixture shaped like the real v34.2 release: freebsd sorts BEFORE linux and
+# the fat tarball is last, exactly the ordering that triggered the bug. The
+# decoys are the shapes the old deny-list picker lost to: an unlisted new
+# platform token (would be mistaken for the fat tarball), a checksums-style
+# junk artifact (no OS token at all), and a musl-suffix variant of the arch
+# asset. The pickers resolve EXACT names keyed on tag_name, so none can win.
 JSON_V342='{"tag_name":"v3.23.0-fix.34.2","assets":[
   {"name":"urnet-tools-linux-amd64","digest":"sha256:1"},
   {"name":"urnetwork-provider-v3.23.0-fix.34.2-darwin-amd64.tar.gz","digest":"sha256:2"},
@@ -231,7 +302,7 @@ JSON_V342='{"tag_name":"v3.23.0-fix.34.2","assets":[
   {"name":"urnetwork-provider-v3.23.0-fix.34.2.tar.gz","digest":"sha256:7"}]}'
 
 got="$(upd_pick_arch_tarball_name "$JSON_V342" "amd64")"
-t "arch picker takes linux-amd64 over the other platforms regardless of asset order" \
+t "arch picker takes linux-amd64 over freebsd regardless of asset order" \
     test "$got" = "urnetwork-provider-v3.23.0-fix.34.2-linux-amd64.tar.gz"
 
 got="$(upd_pick_arch_tarball_name "$JSON_V342" "arm64")"
@@ -239,7 +310,7 @@ t "arch picker resolves the arm64 per-arch tarball" \
     test "$got" = "urnetwork-provider-v3.23.0-fix.34.2-linux-arm64.tar.gz"
 
 got="$(upd_pick_fat_tarball_name "$JSON_V342")"
-t "fat picker takes the OS-less tarball, never a per-arch one" \
+t "fat picker takes the OS-less tarball, never freebsd or darwin" \
     test "$got" = "urnetwork-provider-v3.23.0-fix.34.2.tar.gz"
 
 got="$(upd_pick_arch_tarball_name '{"assets":[{"name":"urnetwork-provider-v9-freebsd-amd64.tar.gz"}]}' "amd64")"
@@ -262,21 +333,12 @@ t "start_update.sh selects the fat tarball through the shared picker" \
     grep -q 'upd_pick_fat_tarball_name' "$HERE/start_update.sh"
 t "nightly updater calls the shared arch picker" \
     grep -q 'upd_pick_arch_tarball_name' "$HERE/provider_common.sh"
-# The old deny-list was an alternation string inside a jq test(). Match it as a
-# fixed string: grep -E treats a backslash-pipe as a literal pipe, so the
-# previous pattern silently missed variants. Then catch any other shape of
-# inline per-arch deny-list, comment lines aside: the arch picker is shared, so
-# no script may carry its own darwin/linux/windows token list (this test's
-# fixtures name real asset filenames and are excluded).
-t "stale inline per-arch OS alternation is gone from docker/scripts" \
-    test -z "$(grep -rFl -- '-darwin-|-linux-|-windows-' "$HERE" | grep -v 'test_update_verify.sh')"
-t "no per-arch OS token outside comments in docker/scripts" \
-    test -z "$(grep -rn -- '-darwin-' "$HERE" | grep -v '/test_update_verify\.sh:' \
-        | grep -vE ':[0-9]+: *#' )"
+t "stale inline darwin/linux/windows OS list is gone from docker/scripts" \
+    test -z "$(grep -rlE -- '-darwin-\|-linux-\|-windows-' "$HERE")"
 
 # Nightly asset mapping: URL->name match-back finds the API name even when
 # the URL layout changes above the filename segment.
-URL_V9="https://github.com/urfoundation/meso-miner/releases/download/v3.23.0-fix.34.2/urnetwork-provider-v3.23.0-fix.34.2.tar.gz"
+URL_V9="https://github.com/full-bars/urnetwork-3.23-fix/releases/download/v3.23.0-fix.34.2/urnetwork-provider-v3.23.0-fix.34.2.tar.gz"
 matched=""
 for upd_candidate in $(printf '%s\n' "$JSON_V342" | grep -oE '"name": *"[^"]+"' | sed -E 's/"name": *"([^"]+)"/\1/'); do
     case "$URL_V9" in
@@ -293,15 +355,16 @@ t "basename fallback yields the filename segment" test "$BNAME" = "urnetwork-pro
 
 # --- Source guard: upstream repos must not appear in fetch URLs ---
 violations=""
+allowed_org="${UPD_ALLOWED_ORG:-urfoundation}"
 for f in "$HERE"/start_update.sh "$HERE"/start_nightly.sh "$HERE"/start_stable.sh \
          "$HERE"/start_jwt.sh "$HERE"/urnet-tools.sh "$HERE"/pelican_panel.sh \
          "$HERE"/test_exit75_restart.sh; do
     [ -f "$f" ] || continue
-    # Any api.github.com/repos/<org>/<repo> that is NOT urfoundation is a violation.
+    # Any api.github.com/repos/<org>/<repo> outside the allowed org is a violation.
     while read -r url; do
         org_repo="$(printf '%s' "$url" | sed -E 's#.*/repos/([^/"]+/[^/"]+).*#\1#')"
         case "$org_repo" in
-            urfoundation/*) ;;
+            "$allowed_org"/*) ;;
             *) violations="$violations\n$(basename "$f"): $url" ;;
         esac
     done < <(grep -oE 'https://api\.github\.com/repos/[^"]+' "$f" || true)
