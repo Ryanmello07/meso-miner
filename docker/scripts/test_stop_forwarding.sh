@@ -65,7 +65,8 @@ wait_file() {
 
 # 1. Local: SIGTERM to the supervisor reaches the provider and ends the loop.
 out="$tmp/local"; mkdir -p "$out"
-OUT="$out" STUB="$tmp/stub.sh" sh "$tmp/harness.sh" >"$out/stdout" 2>&1 &
+mkdir -p "$tmp/app"
+OUT="$out" STUB="$tmp/stub.sh" HARNESS_APP_DIR="$tmp/app" sh "$tmp/harness.sh" >"$out/stdout" 2>&1 &
 sup=$!
 if wait_file "$out/stub.pid"; then
     kill -TERM "$sup"
@@ -114,7 +115,8 @@ touch "$OUT/crashed"
 exit 5
 EOF
 chmod +x "$tmp/crash_stub.sh"
-OUT="$out" STUB="$tmp/crash_stub.sh" sh "$tmp/harness.sh" >"$out/stdout" 2>&1 &
+mkdir -p "$tmp/appcrash"
+OUT="$out" STUB="$tmp/crash_stub.sh" HARNESS_APP_DIR="$tmp/appcrash" sh "$tmp/harness.sh" >"$out/stdout" 2>&1 &
 sup=$!
 if wait_file "$out/stub.pid"; then
     sleep 2
