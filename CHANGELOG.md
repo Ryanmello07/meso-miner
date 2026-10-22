@@ -1,5 +1,22 @@
 ## [Unreleased]
 
+### Added
+
+- **PQE handshake stages and negotiated curves** ([#259](https://github.com/full-bars/meso-miner/pull/259), [#261](https://github.com/full-bars/meso-miner/pull/261)): the `[pqe]` line reports `attempts`, `tls_ok`, `verified` and `identity_failed`, plus a per-curve histogram. `/metrics` carries `urnet_sessions_handshake_total{stage=...}` and `urnet_sessions_curve_total{curve=...}`, and two dashboard panels show both rates.
+
+### Fixed
+
+- **A `docker stop` skipped the shutdown path** ([#258](https://github.com/full-bars/meso-miner/pull/258)): a shell as PID 1 has no default action for SIGTERM, so the provider never heard the stop and Docker SIGKILLed the container at the grace timeout. The supervisor forwards the signal and waits for the successor.
+- **The nightly updater could pick another platform's tarball** ([#258](https://github.com/full-bars/meso-miner/pull/258)): the asset is now matched against this architecture.
+- **A completed handshake could go uncounted** ([#259](https://github.com/full-bars/meso-miner/pull/259)): a superseded epoch returned before the count, and a failed identity proof could be counted by every concurrent verifier. Both count once now.
+- **Lifetime session counters dropped on proxy exit** ([#261](https://github.com/full-bars/meso-miner/pull/261)): a `_total` could decrease and `rate()` read it as a reset. A departing manager's counts fold into a provider-wide accumulator first.
+- **The deny-list drift guard matched a literal pipe** ([#263](https://github.com/full-bars/meso-miner/pull/263)): it now matches the old inline list as a fixed string.
+
+### Changed
+
+- **The IP blocker table syncs with CFAA** ([#262](https://github.com/full-bars/meso-miner/pull/262)): the scheduled job pulled one file, so the blocker table drifted unseen. Both files sync now, and a check fails on drift.
+- **Four Bittensor claims are corrected** ([#260](https://github.com/full-bars/meso-miner/pull/260)): the v1 and v2 claim triggers, the quoted challenge message, the stopped-daemon caveat for unsigned v1 claims, and the consent scope.
+
 ---
 
 ## [v2026.10.21-1077734740-meso] — 2026-10-21
