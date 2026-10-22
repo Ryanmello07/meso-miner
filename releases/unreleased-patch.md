@@ -27,6 +27,8 @@ Legend: **[redeploy]** needs the built artifact redeployed. **[installer]** need
 - **The v2026.10.21 changes are documented where operators look** **[no redeploy]** (<https://github.com/full-bars/meso-miner/pull/253>). The release had notes, but `FORK_CHANGES.md`, `LOG_REFERENCE.md`, the HotSwap page and the install docs were missing the detail. They now carry it.
 - **Four Bittensor claims are corrected** **[no redeploy]** (<https://github.com/full-bars/meso-miner/pull/260>). v1 and v2 claim triggers are described separately. The signed challenge quotes the message. The stopped-daemon answer says unsigned v1 claims still expire. The consent is scoped to one URnetwork account.
 
+- **The Bittensor cost pages show the chain's numbers** **[no redeploy]**. The head-tier and quick-start pages carry a live snapshot with the time it was taken and a link to the live copy.
+
 ## Deploy notes
 
 - **The provider needs a redeploy for the counters and the stop fix.** An old process keeps the old behaviour and sends none of the new series.
