@@ -100,8 +100,8 @@ urnet-tools restart
 urnet-tools status
 
 # Hot-restart toggle
-urnet-tools hot-restart on
-urnet-tools hot-restart off
+urnet-tools set hot-restart on
+urnet-tools set hot-restart off
 
 # Session save/load
 urnet-tools session save backup.urnsession
@@ -213,8 +213,8 @@ urnet-tools summary
 urnet-tools logs
 
 # Hot-restart toggle
-urnet-tools hot-restart on
-urnet-tools hot-restart off
+urnet-tools set hot-restart on
+urnet-tools set hot-restart off
 
 # Session save/load
 urnet-tools session save C:\Users\You\backup.urnsession
