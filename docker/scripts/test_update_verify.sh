@@ -333,12 +333,18 @@ t "start_update.sh selects the fat tarball through the shared picker" \
     grep -q 'upd_pick_fat_tarball_name' "$HERE/start_update.sh"
 t "nightly updater calls the shared arch picker" \
     grep -q 'upd_pick_arch_tarball_name' "$HERE/provider_common.sh"
-t "stale inline darwin/linux/windows OS list is gone from docker/scripts" \
-    test -z "$(grep -rlE -- '-darwin-\|-linux-\|-windows-' "$HERE")"
+# The old deny-list was an alternation string; grep -E reads a backslash-pipe
+# as a literal pipe, so the previous pattern only ever matched that exact
+# spelling. Match it as a fixed string, then fail on any non-comment
+# '-darwin-' token, which is the shape every variant of the list carries.
+t "stale inline darwin/linux/windows OS alternation is gone from docker/scripts" \
+    test -z "$(grep -rFl -- '-darwin-|-linux-|-windows-' "$HERE" | grep -v 'test_update_verify.sh')"
+t "no per-arch OS token outside a comment" \
+    test -z "$(grep -rn -- '-darwin-' "$HERE" | grep -v 'test_update_verify.sh' | grep -v ':[0-9]*: *#' | grep -v ':[0-9]*:#')"
 
 # Nightly asset mapping: URL->name match-back finds the API name even when
 # the URL layout changes above the filename segment.
-URL_V9="https://github.com/full-bars/urnetwork-3.23-fix/releases/download/v3.23.0-fix.34.2/urnetwork-provider-v3.23.0-fix.34.2.tar.gz"
+URL_V9="https://github.com/urfoundation/meso-miner/releases/download/v3.23.0-fix.34.2/urnetwork-provider-v3.23.0-fix.34.2.tar.gz"
 matched=""
 for upd_candidate in $(printf '%s\n' "$JSON_V342" | grep -oE '"name": *"[^"]+"' | sed -E 's/"name": *"([^"]+)"/\1/'); do
     case "$URL_V9" in
@@ -355,16 +361,15 @@ t "basename fallback yields the filename segment" test "$BNAME" = "urnetwork-pro
 
 # --- Source guard: upstream repos must not appear in fetch URLs ---
 violations=""
-allowed_org="${UPD_ALLOWED_ORG:-urfoundation}"
 for f in "$HERE"/start_update.sh "$HERE"/start_nightly.sh "$HERE"/start_stable.sh \
          "$HERE"/start_jwt.sh "$HERE"/urnet-tools.sh "$HERE"/pelican_panel.sh \
          "$HERE"/test_exit75_restart.sh; do
     [ -f "$f" ] || continue
-    # Any api.github.com/repos/<org>/<repo> outside the allowed org is a violation.
+    # Any api.github.com/repos/<org>/<repo> that is NOT urfoundation is a violation.
     while read -r url; do
         org_repo="$(printf '%s' "$url" | sed -E 's#.*/repos/([^/"]+/[^/"]+).*#\1#')"
         case "$org_repo" in
-            "$allowed_org"/*) ;;
+            urfoundation/*) ;;
             *) violations="$violations\n$(basename "$f"): $url" ;;
         esac
     done < <(grep -oE 'https://api\.github\.com/repos/[^"]+' "$f" || true)
