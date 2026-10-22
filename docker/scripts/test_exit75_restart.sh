@@ -104,8 +104,8 @@ STUB_EOF
         echo "JWT_FILE='$jwt_file'"
         echo "USER_AUTH=''"
         echo "PASSWORD=''"
-        # provider_common.sh initializes these at the top; the extracted loop
-        # functions reference them under set -u, so set them here too.
+        # provider_common.sh initializes these at the top; the extracted
+        # loop functions reference them under set -u, so set them here too.
         echo "PROVIDER_STOPPING=0"
         echo "PROVIDER_CHILD_PID=\"\""
         echo "log() { echo \"LOG: \$*\" >> '$test_dir/out.log'; }"

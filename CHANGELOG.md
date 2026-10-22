@@ -16,6 +16,7 @@
 
 - **The IP blocker table syncs with CFAA** ([#262](https://github.com/full-bars/meso-miner/pull/262)): the scheduled job pulled one file, so the blocker table drifted unseen. Both files sync now, and a check fails on drift.
 - **Four Bittensor claims are corrected** ([#260](https://github.com/full-bars/meso-miner/pull/260)): the v1 and v2 claim triggers, the quoted challenge message, the stopped-daemon caveat for unsigned v1 claims, and the consent scope.
+- **The v2026.10.21 changes are documented where operators look** ([#10](https://github.com/urfoundation/meso-miner/pull/10)): `FORK_CHANGES.md`, `LOG_REFERENCE.md`, the HotSwap page and the install docs now carry the counter persistence, the swap behaviour and the install detail.
 
 ---
 

@@ -141,8 +141,9 @@ func_run_provider() {
     PROVIDER_CHILD_PID=""
     if [ "$PROVIDER_STOPPING" -eq 1 ]; then
         log "[INFO] Stop requested; UrNetwork exited (code=$code)."
-        # the bounded successor wait lives here: a bare exit would let PID 1
-        # go away and SIGKILL a hotswap successor mid shutdown
+        # the drained child is gone, but a hotswap successor may still be
+        # shutting down; func_exit_if_stopping bounds the wait so PID 1 does
+        # not exit and hand Docker a SIGKILL for that successor
         func_exit_if_stopping
     fi
 }
@@ -448,8 +449,8 @@ func_check_update() {
         # Preference 2: the multi-arch fat tarball (no OS token in the name);
         # the extract step below can still pull linux/${A_SYS_ARCH}/provider
         # from it. The pickers live in update_verify.sh so start_update.sh
-        # shares the exact same per-arch OS list, keeping nightly selection
-        # platform-correct for every tarball we ship.
+        # shares the exact same per-arch OS list; the freebsd-amd64 tarball
+        # slipped through the old inline filter and nightly installed it.
         ASSET_NAME="$(upd_pick_arch_tarball_name "$RELEASE_JSON" "$A_SYS_ARCH")"
         [ -n "$ASSET_NAME" ] || ASSET_NAME="$(upd_pick_fat_tarball_name "$RELEASE_JSON")"
         if [ -n "$ASSET_NAME" ]; then
@@ -612,6 +613,7 @@ func_start_provider_stable(){
         # as written, not as whatever happens to match on disk
         set -f
         # shellcheck disable=SC2086  # PROVIDER_ENV_ARGS is a deliberately split flag list
+        # shellcheck disable=SC2086  # PROVIDER_ENV_ARGS is a deliberately split flag list
         func_run_provider "$PROVIDER_BIN" provide $PROVIDER_ENV_ARGS
         set +f
         if [ "$code" -eq 0 ]; then
@@ -681,6 +683,7 @@ func_start_provider_nightly(){
         # Capture the real exit code (set -e safe; bare `provide` would abort the loop on crash)
         resolve_provider_env_args
         set -f
+        # shellcheck disable=SC2086  # PROVIDER_ENV_ARGS is a deliberately split flag list
         # shellcheck disable=SC2086  # PROVIDER_ENV_ARGS is a deliberately split flag list
         func_run_provider "$PROVIDER_BIN" provide $PROVIDER_ENV_ARGS
         set +f
@@ -805,6 +808,7 @@ func_start_provider_jwt(){
         # code=0 and the code 78 re-auth branch below could never run.
         resolve_provider_env_args
         set -f
+        # shellcheck disable=SC2086  # PROVIDER_ENV_ARGS is a deliberately split flag list
         # shellcheck disable=SC2086  # PROVIDER_ENV_ARGS is a deliberately split flag list
         func_run_provider "$PROVIDER_BIN" provide $PROVIDER_ENV_ARGS
         set +f
