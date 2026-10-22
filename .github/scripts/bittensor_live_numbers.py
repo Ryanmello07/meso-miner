@@ -220,7 +220,7 @@ def render_body(state: dict) -> str:
 def render_block(body: str, changed_on: str) -> str:
     return "\n".join([
         BEGIN,
-        f"_Live values · last changed {changed_on} UTC · checked hourly_",
+        f"_Live values · last changed {changed_on} UTC · refreshed automatically_",
         "",
         body,
         END,
