@@ -29,7 +29,7 @@ OPENROUTER_MODELS = [
     "z-ai/glm-5-3-flash",  # GLM 5.3 Flash via OpenRouter (cheap)
 ]
 
-USER_AGENT = "CFAA-Sync-Bot (https://github.com/full-bars/meso-miner, 1.0)"
+USER_AGENT = "CFAA-Sync-Bot (https://github.com/full-bars/urnetwork-3.23-fix, 1.0)"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
@@ -47,7 +47,7 @@ def call_openrouter(model: str, prompt: str, api_key: str) -> str | None:
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
-            "HTTP-Referer": "https://github.com/full-bars/meso-miner",
+            "HTTP-Referer": "https://github.com/full-bars/urnetwork-3.23-fix",
             "User-Agent": USER_AGENT,
         },
         method="POST",
@@ -72,6 +72,7 @@ Sync ran at: {info.get("timestamp", "unknown")}
 Upstream SHA: {info.get("upstream_sha", "unknown")}
 IPv4 blocked prefixes: {info.get("fork_v4", 0)} -> {info.get("upstream_v4", 0)} (delta: {v4_delta:+d})
 IPv6 blocked prefixes: {info.get("fork_v6", 0)} -> {info.get("upstream_v6", 0)} (delta: {v6_delta:+d})
+Blocked hosts: {info.get("fork_hosts", 0)} -> {info.get("upstream_hosts", 0)} (delta: {info.get("upstream_hosts", 0) - info.get("fork_hosts", 0):+d})
 Sync needed: {info.get("sync_needed", False)}
 Branch: {info.get("branch", "N/A")}
 PR: {info.get("pr_url", "N/A")} or already existed
@@ -91,6 +92,7 @@ Keep it factual and concise — no emojis, no fluff."""
         f"CFAA blocklist sync {action} at {info.get('timestamp', 'unknown')}. "
         f"IPv4: {info.get('fork_v4', 0)}->{info.get('upstream_v4', 0)} ({v4_delta:+d}), "
         f"IPv6: {info.get('fork_v6', 0)}->{info.get('upstream_v6', 0)} ({v6_delta:+d}). "
+        f"Blocked hosts: {info.get('fork_hosts', 0)}->{info.get('upstream_hosts', 0)}. "
         f"Upstream SHA: {info.get('upstream_sha', 'unknown')}"
     )
 
@@ -110,6 +112,7 @@ def post_to_discord(webhook: str, info: dict, summary: str) -> None:
         {"name": "Upstream SHA", "value": info.get("upstream_sha", "N/A"), "inline": True},
         {"name": "IPv4 Prefixes", "value": f"{info.get('fork_v4', 0)} -> {info.get('upstream_v4', 0)}", "inline": True},
         {"name": "IPv6 Prefixes", "value": f"{info.get('fork_v6', 0)} -> {info.get('upstream_v6', 0)}", "inline": True},
+        {"name": "Blocked Hosts", "value": f"{info.get('fork_hosts', 0)} -> {info.get('upstream_hosts', 0)}", "inline": True},
         pr_field,
         {"name": "AI Summary", "value": summary, "inline": False},
     ]
