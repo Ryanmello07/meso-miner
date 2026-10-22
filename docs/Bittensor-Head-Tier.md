@@ -33,10 +33,10 @@ Operators with **many distinct, stable public IP ranges** that are not shared wi
 
 ## What it costs and requires
 
-The figures below are a snapshot read from the chains by a scheduled job on the full-bars fork. The "last changed" line shows when a value last moved. For the current numbers, with every amount converted to dollars or 29 other currencies, see the [live page](https://sn25.fullbars.xyz). The bullets after the table explain what each figure means.
+The chain figures below are a snapshot read from the chains by a scheduled job on the full-bars fork, and every dollar amount is an estimate from an external TAO price feed. The "last changed" line shows when a value last moved. For the current numbers, with every amount converted to dollars or 29 other currencies, see the [live page](https://sn25.fullbars.xyz). The bullets after the table explain what each figure means.
 
 <!-- BEGIN SN25 LIVE NUMBERS (generated) -->
-_Live values · last changed 2026-10-22 09:32 UTC · refreshed automatically_
+_Live values · last changed 2026-10-22 09:48 UTC · refreshed automatically_
 
 | | Value |
 |---|---|
@@ -48,7 +48,7 @@ _Live values · last changed 2026-10-22 09:32 UTC · refreshed automatically_
 | Tempo | 360 blocks (~72 minutes) |
 | Gas price, chain 964 | 5.0 gwei (a plain transfer of 21,000 gas costs ~$0.03) |
 | One node binding | 245,301 gas, about 0.001227 TAO (~$0.32) |
-| Commitment oracle | address set, balance 0.0479 TAO (~$12), 4 transactions sent. This does not show the service is running, see Current blockers |
+| Commitment oracle | address set, balance 0.0479 TAO (~$12), 4 transactions sent. This does not show the service is running, see [Current blockers](#current-blockers) |
 | Coordinator | not paused |
 <!-- END SN25 LIVE NUMBERS (generated) -->
 
