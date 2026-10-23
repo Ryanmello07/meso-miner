@@ -34,8 +34,14 @@ import (
 func bsdUpdateCronLine(tool, logDir, interval string) (string, error) {
 	var spec string
 	switch interval {
+	case "hourly":
+		// A per-box minute so a fleet's checks do not land together.
+		_, minute := autoUpdateSpread(tool)
+		spec = fmt.Sprintf("%d * * * *", minute)
 	case "daily":
-		spec = "17 3 * * *"
+		// A per-box time of day so a fleet's checks are spread out.
+		hour, minute := autoUpdateSpread(tool)
+		spec = fmt.Sprintf("%d %d * * *", minute, hour)
 	case "weekly":
 		// Sunday 03:17.
 		spec = "17 3 * * 0"
@@ -140,6 +146,22 @@ func setAutoUpdateSchedule(p Provider, label, interval string) error {
 		return err
 	}
 	return writeBSDUpdateCron(p, line)
+}
+
+// autoUpdateScheduleExists reports whether this provider's auto-update line
+// is in the invoking user's crontab.
+func autoUpdateScheduleExists(p Provider) bool {
+	service := bsdRcServiceName(p.Binary)
+	existing, err := readUserCrontab()
+	if err != nil {
+		return false
+	}
+	for _, l := range existing {
+		if matchBSDCronLine(l, service) {
+			return true
+		}
+	}
+	return false
 }
 
 // cleanupLifecycle removes the auto-update cron entry on uninstall. The rc.d

@@ -61,6 +61,12 @@ func removeLegacyStartupLnk() error {
 	return nil
 }
 
+// autoUpdateScheduleExists reports whether the provider's auto-update task is
+// registered.
+func autoUpdateScheduleExists(p Provider) bool {
+	return runSchtasks("/query", "/tn", autoUpdateLabel(p)) == nil
+}
+
 // deleteTaskIfExists removes a scheduled task if it exists. schtasks
 // /delete /f on a MISSING task errors (0x80070002), so check first; a
 // missing task is a clean no-op.
@@ -74,7 +80,8 @@ func deleteTaskIfExists(taskName string) error {
 
 // setAutoUpdateSchedule manages the auto-update scheduled task. label is the
 // platform-neutral identifier; the concrete task name is fixed on Windows.
-// Weekly is the default posture and maps to midnight Sunday.
+// Daily is the default (see autoupdate_policy.go); weekly maps to midnight
+// Sunday.
 func setAutoUpdateSchedule(p Provider, label, interval string) error {
 	// Per-provider task name so two providers do not overwrite each other's
 	// update task (heavyweight review S8). label is "<unit>-update" on
@@ -86,11 +93,20 @@ func setAutoUpdateSchedule(p Provider, label, interval string) error {
 	switch interval {
 	case "off":
 		return deleteTaskIfExists(taskName)
+	case "hourly":
+		// Every hour from a per-box minute (autoUpdateSpread), so a fleet
+		// does not query the release API in the same minute.
+		tr := fmt.Sprintf(`"%s" update -f`, toolExePath())
+		_, minute := autoUpdateSpread(taskName)
+		return runSchtasks("/create", "/f", "/tn", taskName, "/tr", tr, "/sc", "hourly", "/mo", "1", "/st", fmt.Sprintf("00:%02d", minute))
 	case "daily":
 		// -f: the task runs outside a shell with no TTY, so the update
-		// confirm prompt would fail on EOF; force skips it.
+		// confirm prompt would fail on EOF; force skips it. The start time
+		// is per box (autoUpdateSpread) so a fleet's checks are spread over
+		// the day.
 		tr := fmt.Sprintf(`"%s" update -f`, toolExePath())
-		return runSchtasks("/create", "/f", "/tn", taskName, "/tr", tr, "/sc", "daily", "/st", "00:00")
+		hour, minute := autoUpdateSpread(taskName)
+		return runSchtasks("/create", "/f", "/tn", taskName, "/tr", tr, "/sc", "daily", "/st", fmt.Sprintf("%02d:%02d", hour, minute))
 	case "weekly":
 		tr := fmt.Sprintf(`"%s" update -f`, toolExePath())
 		return runSchtasks("/create", "/f", "/tn", taskName, "/tr", tr, "/sc", "weekly", "/d", "SUN", "/st", "00:00")

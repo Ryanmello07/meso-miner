@@ -366,6 +366,17 @@ func cmdUpdate(args []string, force, dryRun bool) error {
 	// Installs that predate the installer doing this are repaired here.
 	ensureToolOnPath()
 
+	// Move schedules that never had an explicit choice (the old weekly
+	// installer default) onto the current default. Best effort: a failure
+	// leaves the old schedule running, which still updates.
+	for _, p := range chosen {
+		if migrated, err := migrateAutoUpdateSchedule(p); err != nil {
+			fmt.Fprintf(os.Stderr, "auto-update schedule for %s not migrated: %v\n", providerLabel(p), err)
+		} else if migrated {
+			fmt.Printf("auto-update for %s now runs %s (urnet-tools auto-update <interval|off> to change)\n", providerLabel(p), defaultAutoUpdateInterval)
+		}
+	}
+
 	if failures > 0 {
 		return fmt.Errorf("%d of %d provider(s) failed to update", failures, len(chosen))
 	}

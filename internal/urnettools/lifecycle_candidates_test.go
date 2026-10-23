@@ -57,6 +57,12 @@ func TestMain(m *testing.M) {
 	} else {
 		_ = os.Setenv("XDG_CONFIG_HOME", tmp)
 	}
+	// The post-update schedule migration probes the REAL timer/agent/task of
+	// whatever provider a test feeds cmdUpdate, and the timer path comes from
+	// getent, not $HOME. Report "no schedule" by default so no test can
+	// rewrite a developer machine's live auto-update schedule; tests of the
+	// migration stub this themselves.
+	autoUpdateScheduleExistsFn = func(Provider) bool { return false }
 	os.Exit(m.Run())
 }
 

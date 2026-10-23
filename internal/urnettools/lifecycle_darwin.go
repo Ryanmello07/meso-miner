@@ -63,16 +63,21 @@ func setAutoStart(p Provider, on bool) error {
 	return launchctlBootout(plist)
 }
 
+// updateAgentName is the auto-update LaunchAgent's label and plist name.
+const updateAgentName = "com.urnetwork.update"
+
 // setAutoUpdateSchedule manages the auto-update LaunchAgent. label is the
-// platform-neutral identifier; the concrete agent name is fixed. Weekly is
-// the default posture: launchd StartCalendarInterval fires at the given
-// weekday/minute; daily and monthly use their own calendars.
+// platform-neutral identifier; the concrete agent name is fixed. Daily (the
+// default) runs at a per-box time; hourly uses StartInterval, which counts
+// from when the agent loads, so a fleet's checks are naturally spread; daily,
+// weekly and monthly use StartCalendarInterval.
 func setAutoUpdateSchedule(p Provider, label, interval string) error {
-	const agentName = "com.urnetwork.update"
-	plist := filepath.Join(launchAgentsDir(), agentName+".plist")
+	plist := filepath.Join(launchAgentsDir(), updateAgentName+".plist")
 	switch interval {
 	case "off":
 		return launchctlBootout(plist)
+	case "hourly":
+		return writeUpdateAgent(plist, "EveryHour")
 	case "daily":
 		return writeUpdateAgent(plist, "EveryDay")
 	case "weekly":
@@ -96,9 +101,14 @@ func writeUpdateAgent(plist, calendarName string) error {
 	}
 	exe := toolExePath()
 	var calendar string
+	trigger := "StartCalendarInterval"
 	switch calendarName {
+	case "EveryHour":
+		trigger = "StartInterval"
 	case "EveryDay":
-		calendar = "<key>Hour</key><integer>0</integer><key>Minute</key><integer>0</integer>"
+		// A per-box time of day so a fleet's checks are spread out.
+		hour, minute := autoUpdateSpread(updateAgentName)
+		calendar = fmt.Sprintf("<key>Hour</key><integer>%d</integer><key>Minute</key><integer>%d</integer>", hour, minute)
 	case "EveryWeek":
 		calendar = "<key>Weekday</key><integer>0</integer><key>Hour</key><integer>0</integer><key>Minute</key><integer>0</integer>"
 	case "EveryMonth":
@@ -115,17 +125,34 @@ func writeUpdateAgent(plist, calendarName string) error {
         <string>update</string>
         <string>-f</string>
     </array>
-    <key>StartCalendarInterval</key>
-    <dict>
-        %s
-    </dict>
+    %s
 </dict>
 </plist>
-`, exe, calendar)
+`, exe, updateAgentTrigger(trigger, calendar))
 	if err := os.WriteFile(plist, []byte(content), 0o644); err != nil {
 		return err
 	}
 	return launchctlBootstrap(plist)
+}
+
+// updateAgentTrigger renders the agent's schedule keys: an hourly
+// StartInterval, or a StartCalendarInterval dict.
+func updateAgentTrigger(trigger, calendar string) string {
+	if trigger == "StartInterval" {
+		return "<key>StartInterval</key><integer>3600</integer>"
+	}
+	return "<key>StartCalendarInterval</key>\n    <dict>\n        " + calendar + "\n    </dict>"
+}
+
+// autoUpdateScheduleExists reports whether the auto-update agent is
+// installed.
+func autoUpdateScheduleExists(p Provider) bool {
+	dir := launchAgentsDir()
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, updateAgentName+".plist"))
+	return err == nil
 }
 
 // toolExePath returns the running tool's absolute path for the agent.

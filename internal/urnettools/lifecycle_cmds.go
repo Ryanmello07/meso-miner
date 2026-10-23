@@ -48,22 +48,30 @@ func cmdAutoStart(args []string, force, dryRun bool) error {
 }
 
 // cmdAutoUpdate manages the auto-update timer interval.
-// Usage: urnet-tools auto-update daily|weekly|monthly|off
+// Usage: urnet-tools auto-update on|ensure|hourly|daily|weekly|monthly|off
+//
+// "on" selects the default (daily). The choice is recorded in the provider's
+// state dir so installs, updates and the schedule migration honor it (see
+// autoupdate_policy.go). "ensure" is what installers run: it applies the
+// recorded choice, or the default when there is none, and records nothing,
+// so a reinstall never overrides an operator's "off".
 func cmdAutoUpdate(args []string, force, dryRun bool) error {
 	if len(args) == 0 {
-		return fmt.Errorf("auto-update requires daily|weekly|monthly|off")
+		return fmt.Errorf("auto-update requires on|ensure|hourly|daily|weekly|monthly|off")
 	}
-	interval := args[0]
 	// Validate the interval BEFORE targeting so an invalid value errors
 	// deterministically without needing a resolvable provider.
-	switch interval {
-	case "off", "daily", "weekly", "monthly":
-	default:
-		return fmt.Errorf("invalid interval %q: daily|weekly|monthly|off", interval)
+	ensure := args[0] == "ensure"
+	interval := ""
+	if !ensure {
+		var err error
+		if interval, err = normalizeAutoUpdateInterval(args[0]); err != nil {
+			return err
+		}
 	}
 	// OpenRC hosts: the auto-update schedule is a busybox crond periodic
 	// entry instead of a systemd timer.
-	if handled, err := openrcRouteAutoUpdate(interval, args[1:], dryRun); handled {
+	if handled, err := openrcRouteAutoUpdate(interval, ensure, args[1:], dryRun); handled {
 		return err
 	}
 	t, _, err := parseTargetFlags(args[1:])
@@ -77,12 +85,28 @@ func cmdAutoUpdate(args []string, force, dryRun bool) error {
 	if err := guardSystemdProvider(p); err != nil {
 		return err
 	}
+	if ensure {
+		interval = effectiveAutoUpdateInterval(p)
+		if interval == "off" {
+			fmt.Printf("auto-update stays off for %s (recorded choice; urnet-tools auto-update on to turn it on)\n", providerLabel(p))
+			return nil
+		}
+	}
 	label := autoUpdateLabel(p)
 	if dryRun {
 		fmt.Printf("[dry-run] would set auto-update %s for %s (%s)\n", interval, providerLabel(p), label)
 		return nil
 	}
-	return setAutoUpdateSchedule(p, label, interval)
+	if err := setAutoUpdateSchedule(p, label, interval); err != nil {
+		return err
+	}
+	if ensure {
+		return nil
+	}
+	if err := recordAutoUpdateChoice(p, interval); err != nil {
+		fmt.Fprintf(os.Stderr, "auto-update: warning: schedule set, but the choice could not be recorded (%v); a later update may reset it to %s\n", err, defaultAutoUpdateInterval)
+	}
+	return nil
 }
 
 // autoUpdateLabel returns a stable identifier for the auto-update scheduling

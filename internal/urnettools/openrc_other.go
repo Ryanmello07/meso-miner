@@ -19,7 +19,7 @@ func openrcRouteAutoStart(_ string, _ []string, _, _ bool) (bool, error) {
 	return false, nil
 }
 
-func openrcRouteAutoUpdate(_ string, _ []string, _ bool) (bool, error) {
+func openrcRouteAutoUpdate(_ string, _ bool, _ []string, _ bool) (bool, error) {
 	return false, nil
 }
 

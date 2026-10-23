@@ -519,6 +519,17 @@ RCSCRIPT
         pr_info "Service is not running; leaving it stopped (run '%s start' when ready)" "$me"
     fi
 
+    # Auto-update is on by default (daily, at a per-box time). `ensure` keeps
+    # an interval or "off" the operator recorded with `urnet-tools
+    # auto-update`. Only the Go tool manages the schedule; the shell wrapper
+    # fallback cannot.
+    if [ "$(head -c 2 "$install_path/bin/urnet-tools" 2>/dev/null)" != "#!" ]; then
+        "$install_path/bin/urnet-tools" auto-update ensure || \
+            pr_warn "could not turn on auto-update; run: urnet-tools auto-update on"
+    else
+        pr_warn "auto-update needs the urnet-tools binary; reinstall to get it, then run: urnet-tools auto-update on"
+    fi
+
     # PATH hint goes into the SERVICE user's shell rc, once. Under sudo $HOME
     # is root's, and root's PATH never contains the service user's bin dir, so
     # the old check re-appended a duplicate line on every install and update.

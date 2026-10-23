@@ -52,7 +52,7 @@ show_help ()
     echo "Maintenance:"
     echo "  reinstall               Reinstall provider"
     echo "  uninstall               Uninstall provider"
-    echo "  auto-update             Manage auto-update schedule (on/off, --interval daily|weekly|monthly)"
+    echo "  auto-update             Manage auto-update schedule (on/off, --interval hourly|daily|weekly|monthly; default daily)"
     echo "  auto-start              Toggle auto-start on login"
     echo ""
     echo "Global Options:"
@@ -97,7 +97,56 @@ arch="$(get_arch)"
 has_systemd=0
 has_openrc=0
 no_modify_bashrc=0
-update_timer_oncalendar="Sun *-*-* 00:00:00 UTC"
+
+# Auto-update is on by default and checks daily (the platform retires old
+# provider versions, so a weekly check can leave a node refused). The
+# operator's explicit choice, recorded by `urnet-tools auto-update` in
+# <state dir>/auto_update, wins over the default on every reinstall.
+default_auto_update_interval="daily"
+
+# auto_update_choice <state dir>: print the recorded auto-update choice
+# (off|hourly|daily|weekly|monthly), or nothing when none was made.
+auto_update_choice ()
+{
+    _choice=""
+    if [ -f "$1/auto_update" ]; then
+        _choice="$(head -n 1 "$1/auto_update" 2>/dev/null | tr -d '[:space:]')"
+    fi
+    case "$_choice" in
+        on|default) echo "$default_auto_update_interval" ;;
+        off|hourly|daily|weekly|monthly) echo "$_choice" ;;
+    esac
+}
+
+# auto_update_interval <state dir>: the interval to install (the recorded
+# choice, else the default); "off" means install no schedule.
+auto_update_interval ()
+{
+    _interval="$(auto_update_choice "$1")"
+    echo "${_interval:-$default_auto_update_interval}"
+}
+
+# timer_calendar <interval>: the systemd OnCalendar value for an interval.
+timer_calendar ()
+{
+    case "$1" in
+        hourly)  echo "hourly" ;;
+        weekly)  echo "Sun *-*-* 00:00:00 UTC" ;;
+        monthly) echo "monthly" ;;
+        *)       echo "daily" ;;
+    esac
+}
+
+# timer_randomized_delay <interval>: spread a fleet's checks so they do not hit
+# the release API together (an hourly timer must still fire every hour).
+timer_randomized_delay ()
+{
+    if [ "$1" = "hourly" ]; then
+        echo "15min"
+    else
+        echo "6h"
+    fi
+}
 
 api_base="${URNET_API_BASE:-https://api.github.com/repos/urfoundation/meso-miner}"
 # Releases for this fork are published on its own GitHub releases, so both
@@ -1347,13 +1396,15 @@ Type=oneshot
 ExecStart=$install_path/bin/urnet-tools update -y
 EOF
     
+    update_interval="$(auto_update_interval "$HOME/.urnetwork")"
     pr_info "Installing urnetwork-update.timer in %s" "$systemd_update_timer"
     cat > "$systemd_update_timer" <<EOF
 [Unit]
 Description=Run URnetwork Update
 
 [Timer]
-OnCalendar=$update_timer_oncalendar
+OnCalendar=$(timer_calendar "$update_interval")
+RandomizedDelaySec=$(timer_randomized_delay "$update_interval")
 Persistent=true
 
 [Install]
@@ -1369,7 +1420,11 @@ EOF
         fi
     fi
 
-    if ! systemctl --user enable --now urnetwork-update.timer 2>/dev/null; then
+    if [ "$update_interval" = "off" ]; then
+        # The operator turned auto-update off; a reinstall keeps it off.
+        pr_info "Auto-update stays off (recorded choice). Turn it on with: urnet-tools auto-update on"
+        systemctl --user disable --now urnetwork-update.timer 2>/dev/null || true
+    elif ! systemctl --user enable --now urnetwork-update.timer 2>/dev/null; then
         if [ "$(id -u)" -ne 0 ]; then
             pr_err "Could not enable the newly installed update timer"
             exit 1
@@ -1515,7 +1570,7 @@ openrc_maybe_redirect_install_path ()
 openrc_pause_update_entry ()
 {
     [ "$(id -u)" -eq 0 ] || return 0
-    for d in daily weekly monthly; do
+    for d in hourly daily weekly monthly; do
         if [ -f "/etc/periodic/$d/urnetwork-update" ]; then
             if mv "/etc/periodic/$d/urnetwork-update" "/etc/periodic/$d/urnetwork-update.installer-paused" 2>/dev/null; then
                 chmod 644 "/etc/periodic/$d/urnetwork-update.installer-paused" 2>/dev/null || true
@@ -1528,7 +1583,7 @@ openrc_pause_update_entry ()
 openrc_restore_update_entry ()
 {
     [ "$(id -u)" -eq 0 ] || return 0
-    for d in daily weekly monthly; do
+    for d in hourly daily weekly monthly; do
         if [ -f "/etc/periodic/$d/urnetwork-update.installer-paused" ]; then
             if mv "/etc/periodic/$d/urnetwork-update.installer-paused" "/etc/periodic/$d/urnetwork-update" 2>/dev/null; then
                 chmod 755 "/etc/periodic/$d/urnetwork-update" 2>/dev/null || true
@@ -1553,7 +1608,8 @@ openrc_teardown_service ()
         rc-service urnetwork stop 2>/dev/null || true
         rc-update del urnetwork default 2>/dev/null || true
         rm -f "$openrc_initd_file" 2>/dev/null || pr_err "warning: could not remove %s" "$openrc_initd_file"
-        rm -f /etc/periodic/daily/urnetwork-update /etc/periodic/daily/urnetwork-update.installer-paused \
+        rm -f /etc/periodic/hourly/urnetwork-update /etc/periodic/hourly/urnetwork-update.installer-paused \
+              /etc/periodic/daily/urnetwork-update /etc/periodic/daily/urnetwork-update.installer-paused \
               /etc/periodic/weekly/urnetwork-update /etc/periodic/weekly/urnetwork-update.installer-paused \
               /etc/periodic/monthly/urnetwork-update /etc/periodic/monthly/urnetwork-update.installer-paused 2>/dev/null || true
         # The provider's state lives in the SERVICE user's home (the service
@@ -1569,6 +1625,7 @@ openrc_teardown_service ()
         pr_info "    sudo rc-update del urnetwork default"
         pr_info "    sudo rm -f %s" "$openrc_initd_file"
         pr_info "    sudo rm -f /etc/periodic/daily/urnetwork-update /etc/periodic/daily/urnetwork-update.installer-paused"
+        pr_info "    sudo rm -f /etc/periodic/hourly/urnetwork-update /etc/periodic/hourly/urnetwork-update.installer-paused"
         pr_info "    sudo rm -f /etc/periodic/weekly/urnetwork-update /etc/periodic/weekly/urnetwork-update.installer-paused"
         pr_info "    sudo rm -f /etc/periodic/monthly/urnetwork-update /etc/periodic/monthly/urnetwork-update.installer-paused"
     fi
@@ -1794,6 +1851,23 @@ openrc_finalize_root_paths ()
 }
 ROTATE
         ${SUDO:-} chmod 0644 /etc/logrotate.d/urnetwork 2>/dev/null || true
+    fi
+}
+
+# install_openrc_auto_update: turn on the auto-update periodic entry (daily, or
+# the interval the operator recorded; a recorded "off" is kept) through the
+# root-owned tool, so the entry is the one `urnet-tools auto-update` writes.
+# Root only: the queue lives under /etc.
+install_openrc_auto_update ()
+{
+    [ "$(id -u)" -eq 0 ] || {
+        pr_info "Turn on daily auto-updates as root: sudo urnet-tools auto-update on"
+        return 0
+    }
+    openrc_tool="$openrc_root_tool_path"
+    [ -x "$openrc_tool" ] || openrc_tool="$install_path/bin/urnet-tools"
+    if ! "$openrc_tool" auto-update ensure; then
+        pr_warn "could not turn on auto-update; run: sudo urnet-tools auto-update on"
     fi
 }
 
@@ -2624,6 +2698,7 @@ do_install ()
 
     if [ "$has_systemd" -eq 0 ] && [ "$has_openrc" -eq 1 ]; then
         install_openrc_units
+        install_openrc_auto_update
     fi
 
     # The symlinks are not a shell-startup edit, so they are made regardless of
@@ -2658,7 +2733,7 @@ do_install ()
             if [ "$has_systemd" -eq 1 ]; then
                 printf "Start service:         \e[1msystemctl --user start urnetwork\e[0m\n"
                 printf "Disable service:       \e[1msystemctl --user disable urnetwork\e[0m\n"
-                printf "Disable auto-updates:  \e[1msystemctl --user disable urnetwork-update.timer\e[0m\n"
+                printf "Auto-updates:          \e[1mon, daily\e[0m (change: \e[1murnet-tools auto-update hourly|weekly|off\e[0m)\n"
                 
                 
                 printf "\n"
@@ -2673,8 +2748,7 @@ do_install ()
                     openrc_prompt_auth
                     printf "Start service:         \e[1mrc-service urnetwork start\e[0m\n"
                     printf "Disable service:       \e[1mrc-update del urnetwork default && rc-service urnetwork stop\e[0m\n"
-                    printf "Enable auto-updates:   \e[1murnet-tools auto-update weekly\e[0m    # needs busybox crond\n"
-                    printf "Disable auto-updates:  \e[1murnet-tools auto-update off\e[0m\n"
+                    printf "Auto-updates:          \e[1mon, daily\e[0m (change: \e[1murnet-tools auto-update hourly|weekly|off\e[0m)    # needs busybox crond\n"
                 else
                     printf "OpenRC service not installed yet — finish with the steps printed above.\n"
                 fi
@@ -2787,7 +2861,7 @@ do_uninstall ()
 change_auto_update_prefs ()
 {
     mode=""
-    interval="weekly"
+    interval="$default_auto_update_interval"
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -2797,8 +2871,8 @@ change_auto_update_prefs ()
                     exit 1
                 fi
 
-                if [ "$2" != "daily" ] && [ "$2" != "weekly" ] && [ "$2" != "monthly" ]; then
-                    pr_err "Invalid update interval '%s': Must be one of these: daily, weekly, monthly" "$1"
+                if [ "$2" != "hourly" ] && [ "$2" != "daily" ] && [ "$2" != "weekly" ] && [ "$2" != "monthly" ]; then
+                    pr_err "Invalid update interval '%s': Must be one of these: hourly, daily, weekly, monthly" "$2"
                     exit 1
                 fi
                 
@@ -2844,13 +2918,10 @@ change_auto_update_prefs ()
         on)
             pr_info "Updating systemd unit files"
 
-            case "$interval" in
-                daily)   new_calendar="daily" ;;
-                weekly)  new_calendar="Sun *-*-* 00:00:00 UTC" ;;
-                monthly) new_calendar="monthly" ;;
-            esac
+            new_calendar="$(timer_calendar "$interval")"
+            new_delay="$(timer_randomized_delay "$interval")"
 
-            if ! sed -e "s|^OnCalendar=.*|OnCalendar=$new_calendar|" -i "$HOME/.config/systemd/user/urnetwork-update.timer"; then
+            if ! sed -e "/^RandomizedDelaySec=/d" -e "s|^OnCalendar=.*|OnCalendar=$new_calendar\nRandomizedDelaySec=$new_delay|" -i "$HOME/.config/systemd/user/urnetwork-update.timer"; then
                 pr_err "Failed to update auto update interval: sed substitution failed"
                 exit 1
             fi
@@ -2877,8 +2948,15 @@ change_auto_update_prefs ()
                 pr_err "Failed to turn off auto updates: systemctl command failed"
                 exit 1
             fi
+            interval="off"
             ;;
     esac
+
+    # Remember the choice so a reinstall or update keeps it (read by
+    # auto_update_choice and by urnet-tools).
+    mkdir -p "$HOME/.urnetwork" 2>/dev/null || true
+    printf '%s\n' "$interval" > "$HOME/.urnetwork/auto_update" 2>/dev/null || \
+        pr_warn "could not record the auto-update choice in %s" "$HOME/.urnetwork/auto_update"
 }
 
 toggle_auto_start ()

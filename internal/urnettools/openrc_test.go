@@ -323,8 +323,8 @@ func TestOpenRCAutoUpdatePeriodicEntry(t *testing.T) {
 		t.Fatalf("second off: %v", err)
 	}
 	// Invalid intervals are refused.
-	if err := openrcSetAutoUpdate("hourly", "/x"); err == nil {
-		t.Fatal("hourly must be refused (not a periodic queue)")
+	if err := openrcSetAutoUpdate("15min", "/x"); err == nil {
+		t.Fatal("15min must be refused (not an auto-update interval)")
 	}
 }
 
@@ -733,7 +733,7 @@ func TestOpenRCAutoRoutesSelectorFallthrough(t *testing.T) {
 	if handled, _ := openrcRouteAutoStart("on", []string{"--user", "other"}, false, false); handled {
 		t.Fatal("auto-start with a foreign --user must fall through")
 	}
-	if handled, _ := openrcRouteAutoUpdate("weekly", []string{"--user", "other"}, false); handled {
+	if handled, _ := openrcRouteAutoUpdate("weekly", false, []string{"--user", "other"}, false); handled {
 		t.Fatal("auto-update with a foreign --user must fall through")
 	}
 	if handled, err := openrcRouteAutoStart("on", []string{"--user", "urnet"}, false, false); !handled || err != nil {
@@ -1206,6 +1206,7 @@ func TestOpenRCCronGuardRootOwnedTree(t *testing.T) {
 			"PATH="+binDir+":"+os.Getenv("PATH"),
 			"FAKE_STAT_MODE="+modeFile,
 			"FAKE_STAT_OWNER="+ownerFile,
+			"URNET_UPDATE_SPREAD=0",
 		)
 		out, err := cmd.CombinedOutput()
 		return string(out), err
@@ -1245,6 +1246,7 @@ func TestOpenRCCronGuardRootOwnedTree(t *testing.T) {
 			"PATH="+binDir+":"+os.Getenv("PATH"),
 			"FAKE_STAT_MODE="+modeFile,
 			"FAKE_STAT_OWNER="+ownerFile,
+			"URNET_UPDATE_SPREAD=0",
 		)
 		done := make(chan error, 1)
 		if err := cmd.Start(); err != nil {

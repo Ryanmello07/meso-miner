@@ -3762,3 +3762,20 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 - **CI**: Ship Release validates the new shape; the Docker `:<tag>` rule, the installer matrix trigger and the shakedown version checks accept both the old and the new shape, so older releases still resolve.
 
 **Impact**: release tooling only. A node reports the new tag as its app version once it runs a release cut with it.
+
+## 180. Auto-Update On By Default, Daily, Everywhere
+
+**Purpose**: The platform will start refusing old provider versions, so nodes must update more often. Auto-update was weekly on Linux, Alpine (only when turned on by hand) and Windows, and absent from the macOS and FreeBSD installers. It is now on by default on every native install, checks daily at a per-box time, and keeps an operator's explicit choice, including `off`.
+
+**Files Added**: `internal/urnettools/autoupdate_policy.go`, its tests, `internal/urnettools/autoupdate_timer_linux_test.go`.
+
+**Files Modified**: `internal/urnettools/lifecycle_cmds.go`, `lifecycle_unix.go`, `lifecycle_darwin.go`, `lifecycle_windows.go`, `lifecycle_freebsd.go`, `openrc.go`, `openrc_other.go`, `update.go`, `cobra.go`; `scripts/Provider_Install_Linux.sh`, `Provider_Install_Mac.sh`, `Provider_Install_FreeBSD.sh`, `Provider_Install_Win32.ps1`, `scripts/test_provider_install.sh`; `docs/OpenRC.md`, `docs/FreeBSD.md`, `docs/guides/beginner.md`, `docs/guides/intermediate.md`.
+
+**Change**:
+- **Default `daily`**, plus a new `hourly` interval on every platform. `urnet-tools auto-update on` selects the default; `ensure` (what installers run) applies the recorded choice or the default without recording anything.
+- **The choice is remembered** in `<state dir>/auto_update`. Installs, updates and the migration below honor it, so `off` survives a reinstall.
+- **Spread**: systemd timers carry `RandomizedDelaySec` (6h, or 15min for hourly); launchd, Task Scheduler and FreeBSD cron use a time of day derived from the host name; the OpenRC periodic entry waits a random 0 to 30 minutes (`URNET_UPDATE_SPREAD` overrides).
+- **Migration**: after an update, a provider with an installed schedule and no recorded choice (the old weekly installer default) is moved to the default once. A provider with no schedule is left alone, since an older `off` removed the schedule without recording anything.
+- **Installers**: Linux systemd writes a daily timer (or the recorded interval; none when `off`); Alpine/OpenRC installs as root now turn on the periodic entry; macOS and FreeBSD installers turn it on through the Go tool; Windows runs `auto-update ensure` instead of `weekly`.
+
+**Impact**: every native node checks for a new release once a day. A check that finds the node current is one release API call and no restart. Operators keep full control with `urnet-tools auto-update <interval|off>`. Existing weekly nodes reach the daily schedule on their next scheduled update after this release (the migration runs from the updated tool).

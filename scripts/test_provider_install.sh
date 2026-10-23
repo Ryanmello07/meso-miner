@@ -640,6 +640,28 @@ test_sanitize_restart_dropins_effective_statuses() {
 }
 test_sanitize_restart_dropins_effective_statuses
 
+# --- Auto-update defaults: daily unless the operator recorded a choice ---
+test_auto_update_interval() {
+    local tmp
+    tmp="$(mktemp -d)"
+    assert_eq "daily" "$(auto_update_interval "$tmp")" "no recorded choice installs the daily default"
+    for c in off hourly daily weekly monthly; do
+        printf '%s\n' "$c" > "$tmp/auto_update"
+        assert_eq "$c" "$(auto_update_interval "$tmp")" "a recorded '$c' choice is kept"
+    done
+    printf 'on\n' > "$tmp/auto_update"
+    assert_eq "daily" "$(auto_update_interval "$tmp")" "a recorded 'on' means the default"
+    printf 'garbage\n' > "$tmp/auto_update"
+    assert_eq "daily" "$(auto_update_interval "$tmp")" "an unreadable choice falls back to the default"
+    assert_eq "daily" "$(timer_calendar daily)" "daily calendar"
+    assert_eq "hourly" "$(timer_calendar hourly)" "hourly calendar"
+    assert_eq "Sun *-*-* 00:00:00 UTC" "$(timer_calendar weekly)" "weekly calendar"
+    assert_eq "15min" "$(timer_randomized_delay hourly)" "an hourly timer keeps its delay under the hour"
+    assert_eq "6h" "$(timer_randomized_delay daily)" "a daily timer is spread over 6 hours"
+    rm -rf "$tmp"
+}
+test_auto_update_interval
+
 echo "======================================"
 if [ $FAILS -eq 0 ]; then
     echo "🎉 All tests passed!"

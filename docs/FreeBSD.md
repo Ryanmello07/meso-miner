@@ -150,17 +150,18 @@ urnet-tools update
 
 Update re-runs the install for the latest release (or `urnet-tools update <tag>`), keeps your `rc.conf` choices and shell profile, and restarts the service only if it was running. The installer's update is a plain service restart; HotSwap is a systemd feature.
 
-Turn on a schedule:
+Auto-update is on by default: the installer turns on a daily check at a time picked per box. To change it:
 
 ```sh
-urnet-tools auto-update weekly
+urnet-tools auto-update hourly   # or daily, weekly, monthly; `on` restores daily
 ```
 
-The interval is `daily`, `weekly` or `monthly`, and `off` removes it. On FreeBSD it is a line in the **invoking user's crontab**, not a systemd timer, and the times are fixed:
+`off` removes it, and the choice is remembered, so a reinstall or update keeps it off. On FreeBSD it is a line in the **invoking user's crontab**, not a systemd timer:
 
 | Interval | Cron spec |
 |---|---|
-| `daily` | `17 3 * * *` (every day, 03:17) |
+| `hourly` | `M * * * *` (every hour, at a minute picked per box) |
+| `daily` | `M H * * *` (every day, at a time picked per box) |
 | `weekly` | `17 3 * * 0` (Sundays, 03:17) |
 | `monthly` | `17 3 1 * *` (the 1st, 03:17) |
 
@@ -168,8 +169,8 @@ The line runs `urnet-tools update -f` and appends its output to `~/.urnetwork/au
 
 Two things differ from a systemd timer:
 
-- **No catch-up.** `cron` does not run a missed job. A box that was off at 03:17 waits for the next scheduled time.
-- **Restarting needs privilege.** The update restarts the service through `sudo service` unless the crontab belongs to root. For unattended updates, schedule it from root's crontab (`sudo urnet-tools auto-update weekly`), or allow the user passwordless `sudo` for `service`, since cron has no terminal to ask for a password.
+- **No catch-up.** `cron` does not run a missed job. A box that was off at its scheduled time waits for the next one.
+- **Restarting needs privilege.** The update restarts the service through `sudo service` unless the crontab belongs to root. For unattended updates, schedule it from root's crontab (`sudo urnet-tools auto-update on`), or allow the user passwordless `sudo` for `service`, since cron has no terminal to ask for a password.
 
 ## Sysctl tuning (required for high connection counts)
 

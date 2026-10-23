@@ -195,7 +195,7 @@ urnet-tools start
 urnet-tools summary
 ```
 
-Auto-update is enabled by default on install (`urnet-tools auto-update daily|weekly|monthly|off` to change it). Stream logs with `urnet-tools logs`.
+Auto-update is on by default and checks daily (`urnet-tools auto-update hourly|daily|weekly|monthly|off` to change it; the choice is remembered). Stream logs with `urnet-tools logs`.
 
 ---
 

@@ -47,6 +47,12 @@ func setAutoStart(p Provider, on bool) error {
 // platform-neutral identifier ("<unit>-update" or "urnetwork-update"); the
 // concrete timer unit name is derived from the provider unit.
 func setAutoUpdateSchedule(p Provider, label, interval string) error {
+	// An OpenRC-supervised provider has no unit; its schedule is the busybox
+	// periodic entry (the auto-update command routes there before reaching
+	// this function, but the schedule migration calls it directly).
+	if p.Unit == "" && openrcActive() {
+		return openrcSetAutoUpdate(interval, openrcUpdateToolPath(p))
+	}
 	if p.Unit == "" {
 		return fmt.Errorf("provider %s has no owning unit", providerLabel(p))
 	}
@@ -74,6 +80,8 @@ func setAutoUpdateSchedule(p Provider, label, interval string) error {
 			return fmt.Errorf("auto-update off: disable %s: %w", timer, err)
 		}
 		return removeTimerFile(p, timer, userScope)
+	case "hourly":
+		return writeTimerCalendar(timer, p, "hourly", userScope)
 	case "daily":
 		return writeTimerCalendar(timer, p, "daily", userScope)
 	case "weekly":
@@ -127,7 +135,7 @@ func writeTimerCalendar(timer string, p Provider, calendar string, userScope boo
 		// template. Write to a temp file and rename so a crash mid-write
 		// never leaves a half-written unit (the shared progress.md
 		// atomicity rule applied to unit files too).
-		tmpl := fmt.Sprintf("[Unit]\nDescription=Run URnetwork Update\n\n[Timer]\nOnCalendar=%s\nPersistent=true\nUnit=%s.service\n\n[Install]\nWantedBy=default.target\n", calendar, strings.TrimSuffix(timer, "-update.timer"))
+		tmpl := fmt.Sprintf("[Unit]\nDescription=Run URnetwork Update\n\n[Timer]\nOnCalendar=%s\nRandomizedDelaySec=%s\nPersistent=true\nUnit=%s.service\n\n[Install]\nWantedBy=default.target\n", calendar, timerRandomizedDelay(calendar), strings.TrimSuffix(timer, "-update.timer"))
 		if err := writeTimerUnitAtomic(path, tmpl); err != nil {
 			return fmt.Errorf("create timer %s: %w", timer, err)
 		}
@@ -135,24 +143,76 @@ func writeTimerCalendar(timer string, p Provider, calendar string, userScope boo
 	} else if err != nil {
 		return fmt.Errorf("read timer %s: %w", timer, err)
 	}
-	lines := strings.Split(string(data), "\n")
-	var out []string
-	replaced := false
-	for _, line := range lines {
-		if strings.HasPrefix(line, "OnCalendar=") {
-			out = append(out, "OnCalendar="+calendar)
-			replaced = true
-		} else {
-			out = append(out, line)
-		}
-	}
-	if !replaced {
+	rewritten, ok := rewriteTimerCalendar(string(data), calendar)
+	if !ok {
 		return fmt.Errorf("no OnCalendar line found in %s", path)
 	}
-	if err := writeTimerUnitAtomic(path, strings.Join(out, "\n")); err != nil {
+	if err := writeTimerUnitAtomic(path, rewritten); err != nil {
 		return err
 	}
 	return enableTimer(p, timer)
+}
+
+// rewriteTimerCalendar replaces a timer unit's OnCalendar and sets the
+// randomized delay that goes with it, so an existing timer (written by the
+// installer or an older tool) is spread across the fleet too. It reports
+// false when the unit has no OnCalendar line.
+func rewriteTimerCalendar(data, calendar string) (string, bool) {
+	var out []string
+	replaced := false
+	for _, line := range strings.Split(data, "\n") {
+		switch {
+		case strings.HasPrefix(line, "OnCalendar="):
+			out = append(out, "OnCalendar="+calendar)
+			out = append(out, "RandomizedDelaySec="+timerRandomizedDelay(calendar))
+			replaced = true
+		case strings.HasPrefix(line, "RandomizedDelaySec="):
+			// Rewritten beside OnCalendar above.
+		default:
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n"), replaced
+}
+
+// timerRandomizedDelay spreads timer firings so a fleet does not hit the
+// release API at the same moment: up to 15 minutes for an hourly timer (so it
+// still fires once an hour) and up to 6 hours for the longer calendars.
+func timerRandomizedDelay(calendar string) string {
+	if calendar == "hourly" {
+		return "15min"
+	}
+	return "6h"
+}
+
+// autoUpdateScheduleExists reports whether the provider has an auto-update
+// schedule installed: its systemd timer file, or on an OpenRC host the
+// periodic entry in any queue.
+func autoUpdateScheduleExists(p Provider) bool {
+	if openrcActive() && p.Unit == "" {
+		for _, dir := range openrcPeriodicIntervals {
+			if _, err := os.Stat(filepath.Join(openrcPeriodicBaseDir, dir, openrcUpdateCronName)); err == nil {
+				return true
+			}
+		}
+		return false
+	}
+	if p.Unit == "" {
+		return false
+	}
+	timer := strings.TrimSuffix(p.Unit, ".service") + "-update.timer"
+	var path string
+	if isUserUnit(p.Unit) && p.User != "" {
+		home := homeForUser(p.User)
+		if home == "" {
+			return false
+		}
+		path = filepath.Join(home, ".config/systemd/user", timer)
+	} else {
+		path = "/etc/systemd/system/" + timer
+	}
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // enableTimer runs daemon-reload + enable --now for a timer unit, choosing

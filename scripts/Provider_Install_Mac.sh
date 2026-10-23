@@ -262,6 +262,17 @@ do_install() {
     unload_service
     load_service
 
+    # Auto-update is on by default (daily, at a per-box time). `ensure` keeps
+    # an interval or "off" the operator recorded with `urnet-tools
+    # auto-update`. Only the Go tool manages the schedule; the shell fallback
+    # cannot.
+    if [ "$(head -c 2 "$install_path/bin/urnet-tools" 2>/dev/null)" != "#!" ]; then
+        "$install_path/bin/urnet-tools" auto-update ensure || \
+            pr_warn "could not turn on auto-update; run: urnet-tools auto-update on"
+    else
+        pr_warn "auto-update needs the urnet-tools binary; reinstall to get it, then run: urnet-tools auto-update on"
+    fi
+
     # Add to PATH if not already present
     if ! echo "$PATH" | tr ':' '\n' | grep -qxF "$install_path/bin"; then
         shell_rc=""

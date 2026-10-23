@@ -111,13 +111,13 @@ Updating is a root action on OpenRC, the same way `systemctl restart` is for a s
 urnet-tools update
 ```
 
-To have it run on a schedule, turn on auto-update as root. On OpenRC it is a busybox `crond` entry, not a systemd timer:
+Auto-update is on by default: an install run as root adds a daily busybox `crond` entry (not a systemd timer). Each run waits a random 0 to 30 minutes first, so a fleet does not check at the same moment. To change it, as root:
 
 ```sh
-urnet-tools auto-update weekly
+urnet-tools auto-update hourly   # or daily, weekly, monthly; `on` restores daily
 ```
 
-The interval can be `daily`, `weekly` or `monthly`, and `urnet-tools auto-update off` removes it. The entry is a script at `/etc/periodic/<interval>/urnetwork-update` that runs `urnet-tools update -f`. It only fires while `crond` is running. `urnet-tools` still writes the entry when `crond` is missing, and prints a note; to install and start `crond`, run:
+`urnet-tools auto-update off` removes it, and the choice is remembered: a reinstall or update keeps it off. The entry is a script at `/etc/periodic/<interval>/urnetwork-update` that runs `urnet-tools update -f`. It only fires while `crond` is running. `urnet-tools` still writes the entry when `crond` is missing, and prints a note; to install and start `crond`, run:
 
 ```sh
 apk add busybox-openrc
@@ -147,7 +147,7 @@ On a host where OpenRC is the running init system and the installer's `urnetwork
 | `stop` | `rc-service urnetwork stop` |
 | `restart` | `rc-service urnetwork restart`, behind the usual confirm gate (`-f` skips the prompt) |
 | `auto-start on` / `off` | `rc-update add urnetwork default` / `rc-update del urnetwork default` |
-| `auto-update daily\|weekly\|monthly` / `off` | A busybox `crond` entry in `/etc/periodic/<interval>/urnetwork-update` that runs `urnet-tools update -f`. There is no systemd timer. `off` removes it from every interval. |
+| `auto-update on\|hourly\|daily\|weekly\|monthly` / `off` | A busybox `crond` entry in `/etc/periodic/<interval>/urnetwork-update` that runs `urnet-tools update -f`. There is no systemd timer. `off` removes it from every interval. |
 | `logs [N]` | Follows the service's log file, `/var/log/urnetwork.log` (the file named by `output_log` in `/etc/init.d/urnetwork`), falling back to the error log. |
 | `status` | Prints `rc-service urnetwork status`, then the usual table with the live control-socket view. |
 | `uninstall` | When it targets the service's provider: stops the service, removes it from the runlevels (`rc-update del`), removes `/etc/init.d/urnetwork`, removes every periodic auto-update entry (including a paused one), deletes the `/usr/local/lib/urnetwork-provider` install tree, deletes the state directory in the service user's home, and removes the tool links (including the staged `/usr/local/libexec` copy). |

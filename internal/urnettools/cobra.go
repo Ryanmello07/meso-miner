@@ -633,7 +633,7 @@ func newAutoUpdateCmd() *cobra.Command {
 		return parseGlobal(args, func(force, dryRun bool, rest []string) error {
 			return cmdAutoUpdate(rest, force, dryRun)
 		})
-	}), "Set the auto-update schedule for the targeted provider to daily, weekly, or monthly, or turn it off. Honors --dry-run, which prints the plan and changes nothing.", "  urnet-tools auto-update daily --unit urnetwork-native.service\n  urnet-tools auto-update off")
+	}), "Set the auto-update schedule for the targeted provider. Auto-update is on by default and runs daily at a per-box time; \"on\" restores that default, hourly, weekly and monthly change the interval, and off turns it off. The choice is remembered, so reinstalls and updates keep it; \"ensure\" (what installers run) applies the remembered choice or the default without changing it. Honors --dry-run, which prints the plan and changes nothing.", "  urnet-tools auto-update on\n  urnet-tools auto-update hourly --unit urnetwork-native.service\n  urnet-tools auto-update off")
 }
 
 func newAutoStartCmd() *cobra.Command {

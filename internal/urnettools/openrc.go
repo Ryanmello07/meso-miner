@@ -173,7 +173,7 @@ func openrcUpdateArgv(action string) []string {
 
 // openrcPeriodicIntervals are the busybox crond queues the auto-update entry
 // can live in, mapped from the interval names the CLI already accepts.
-var openrcPeriodicIntervals = []string{"daily", "weekly", "monthly"}
+var openrcPeriodicIntervals = []string{"hourly", "daily", "weekly", "monthly"}
 
 // openrcValidInterval reports whether interval names a periodic queue.
 func openrcValidInterval(interval string) bool {
@@ -551,7 +551,7 @@ func openrcRouteAutoStart(mode string, rest []string, force, dryRun bool) (bool,
 // Unlike auto-start it does not require the init script — the entry is a
 // plain cron drop-in — but it runs the SAME urnet-tools binary the operator
 // uses, resolved from the provider's install dir when possible.
-func openrcRouteAutoUpdate(interval string, rest []string, dryRun bool) (bool, error) {
+func openrcRouteAutoUpdate(interval string, ensure bool, rest []string, dryRun bool) (bool, error) {
 	if !openrcActive() {
 		return false, nil
 	}
@@ -565,12 +565,25 @@ func openrcRouteAutoUpdate(interval string, rest []string, dryRun bool) (bool, e
 	if !openrcTargetApplies(t) {
 		return false, nil
 	}
+	gate := openrcGateProvider(t)
+	if ensure {
+		interval = effectiveAutoUpdateInterval(gate)
+		if interval == "off" {
+			fmt.Printf("auto-update stays off for %s (recorded choice; urnet-tools auto-update on to turn it on)\n", openrcServiceName)
+			return true, nil
+		}
+	}
 	if dryRun {
 		fmt.Printf("[dry-run] would set auto-update %s for %s (busybox crond periodic entry)\n", interval, openrcServiceName)
 		return true, nil
 	}
-	if err := openrcSetAutoUpdate(interval, openrcUpdateToolPath(openrcGateProvider(t))); err != nil {
+	if err := openrcSetAutoUpdate(interval, openrcUpdateToolPath(gate)); err != nil {
 		return true, err
+	}
+	if !ensure && gate.StateDir != "" {
+		if err := recordAutoUpdateChoice(gate, interval); err != nil {
+			fmt.Fprintf(os.Stderr, "auto-update: warning: schedule set, but the choice could not be recorded (%v)\n", err)
+		}
 	}
 	if interval != "off" {
 		if note := openrcCrondNote(); note != "" {
@@ -703,7 +716,7 @@ func openrcSetAutoUpdate(interval, toolPath string) error {
 		return nil
 	}
 	if !openrcValidInterval(interval) {
-		return fmt.Errorf("invalid interval %q: daily|weekly|monthly|off", interval)
+		return fmt.Errorf("invalid interval %q: hourly|daily|weekly|monthly|off", interval)
 	}
 	// Clear every queue — the entry AND any installer-paused leftover, in the
 	// target directory too — so an interval change never leaves two entries
@@ -773,6 +786,14 @@ func openrcUpdateCronScript(toolPath string) string {
 		"\tfi\n" +
 		"\tdir=$(dirname \"$dir\")\n" +
 		"done\n" +
+		// Spread the fleet: busybox crond runs every box's periodic queue at
+		// the same minute, so wait a random 0-30 minutes before the release
+		// check. URNET_UPDATE_SPREAD (seconds) overrides it; 0 disables the
+		// wait.
+		"spread=${URNET_UPDATE_SPREAD:-1800}\n" +
+		"if [ \"$spread\" -gt 0 ] 2>/dev/null; then\n" +
+		"\tsleep $(( $(od -An -N2 -tu2 /dev/urandom 2>/dev/null || echo 0) % spread ))\n" +
+		"fi\n" +
 		"exec \"$tool\" update -f\n"
 }
 

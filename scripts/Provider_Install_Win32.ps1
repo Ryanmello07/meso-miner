@@ -381,8 +381,8 @@ Set-Content $VersionFile $ReleaseVersion
 Set-Content $InstallDateFile $ReleaseDate
 
 if ($Version -eq "latest") {
-    Write-Host "Running: urnet-tools auto-update weekly"
-    & $InstalledToolsBinaryPath auto-update weekly
+    Write-Host "Running: urnet-tools auto-update ensure (daily unless you chose otherwise)"
+    & $InstalledToolsBinaryPath auto-update ensure
     if (-not $?) {
         Write-Warning "auto-update enable failed (exit $LASTEXITCODE); continuing install"
     }
