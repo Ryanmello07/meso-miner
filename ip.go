@@ -3501,6 +3501,13 @@ type RemoteUserNatProvider struct {
 	bw                *ProxyBandwidth
 	localUserNatUnsub func()
 	clientUnsub       func()
+
+	// identity reported in IpProviderDiagnostics (ip_provider_diagnostics.go)
+	securityPolicyHash       string
+	securityPolicyGeneration uint64
+	diagnosticsLock          sync.Mutex
+	// source-scoped block counters and publication state, bounded
+	sourceDiagnostics map[Id]*providerSourceDiagnostics
 }
 
 func NewRemoteUserNatProviderWithDefaults(
@@ -3532,6 +3539,8 @@ func NewRemoteUserNatProvider(
 		settings:       settings,
 		bw:             bw,
 	}
+	userNatProvider.securityPolicyHash = SecurityPolicyHash(userNatProvider.securityPolicy)
+	userNatProvider.securityPolicyGeneration = SecurityPolicyGeneration(userNatProvider.securityPolicy)
 
 	localUserNatUnsub := localUserNat.AddReceivePacketCallback(userNatProvider.Receive)
 	userNatProvider.localUserNatUnsub = localUserNatUnsub
@@ -3633,6 +3642,14 @@ func (self *RemoteUserNatProvider) refreshEgressFlow(provideMode protocol.Provid
 
 // `connect.ReceiveFunction`
 func (self *RemoteUserNatProvider) ClientReceive(source TransferPath, frames []*protocol.Frame, peer Peer) {
+	// Publish this source's diagnostics after the batch: provider identity on
+	// first contact, then the block counters whenever a drop raised them.
+	served := false
+	defer func() {
+		if served {
+			self.publishProviderDiagnostics(source.LocalMask())
+		}
+	}()
 	for _, frame := range frames {
 		switch frame.MessageType {
 		case protocol.MessageType_IpIpPing:
@@ -3657,6 +3674,7 @@ func (self *RemoteUserNatProvider) ClientReceive(source TransferPath, frames []*
 				continue
 			}
 			ipPacketToProvider := ipPacketToProvider_.(*protocol.IpPacketToProvider)
+			served = true
 			if self.bw != nil {
 				self.bw.BillableTx.Add(uint64(len(ipPacketToProvider.IpPacket.PacketBytes)))
 			}
@@ -3679,11 +3697,13 @@ func (self *RemoteUserNatProvider) ClientReceive(source TransferPath, frames []*
 					payload,
 				)
 				if smtpVerdict == smtpEgressReject {
+					self.recordProviderBlock(source.SourceId, 1, len(ipPacketToProvider.IpPacket.PacketBytes))
 					// First reject: send the reset once.
 					self.deliverSmtpPolicyReset(source, peer.ProvideMode, ipPath, ipPacketToProvider.IpPacket.PacketBytes)
 					continue
 				}
 				if smtpVerdict == smtpEgressRejectLatched {
+					self.recordProviderBlock(source.SourceId, 1, len(ipPacketToProvider.IpPacket.PacketBytes))
 					// Already rejected and reset: drop silently (no amplification).
 					continue
 				}
@@ -3717,8 +3737,12 @@ func (self *RemoteUserNatProvider) ClientReceive(source TransferPath, frames []*
 						} else {
 							c()
 						}
-					case SecurityPolicyResultIncident:
-						self.client.ReportAbuse(source)
+					default:
+						// drop or incident: blocked by the provider security policy
+						self.recordProviderBlock(source.SourceId, 1, len(ipPacketToProvider.IpPacket.PacketBytes))
+						if r == SecurityPolicyResultIncident {
+							self.client.ReportAbuse(source)
+						}
 					}
 				}
 			}
@@ -3775,9 +3799,11 @@ func (self *RemoteUserNatProvider) receiveFragment(
 			self.settings.WriteTimeout,
 		)
 	case SecurityPolicyResultIncident:
+		self.recordProviderBlock(source.SourceId, 1, len(datagram))
 		MessagePoolReturn(datagram)
 		self.client.ReportAbuse(source)
 	default:
+		self.recordProviderBlock(source.SourceId, 1, len(datagram))
 		MessagePoolReturn(datagram)
 	}
 }

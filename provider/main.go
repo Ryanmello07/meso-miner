@@ -916,6 +916,8 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	// reported to clients in IpProviderDiagnostics
+	connect.SetBuildVersion(RequireVersion())
 
 	// Support auth code via environment variable for Docker/dash-prefixed tokens.
 	// An explicit CLI positional argument takes precedence over the env var.

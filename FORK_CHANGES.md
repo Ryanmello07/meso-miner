@@ -3818,3 +3818,16 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 - Not ported: upstream's provider stream policy and rejected-open retention, which depend on network peers.
 
 **Impact**: meso now does what it already told the platform it does.
+
+## 184. Provider Diagnostics (Security Rules Generation)
+
+**Purpose**: upstream clients demote providers whose security rules generation is older or unknown for a while after such a provider drops their traffic. Meso exits reported nothing, so they counted as unknown and were demoted whenever that preference was armed.
+
+**Files Added**: `ip_provider_diagnostics.go` (ported from upstream), its tests. **Files Modified**: `ip.go` (`RemoteUserNatProvider`), `provider/main.go` (`connect.SetBuildVersion`).
+
+**Change**:
+- Each exit sends `IpProviderDiagnostics` to a client on first contact (build, policy hash, rules generation), and again whenever its policy drops more of that client's packets (SMTP guard, policy drop or incident, reassembled fragments).
+- Meso reports generation 2 for its built-in exit policy: its default settings and hand-maintained exception tables hash to upstream's generation 2 pin, which `TestSecurityPolicyRulesGenerationPin` enforces. Its detectors are that generation plus a stricter any-offset BitTorrent marker check. Any other policy reports unknown.
+- Per-source records are bounded (4096 per exit) and the message is sent nonblocking over the ordinary return path.
+
+**Impact**: meso exits count as current to upstream clients instead of unknown. One small message per client per exit, plus one after each drop batch.
