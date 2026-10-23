@@ -1,6 +1,9 @@
 package connect
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // The provider guard shares one flow table across all authenticated sources.
 // When the table is full, eviction must spare established secure flows:
@@ -102,34 +105,37 @@ func TestSmtpGuardEvictionPrefersRejectedSecureFlow(t *testing.T) {
 	}
 }
 
-// The eviction fix scopes candidates to the INSERTING owner. A client that
-// fills the shared table with secure flows must not cause another client's
-// established secure flow to be evicted (which would reset a live TLS
-// session). Owner B's new flow, with no expendable flow of its own, must not
-// be stored (the table stays at the cap) and must not evict owner A's flows.
+// Eviction is scoped to the INSERTING owner. Clients that together fill the
+// shared table with secure flows must not cause another client's established
+// secure flow to be evicted (which would reset a live TLS session). A new
+// owner with no flow of its own to give up is refused, and nothing is evicted.
 func TestSmtpGuardEvictionScopedToOwner(t *testing.T) {
 	var guard smtpEgressGuard
+	owners := smtpMaxFlowCount / smtpMaxOwnerFlowCount
 	ownerA := Id{1}
-	ownerB := Id{2}
+	ownerB := Id{0xff}
 
-	// Owner A fills the table to the cap with established secure flows.
-	for index := 0; index < smtpMaxFlowCount-1; index++ {
-		requireSmtpVerdict(t, smtpEgressAllow, guard.inspectForOwner(
-			ownerA,
-			smtpTestPath(20000+index, smtpImplicitTlsPort, uint32(index+1)),
-			smtpTestClientHello,
-		))
+	// Owners fill the table to the cap, each with its full share. Owner A
+	// holds secure flows and one still-negotiating flow (SYN only).
+	for owner := range owners {
+		ownerId := Id{byte(owner + 1)}
+		for index := range smtpMaxOwnerFlowCount {
+			if ownerId == ownerA && index == smtpMaxOwnerFlowCount-1 {
+				requireSmtpVerdict(t, smtpEgressAllow, guard.inspectForOwner(
+					ownerA, smtpTestSyn(30000, smtpImplicitTlsPort, 1), nil,
+				))
+				continue
+			}
+			requireSmtpVerdict(t, smtpEgressAllow, guard.inspectForOwner(
+				ownerId,
+				smtpTestPath(20000+index, smtpImplicitTlsPort, uint32(index+1)),
+				smtpTestClientHello,
+			))
+		}
 	}
-	// Owner A also holds one still-negotiating flow (SYN only).
-	requireSmtpVerdict(t, smtpEgressAllow, guard.inspectForOwner(
-		ownerA,
-		smtpTestSyn(30000, smtpImplicitTlsPort, 1), nil,
-	))
 
-	// Owner B inserts a new flow at the cap. With owner-scoped eviction,
-	// B has no expendable flow of its own, so B's flow is NOT stored and
-	// owner A's flows (secure AND negotiating) are all preserved.
-	requireSmtpVerdict(t, smtpEgressAllow, guard.inspectForOwner(
+	// Owner B has no flow of its own to give up: refused, nothing evicted.
+	requireSmtpVerdict(t, smtpEgressReject, guard.inspectForOwner(
 		ownerB,
 		smtpTestSyn(31000, smtpImplicitTlsPort, 1), nil,
 	))
@@ -139,7 +145,6 @@ func TestSmtpGuardEvictionScopedToOwner(t *testing.T) {
 	if len(guard.flows) != smtpMaxFlowCount {
 		t.Fatalf("flow table size = %d, want %d (cap must stay bounded)", len(guard.flows), smtpMaxFlowCount)
 	}
-	// Owner A's first secure flow must still be present.
 	firstSecureKey, ok := smtpFlowKeyForOwnerPath(ownerA, smtpTestPath(20000, smtpImplicitTlsPort, 1))
 	if !ok {
 		t.Fatal("could not build owner A secure flow key")
@@ -147,7 +152,6 @@ func TestSmtpGuardEvictionScopedToOwner(t *testing.T) {
 	if _, exists := guard.flows[firstSecureKey]; !exists {
 		t.Fatal("owner A's secure flow was evicted by owner B's insert")
 	}
-	// Owner A's negotiating flow must still be present too.
 	negotiatingKey, ok := smtpFlowKeyForOwnerPath(ownerA, smtpTestSyn(30000, smtpImplicitTlsPort, 1))
 	if !ok {
 		t.Fatal("could not build owner A negotiating flow key")
@@ -155,12 +159,63 @@ func TestSmtpGuardEvictionScopedToOwner(t *testing.T) {
 	if _, exists := guard.flows[negotiatingKey]; !exists {
 		t.Fatal("owner A's negotiating flow was evicted by owner B's insert")
 	}
-	// Owner B's flow must NOT be stored (transient; table stayed at cap).
 	ownerBKey, ok := smtpFlowKeyForOwnerPath(ownerB, smtpTestSyn(31000, smtpImplicitTlsPort, 1))
 	if !ok {
 		t.Fatal("could not build owner B flow key")
 	}
 	if _, exists := guard.flows[ownerBKey]; exists {
-		t.Fatal("owner B's flow was stored past the cap (eviction should not evict another owner to make room)")
+		t.Fatal("owner B's flow was stored past the cap")
+	}
+}
+
+// One client cannot hold more than its share: past smtpMaxOwnerFlowCount its
+// own oldest expendable flow makes room, so its count never grows, while the
+// rest of the table stays free for other clients.
+func TestSmtpGuardCapsFlowsPerOwner(t *testing.T) {
+	var guard smtpEgressGuard
+	owner := Id{7}
+	for index := range smtpMaxOwnerFlowCount + 10 {
+		requireSmtpVerdict(t, smtpEgressAllow, guard.inspectForOwner(
+			owner, smtpTestSyn(40000+index, smtpImplicitTlsPort, 1), nil,
+		))
+	}
+	other := Id{8}
+	requireSmtpVerdict(t, smtpEgressAllow, guard.inspectForOwner(
+		other, smtpTestSyn(50000, smtpImplicitTlsPort, 1), nil,
+	))
+	guard.stateLock.Lock()
+	defer guard.stateLock.Unlock()
+	if got := guard.ownerFlowCountWithLock(owner); got != smtpMaxOwnerFlowCount {
+		t.Fatalf("owner holds %d flows, want %d", got, smtpMaxOwnerFlowCount)
+	}
+	if got := guard.ownerFlowCountWithLock(other); got != 1 {
+		t.Fatalf("other owner holds %d flows, want 1", got)
+	}
+}
+
+// Tuples that end without an RST are retired once idle, and the reap runs
+// only once per interval.
+func TestSmtpGuardReapsIdleFlows(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	guard := smtpEgressGuard{timeNow: func() time.Time { return now }}
+	requireSmtpVerdict(t, smtpEgressAllow, guard.inspectForOwner(
+		Id{1}, smtpTestPath(41000, smtpImplicitTlsPort, 1), smtpTestClientHello,
+	))
+	now = now.Add(smtpFlowIdleTimeout / 2)
+	requireSmtpVerdict(t, smtpEgressAllow, guard.inspectForOwner(
+		Id{2}, smtpTestSyn(41001, smtpImplicitTlsPort, 1), nil,
+	))
+	// the first flow is now idle past the timeout; the second is not
+	now = now.Add(smtpFlowIdleTimeout/2 + time.Second)
+	requireSmtpVerdict(t, smtpEgressAllow, guard.inspectForOwner(
+		Id{3}, smtpTestSyn(41002, smtpImplicitTlsPort, 1), nil,
+	))
+	guard.stateLock.Lock()
+	defer guard.stateLock.Unlock()
+	if len(guard.flows) != 2 {
+		t.Fatalf("%d flows after the reap, want 2", len(guard.flows))
+	}
+	if guard.ownerFlowCountWithLock(Id{1}) != 0 {
+		t.Fatal("the idle flow was not reaped")
 	}
 }

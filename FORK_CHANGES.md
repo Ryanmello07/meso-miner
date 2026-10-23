@@ -3968,3 +3968,17 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 **Change**: `provider fleet init --chain_id --coordinator --hotkey [--netuid=25] [--fleet_id] [--generation=1] [--client_seed_file --client_id] [--member=<client_id>:<client_key>]...` prints the canonical manifest, its commitment hash and member count, exactly as `fleet manifest` does. The hotkey may be 0x hex or ss58; the fleet id defaults to 32 random bytes. It reads only local files, sends nothing, and never prints a seed. Usage placeholders follow meso's existing `--client_id=<hex16>` / `--client_seed_file=<file>` options.
 
 **Impact**: fleet setup no longer needs hand-written JSON. Round trip checked: `fleet init` output fed back to `fleet manifest` gives the same commitment hash.
+
+## 196. SMTP Guard: Per-Client Share and Idle Cleanup
+
+**Purpose**: the rest of the SMTP parity gap from §194. Meso's guard kept a tuple until an RST or eviction, so flows that ended with a FIN or just went quiet stayed in the 1024-entry table, and one client could hold all of it.
+
+**Files Modified**: `ip_smtp_policy.go`, `ip_smtp_eviction_test.go`.
+
+**Change**:
+- A remote client (provider-side owner) holds at most 128 SMTP flows, as upstream. Past that, its own oldest expendable flow makes room (meso's existing owner-scoped eviction), so its count does not grow.
+- Flows idle for 5 minutes are retired, checked at most once a minute as packets arrive (no goroutine), as upstream.
+- With no room and nothing of its own to evict, a new flow is now rejected, as upstream, instead of being inspected per packet without state (which reset the connection a packet later anyway). Another client's flow is still never evicted.
+- Not ported: FIN teardown (meso's `IpPath` has no FIN flag; idle cleanup covers those tuples within 5 minutes).
+
+**Impact**: the table cannot be filled by one client or by stale tuples. Only ports 465/587 are affected.

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/urnetwork/connect/protocol"
 )
@@ -33,6 +34,13 @@ const (
 	smtpMaxNegotiationBytes       = 2048
 	smtpMaxCommandLineBytes       = 510 // RFC 5321's 512 includes CRLF.
 	smtpMaxFlowCount              = 1024
+	// One remote client may hold at most this many SMTP flows on a provider,
+	// so one sender cannot fill the table for every other client.
+	smtpMaxOwnerFlowCount = 128
+	// Abandoned tuples (no RST seen) are retired after this long idle,
+	// checked at most once per reap interval as packets arrive.
+	smtpFlowIdleTimeout      = 5 * time.Minute
+	smtpFlowIdleReapInterval = time.Minute
 )
 
 type smtpEgressVerdict uint8
@@ -139,9 +147,10 @@ type smtpFlowState struct {
 	parseOffset  int
 	phase587     smtp587Phase
 
-	secure   bool
-	rejected bool
-	lastUsed uint64
+	secure       bool
+	rejected     bool
+	lastUsed     uint64
+	lastUsedTime time.Time
 }
 
 // smtpEgressGuard keeps only the bounded, pre-encryption prefix of each SMTP
@@ -153,9 +162,11 @@ type smtpFlowState struct {
 // and a single SMTP stream's packets are ordered through the lock. The map and
 // every field have useful zero values, which keeps fixture-built clients safe.
 type smtpEgressGuard struct {
-	stateLock sync.Mutex
-	flows     map[smtpFlowKey]*smtpFlowState
-	clock     uint64
+	stateLock        sync.Mutex
+	flows            map[smtpFlowKey]*smtpFlowState
+	clock            uint64
+	timeNow          func() time.Time
+	nextIdleReapTime time.Time
 }
 
 func (self *smtpEgressGuard) inspect(ipPath *IpPath, payload []byte) smtpEgressVerdict {
@@ -184,6 +195,8 @@ func (self *smtpEgressGuard) inspectForOwner(
 	if self.flows == nil {
 		self.flows = map[smtpFlowKey]*smtpFlowState{}
 	}
+	now := self.currentTimeWithLock()
+	self.reapIdleFlowsWithLock(now)
 	if ipPath.Rst {
 		delete(self.flows, key)
 		return smtpEgressAllow
@@ -195,6 +208,9 @@ func (self *smtpEgressGuard) inspectForOwner(
 		segmentSequence += 1
 		if flow == nil || !flow.synSeen || flow.synSeq != ipPath.SequenceNumber {
 			flow = self.newFlowWithLock(key, ipPath.DestinationPort)
+			if flow == nil {
+				return smtpEgressReject
+			}
 			flow.synSeen = true
 			flow.synSeq = ipPath.SequenceNumber
 			flow.baseSequence = segmentSequence
@@ -202,10 +218,14 @@ func (self *smtpEgressGuard) inspectForOwner(
 		}
 	} else if flow == nil {
 		flow = self.newFlowWithLock(key, ipPath.DestinationPort)
+		if flow == nil {
+			return smtpEgressReject
+		}
 	}
 
 	self.clock += 1
 	flow.lastUsed = self.clock
+	flow.lastUsedTime = now
 	if flow.rejected {
 		return smtpEgressRejectLatched
 	}
@@ -225,21 +245,61 @@ func (self *smtpEgressGuard) inspectForOwner(
 	return smtpEgressAllow
 }
 
+// newFlowWithLock admits state for a new tuple, or returns nil when there is
+// no room. A full owner share (provider side) or a full table makes room only
+// by evicting one of the inserting owner's own flows; another owner's flow is
+// never evicted (that would kill another client's live session). With no room
+// the packet is rejected, as upstream does, rather than passed unguarded.
 func (self *smtpEgressGuard) newFlowWithLock(key smtpFlowKey, destinationPort int) *smtpFlowState {
-	flow := &smtpFlowState{destinationPort: destinationPort}
-	if smtpMaxFlowCount <= len(self.flows) {
-		if !self.evictFlowWithLock(key.ownerId) {
-			// No expendable flow belonging to THIS owner. Do not evict another
-			// owner's flow (that would kill another client's live session).
-			// The flow is NOT inserted into the table: it guards only the
-			// current packet, and the next packet re-creates it. The global
-			// 1024 cap stays intact (memory bounded) and the callers keep a
-			// non-nil flow (no nil-deref).
-			return flow
+	if _, replacing := self.flows[key]; !replacing {
+		if key.ownerId != (Id{}) && smtpMaxOwnerFlowCount <= self.ownerFlowCountWithLock(key.ownerId) {
+			if !self.evictFlowWithLock(key.ownerId) {
+				return nil
+			}
+		}
+		if smtpMaxFlowCount <= len(self.flows) {
+			if !self.evictFlowWithLock(key.ownerId) {
+				return nil
+			}
 		}
 	}
+	flow := &smtpFlowState{destinationPort: destinationPort}
 	self.flows[key] = flow
 	return flow
+}
+
+// currentTimeWithLock returns the guard's time source. Caller holds stateLock.
+func (self *smtpEgressGuard) currentTimeWithLock() time.Time {
+	if self.timeNow != nil {
+		return self.timeNow()
+	}
+	return time.Now()
+}
+
+// reapIdleFlowsWithLock retires tuples idle past smtpFlowIdleTimeout, at most
+// once per smtpFlowIdleReapInterval. Driven by packets, so there is no
+// goroutine; it runs before a new flow is admitted. Caller holds stateLock.
+func (self *smtpEgressGuard) reapIdleFlowsWithLock(now time.Time) {
+	if !self.nextIdleReapTime.IsZero() && now.Before(self.nextIdleReapTime) {
+		return
+	}
+	for key, flow := range self.flows {
+		if !flow.lastUsedTime.IsZero() && !now.Before(flow.lastUsedTime.Add(smtpFlowIdleTimeout)) {
+			delete(self.flows, key)
+		}
+	}
+	self.nextIdleReapTime = now.Add(smtpFlowIdleReapInterval)
+}
+
+// ownerFlowCountWithLock counts ownerId's flows. Caller holds stateLock.
+func (self *smtpEgressGuard) ownerFlowCountWithLock(ownerId Id) int {
+	count := 0
+	for key := range self.flows {
+		if key.ownerId == ownerId {
+			count += 1
+		}
+	}
+	return count
 }
 
 // evictFlowWithLock removes one flow to make room for a new one. It prefers
