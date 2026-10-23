@@ -127,6 +127,13 @@ func TestStreamSequenceEndsWhenItsTransportEnds(t *testing.T) {
 	if buffer.IsStreamOpen(streamId) {
 		t.Fatal("the stream must read as closed after the reap")
 	}
+	// The live count is process-wide: a sequence from an earlier test can
+	// still be finishing its own reap when this one lands, so wait for it
+	// rather than read one instant. A sequence that never ends still fails.
+	deadline := time.Now().Add(5 * time.Second)
+	for StreamSequencesLive() != 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if got := StreamSequencesLive(); got != 0 {
 		t.Fatalf("no sequence may stay live, got %d", got)
 	}

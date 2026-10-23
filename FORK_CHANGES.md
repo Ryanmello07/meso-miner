@@ -3858,3 +3858,16 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 - Leak tagging stays on by default but tags one Get in 16 (`math/rand/v2`, per-thread). A leaking call site still tops `MessagePoolLeakHint` and the 60s pool report, at 1/16 of its count with the same ratios. Untagged buffers share tag 0, which no call site is assigned, and the report labels it as untagged.
 
 **Impact** (A/B on the same host, 3 runs each): CPU per MB down 15% at 16 and 64 pairs (20.6 to 17.4 and 22.1 to 18.9 ms/MB), throughput up 16% to 20%. Idle memory at 500 clients unchanged. Peak heap during the 64-pair transfer rose with throughput (69 to 77 MiB, the same per MB/s), from GC pacing rather than retained memory.
+
+## 187. Send and Receive Loops Stop Allocating for Disabled Logs
+
+**Purpose**: an allocation profile of the bulk harness showed about 12% of all allocated bytes in five verbose log calls that run per message and allocate their arguments even when verbose logging is off, and another 10% in a copy of the whole resend queue on every send loop iteration.
+
+**Files Modified**: `transfer.go`, `transfer_route_manager.go`, `.github/verbose_log_allowlist.txt`, `transfer_stream_manager_lifetime_test.go`.
+
+**Change**:
+- The per-message `[r]seq+`, `[mrw]` and `[mrr]` logs use the `if v := log.V(2); v.Enabled()` guard. `[r]seq+` leaves the unguarded allowlist (it is per message, not per connection).
+- The retained backstop scan runs only while retained items are charged (`retainedByteCount`), and reuses one buffer instead of cloning the queue each loop.
+- `TestStreamSequenceEndsWhenItsTransportEnds` waits for the process-wide live count instead of reading one instant; an earlier test's sequence can still be finishing its own reap, and faster loops made that window show.
+
+**Impact** (A/B on the same host, 3 runs each): CPU per MB down 7% at 16 pairs and 9% at 64 pairs, throughput up about 10%, peak heap down.

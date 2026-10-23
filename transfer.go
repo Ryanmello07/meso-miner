@@ -2227,6 +2227,8 @@ type SendSequence struct {
 	resendQueue        *resendQueue
 	sendItems          []*sendItem
 	nextSequenceNumber uint64
+	// reused by the run loop's retained backstop scan
+	retainedScanItems []*sendItem
 
 	// retainedByteCount is the aggregate bytes of currently-queued retained
 	// items (those with retainAfterAckTimeout). Bounded to a fraction of
@@ -3444,7 +3446,16 @@ func (self *SendSequence) Run() {
 		// derefs, double-drops, and missed items. The snapshot is taken
 		// under stateLock via Snapshot(), so the iteration sees a consistent
 		// view while dropItem takes its own lock per removal.
-		for _, retainedItem := range self.resendQueue.Snapshot() {
+		//
+		// Admission charges every retained item to retainedByteCount, so with
+		// none charged there is nothing to scan; otherwise the snapshot
+		// reuses one buffer. Copying the whole queue into a fresh slice on
+		// every loop was a tenth of all bytes allocated at bulk throughput.
+		retainedScanItems := self.retainedScanItems[:0]
+		if 0 < self.retainedByteCount {
+			retainedScanItems = self.resendQueue.UnorderedItems(retainedScanItems)
+		}
+		for _, retainedItem := range retainedScanItems {
 			if retainedItem.retainAfterAckTimeout && !sendTime.Before(retainedItem.backstopDeadline) {
 				if v := self.log.V(1); v.Enabled() {
 					v.Infof("[s]%s->%s...%s s(%s) retain backstop expired (scan), dropping retained item %x (sendCount=%d, lifetime=%s, overshoot=%s)\n",
@@ -3460,6 +3471,9 @@ func (self *SendSequence) Run() {
 				self.dropItem(retainedItem, errors.New("Retain backstop expired."))
 			}
 		}
+		// keep the buffer, not the items
+		clear(retainedScanItems)
+		self.retainedScanItems = retainedScanItems[:0]
 
 		if deadline, ok := self.retainedSilenceDeadline(); ok {
 			timeout = min(timeout, max(time.Until(deadline), time.Millisecond))
@@ -6000,7 +6014,9 @@ func (self *ReceiveSequence) receive(receivePack *ReceivePack) (bool, error) {
 	if sequenceNumber <= self.nextSequenceNumber {
 		if self.nextSequenceNumber == sequenceNumber {
 			// this item is the head of sequence
-			self.log.V(2).Infof("[r]seq+ %d->%d %s<-%s s(%s)\n", self.nextSequenceNumber, self.nextSequenceNumber+1, self.client.ClientTag(), self.source.SourceId, self.source.StreamId)
+			if v := self.log.V(2); v.Enabled() {
+				v.Infof("[r]seq+ %d->%d %s<-%s s(%s)\n", self.nextSequenceNumber, self.nextSequenceNumber+1, self.client.ClientTag(), self.source.SourceId, self.source.StreamId)
+			}
 			self.nextSequenceNumber = self.nextSequenceNumber + 1
 
 			if err := self.registerContracts(item); err != nil {

@@ -1103,13 +1103,17 @@ func (self *MultiRouteSelector) writeDetailedWithRoutePolicy(
 			}
 		}
 
-		self.log.V(2).Infof("[mrw] %s->%s s(%s) routes = %d\n", self.clientTag, self.destination.DestinationId, self.destination.StreamId, len(activeRoutes))
+		if v := self.log.V(2); v.Enabled() {
+			v.Infof("[mrw] %s->%s s(%s) routes = %d\n", self.clientTag, self.destination.DestinationId, self.destination.StreamId, len(activeRoutes))
+		}
 
 		// non-blocking priority
 		for _, route := range activeRoutes {
 			select {
 			case route <- transferFrameBytes:
-				self.log.V(2).Infof("[mrw]nb %s->%s s(%s)\n", self.clientTag, self.destination.DestinationId, self.destination.StreamId)
+				if v := self.log.V(2); v.Enabled() {
+					v.Infof("[mrw]nb %s->%s s(%s)\n", self.clientTag, self.destination.DestinationId, self.destination.StreamId)
+				}
 				self.updateSendStats(route, 1, ByteCount(len(transferFrameBytes)))
 				return true, self.dispositionForRoute(route), nil
 			default:
@@ -1210,7 +1214,9 @@ func (self *MultiRouteSelector) Read(ctx context.Context, timeout time.Duration)
 		notify := self.transportUpdate.NotifyChannel()
 		activeRoutes := self.GetActiveRoutes()
 
-		self.log.V(2).Infof("[mrr] %s/%s<- s(%s) routes = %d\n", self.clientTag, self.destination.DestinationId, self.destination.StreamId, len(activeRoutes))
+		if v := self.log.V(2); v.Enabled() {
+			v.Infof("[mrr] %s/%s<- s(%s) routes = %d\n", self.clientTag, self.destination.DestinationId, self.destination.StreamId, len(activeRoutes))
+		}
 
 		// non-blocking priority
 		retry := false
@@ -1218,7 +1224,9 @@ func (self *MultiRouteSelector) Read(ctx context.Context, timeout time.Duration)
 			select {
 			case transferFrameBytes, ok := <-route:
 				if ok {
-					self.log.V(2).Infof("[mrr]nb %s/%s<- s(%s)\n", self.clientTag, self.destination.DestinationId, self.destination.StreamId)
+					if v := self.log.V(2); v.Enabled() {
+						v.Infof("[mrr]nb %s/%s<- s(%s)\n", self.clientTag, self.destination.DestinationId, self.destination.StreamId)
+					}
 					self.updateReceiveStats(route, 1, ByteCount(len(transferFrameBytes)))
 					return transferFrameBytes, nil
 				} else {
