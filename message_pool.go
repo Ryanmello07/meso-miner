@@ -142,7 +142,6 @@ type messagePool struct {
 	shards     []*poolShard
 	shardCount int
 	shardMask  uint32
-	shardNext  atomic.Uint64
 }
 
 func newMessagePool(size int, maxCount int) *messagePool {
@@ -175,11 +174,12 @@ func (self *messagePool) shard(index int) *poolShard {
 	return self.shards[index]
 }
 
-// nextShardIndex returns the index of the next shard for Get, rotating
-// round-robin across the shards by advancing an atomic counter and masking
-// it with shardMask (the shard count must be a power of two).
+// nextShardIndex returns a random shard for Get, masked with shardMask (the
+// shard count must be a power of two). The runtime's per-thread generator
+// spreads Gets as evenly as a rotation did, without the shared counter every
+// Get on every core used to write.
 func (self *messagePool) nextShardIndex() int {
-	return int(self.shardNext.Add(1)-1) & int(self.shardMask)
+	return int(rand.Uint32() & self.shardMask)
 }
 
 // Resize replaces each shard's freelist with a new slice whose per-shard

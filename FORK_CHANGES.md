@@ -3923,3 +3923,13 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 - The echo test now sends tagged probes with a probe-sized non-probe frame and a probe from another test interleaved, and checks all probes come back, nothing else is echoed, and the interleaved frames are delivered.
 
 **Impact**: user frames during a speed test are delivered. The probe format is what the platform sends to upstream providers since that release.
+
+## 192. Message Pool Picks Shards Without a Shared Counter
+
+**Purpose**: a CPU profile of the bulk harness after §191 showed every `MessagePoolGet` on every core advancing one process-wide atomic counter to pick its shard, so that cache line bounced between cores on every message.
+
+**Files Modified**: `message_pool.go`.
+
+**Change**: `nextShardIndex` takes the shard from the runtime's per-thread random generator (`math/rand/v2`), masked to the shard count, instead of a round-robin counter. Gets still spread evenly; a buffer still returns to the shard it came from.
+
+**Impact** (A/B on the same host, 3 runs each, median): CPU per MB down 4% at 16 pairs and 5% at 64 pairs, throughput up 4% to 5%, peak heap flat. Data: `bench/ab7_before.jsonl`, `bench/ab7_after.jsonl` in the project notes.
