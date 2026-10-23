@@ -3899,3 +3899,15 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 - Session load printed "contains 0\n0 client JWT entries" when the bundle had none.
 
 **Impact**: FreeBSD proxy and session commands work; restored nodes keep their registrations.
+
+## 190. Per-Ack Wakeups Stop Allocating
+
+**Purpose**: after the round 6 upstream merge, an allocation profile of the bulk harness showed the ack window allocating a fresh notify channel on every ack (`Monitor.NotifyAll`, about 2.5% of bytes), and one more per-message verbose log, `[r]head`, allocating its arguments while off (about 3%).
+
+**Files Modified**: `util.go` (`Monitor.Notify`), `transfer.go`, `.github/verbose_log_allowlist.txt`, `verbose_log_guard_test.go`. **Files Added**: `util_monitor_notify_test.go`.
+
+**Change**:
+- `Monitor.Notify` wakes waiters like `NotifyAll`, but skips the close and the new channel when no channel was handed out since the last wake (nobody can be waiting). The ack window uses it. `NotifyAll` and `NotifyChannel` keep their behaviour.
+- The `[r]head` log is guarded and leaves the Tier-2 allowlist: it runs per received message, not per connection.
+
+**Impact** (A/B on the same host, 3 runs each): CPU per MB down 11% at 16 pairs and 6% at 64 pairs, throughput up 7% to 12%, peak heap flat.

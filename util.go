@@ -267,6 +267,10 @@ func ShedMemory() {
 type Monitor struct {
 	mutex  sync.Mutex
 	notify chan struct{}
+	// handedOut is whether the current channel has been given to anyone
+	// since the last notify. Notify skips the close and reallocation while
+	// nobody can be waiting on it.
+	handedOut bool
 }
 
 func NewMonitor() *Monitor {
@@ -278,6 +282,7 @@ func NewMonitor() *Monitor {
 func (self *Monitor) NotifyChannel() chan struct{} {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
+	self.handedOut = true
 	return self.notify
 }
 
@@ -286,7 +291,24 @@ func (self *Monitor) NotifyAll() chan struct{} {
 	defer self.mutex.Unlock()
 	close(self.notify)
 	self.notify = make(chan struct{})
+	// the caller receives the new channel and may wait on it
+	self.handedOut = true
 	return self.notify
+}
+
+// Notify wakes every waiter, like NotifyAll, for a caller that does not need
+// the new channel. When no channel was handed out since the last notify,
+// nobody can be waiting, so it allocates nothing: a per-ack notify on the
+// packet path otherwise made a channel per ack.
+func (self *Monitor) Notify() {
+	self.mutex.Lock()
+	defer self.mutex.Unlock()
+	if !self.handedOut {
+		return
+	}
+	close(self.notify)
+	self.notify = make(chan struct{})
+	self.handedOut = false
 }
 
 // MonitorValue pairs a value with its change notification so the two halves of

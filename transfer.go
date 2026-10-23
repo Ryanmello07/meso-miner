@@ -6280,7 +6280,9 @@ func (self *ReceiveSequence) receiveHead(item *receiveItem) {
 	}
 	frameMessageTypesStr := strings.Join(frameMessageTypes, ", ")
 	if item.ack {
-		self.log.V(1).Infof("[r]head %d (%s) %s<-%s s(%s)\n", item.sequenceNumber, frameMessageTypesStr, self.client.ClientTag(), self.source.SourceId, self.source.StreamId)
+		if v := self.log.V(1); v.Enabled() {
+			v.Infof("[r]head %d (%s) %s<-%s s(%s)\n", item.sequenceNumber, frameMessageTypesStr, self.client.ClientTag(), self.source.SourceId, self.source.StreamId)
+		}
 	} else {
 		self.log.V(1).Infof("[r]head nack (%s) %s<-%s s(%s)\n", frameMessageTypesStr, self.client.ClientTag(), self.source.SourceId, self.source.StreamId)
 	}
@@ -6842,7 +6844,7 @@ func (self *sequenceAckWindow) Update(ack *sequenceAck) {
 		self.ackUpdateCount += 1
 	}
 
-	self.ackMonitor.NotifyAll()
+	self.ackMonitor.Notify()
 }
 
 // Snapshot returns a point-in-time view of the window. When `reset` is true

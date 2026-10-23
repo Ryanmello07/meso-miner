@@ -450,7 +450,6 @@ func TestVerboseLogAllowlist_ReflectsTier2Sweep(t *testing.T) {
 		`"[multi]window expand +%d %d->%d (+%d)\n"`,
 		`"[r%d]FIN\n"`,
 		`"[r]%s<-%s bad encrypted control = %s\n"`,
-		`"[r]head %d (%s) %s<-%s s(%s)\n"`,
 		`"[s]resend drop = %s"`,
 		`"drop remote user nat provider s packet ->%s\n"`,
 	} {
@@ -464,6 +463,13 @@ func TestVerboseLogAllowlist_ReflectsTier2Sweep(t *testing.T) {
 	// no longer needs to be sanctioned as an unguarded Tier-2 site. If it
 	// reappears, TestHotPathVerboseLogging_AllowlistDisjointFromGuardedSites
 	// would also fail, but checking it directly here pinpoints the cause.
+	// "[r]head ...\n" was sanctioned as Tier-2, but it runs once per
+	// received message: unguarded, it was 3% of all bytes allocated in the
+	// bulk harness. Its call site is now guarded.
+	if sanctioned[`"[r]head %d (%s) %s<-%s s(%s)\n"`] {
+		t.Errorf("%s should not be in the allowlist: it runs per message and its call site is guarded", `"[r]head %d (%s) %s<-%s s(%s)\n"`)
+	}
+
 	if sanctioned[`"[f%d]timeout\n"`] {
 		t.Errorf("%s should not be in the allowlist: its call sites in ip.go are now guarded", `"[f%d]timeout\n"`)
 	}
