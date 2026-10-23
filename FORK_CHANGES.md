@@ -3748,3 +3748,17 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 - **CFAA blocklist refresh**: IPv4 41,425 → 41,202, IPv6 548 → 593, across two upstream syncs. Data-only.
 
 **Impact**: operators see the counters continue across a restart, a node that updates carries the certificate block, and a script that still calls a retired report command now fails. Nothing else changes provider traffic behaviour.
+
+## 179. Release Tags Follow Mainnet
+
+**Purpose**: A meso tag minted its own `vYYYY.M.D-<code>-meso` code, so the app version a meso node reports never matched any mainnet release. Tags now start with the mainnet release they track and append the meso build date and a meso-miner counter.
+
+**Files Modified**: `scripts/compute-meso-tag.sh`, `.github/workflows/ship-release.yml`, `.github/workflows/build.yml`, `.github/workflows/installer-matrix.yml`, `.github/scripts/shakedown.sh`, `.github/scripts/docker-shakedown.sh`.
+
+**Change**:
+- **Shape**: `<mainnet tag>-<YYYY.MM.DD>-meso-miner-v<NNN>`, e.g. `v2026.10.22-1078873780-2026.10.23-meso-miner-v001` (49 characters, under the 64-character app version limit).
+- **Mainnet part**: the newest mainnet release in `urnetwork/build`, preferring the primary code (the one with `-fdroid`/`-ungoogle` siblings). `MAINNET_TAG` overrides it.
+- **Counter**: one more than the highest existing `*-meso-miner-v<NNN>` tag; it never resets. `MESO_COUNTER` overrides it.
+- **CI**: Ship Release validates the new shape; the Docker `:<tag>` rule, the installer matrix trigger and the shakedown version checks accept both the old and the new shape, so older releases still resolve.
+
+**Impact**: release tooling only. A node reports the new tag as its app version once it runs a release cut with it.

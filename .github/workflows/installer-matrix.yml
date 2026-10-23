@@ -11,6 +11,7 @@ on:
   push:
     tags:
       - 'v2026.*-meso'
+      - 'v2026.*-meso-miner-v*'
   pull_request:
     paths:
       - 'scripts/Provider_Install_Linux.sh'

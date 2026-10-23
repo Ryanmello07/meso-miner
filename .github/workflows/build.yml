@@ -426,12 +426,13 @@ jobs:
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            # :latest is the STABLE release — only on v2026.*-meso tags.
+            # :latest is the STABLE release — only on v2026.* meso tags (the old
+            # v2026.*-meso shape and the v2026.*-meso-miner-vNNN shape).
             # group=0 keeps the FULL meso tag (v2026.9.18-1049118720-meso) so
             # docker pull with the exact release tag works (matches
             # release notes, the shakedown, and docker.go). group=1
             # stripped the v2026.* prefix and broke those pulls.
-            type=match,pattern=v2026\.\d+\.\d+-\d+-meso(-(rc|alpha|beta)\d*)?,group=0
+            type=match,pattern=v2026\.\d+\.\d+-\d+-(meso|\d{4}\.\d{2}\.\d{2}-meso-miner-v\d+)(-(rc|alpha|beta)\d*)?,group=0
             # A pre-release must NOT become :latest. release.yml already marks
             # the GitHub Release itself pre-release on -rc/-alpha/-beta, but
             # that gate keys off the SUFFIX while this one keyed off the

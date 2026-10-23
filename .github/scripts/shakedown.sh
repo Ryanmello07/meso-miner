@@ -95,7 +95,7 @@ fi
 # Assign EXPECTED_BASE BEFORE the guard references it: under set -u, using an
 # unset variable aborts the run at startup. This was after the
 # guard, so every run died in its first second and then graded RELEASE_OK).
-EXPECTED_BASE=$(echo "$EXPECTED_VERSION" | grep -oE "v[0-9]{4}\.[0-9]+\.[0-9]+-[0-9]+-meso" | head -1)
+EXPECTED_BASE=$(echo "$EXPECTED_VERSION" | grep -oE "v[0-9]{4}\.[0-9]+\.[0-9]+-[0-9]+-(meso|[0-9]{4}\.[0-9]{2}\.[0-9]{2}-meso-miner-v[0-9]+)" | head -1)
 # EXPECTED_BASE empty would make grep -qE "" match anything, so every version
 # check would vacuously pass on a future v3.24 tag. Guard it.
 if [ -z "$EXPECTED_BASE" ]; then
@@ -932,12 +932,12 @@ section "V. Hotswap decline and engage"
 # everything downstream.
 OLD_HOTSWAP_VERSION="v2026.9.9-1788916951-meso"
 V_HSWAP_TAGS=$(curl -fsS "https://api.github.com/repos/urfoundation/meso-miner/releases?per_page=30" 2>/dev/null \
-  | grep -oE '"tag_name": "v[0-9]{4}\.[0-9]+\.[0-9]+-[0-9]+-meso"' \
+  | grep -oE '"tag_name": "v[0-9]{4}\.[0-9]+\.[0-9]+-[0-9]+-(meso|[0-9]{4}\.[0-9]{2}\.[0-9]{2}-meso-miner-v[0-9]+)"' \
   | grep -v -- '-hub' | sed 's/"tag_name": "//;s/"$//' | sort -r | head -2)
 V_TAG_A=$(echo "$V_HSWAP_TAGS" | sed -n 2p)
 V_TAG_B=$(echo "$V_HSWAP_TAGS" | sed -n 1p)
-V_BASE_A=$(echo "$V_TAG_A" | grep -oE "v[0-9]{4}\.[0-9]+\.[0-9]+-[0-9]+-meso")
-V_BASE_B=$(echo "$V_TAG_B" | grep -oE "v[0-9]{4}\.[0-9]+\.[0-9]+-[0-9]+-meso")
+V_BASE_A=$(echo "$V_TAG_A" | grep -oE "v[0-9]{4}\.[0-9]+\.[0-9]+-[0-9]+-(meso|[0-9]{4}\.[0-9]{2}\.[0-9]{2}-meso-miner-v[0-9]+)")
+V_BASE_B=$(echo "$V_TAG_B" | grep -oE "v[0-9]{4}\.[0-9]+\.[0-9]+-[0-9]+-(meso|[0-9]{4}\.[0-9]{2}\.[0-9]{2}-meso-miner-v[0-9]+)")
 if [ -z "$V_TAG_A" ] || [ -z "$V_TAG_B" ]; then
   skip "V: needs two published hotswap-capable meso tags (have: $V_HSWAP_TAGS)"
   V_TAG_MISSING=1
