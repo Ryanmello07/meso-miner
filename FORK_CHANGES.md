@@ -3846,3 +3846,15 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 - Unchanged: reuse and renewal of stored client JWTs (renewal still uses `auth-client` with the stored client id).
 
 **Impact**: retries never allocate a second client for a slot. Behaviour change: the server keeps a slot's binding after its client is deleted, so a slot whose client was revoked (for example, removed from the dashboard) stays refused instead of getting a fresh client. Only a new `.provider.key` unblocks it, and a new key changes the scope of every slot in that state dir.
+
+## 186. Message Pool: Per-Shard Counters and Sampled Leak Tags
+
+**Purpose**: a CPU profile of the bulk harness (64 transfer pairs) showed about 10% of all CPU in message pool bookkeeping: process-wide atomic counters touched on every Get and Put (every core bouncing the same cache lines), and a `runtime.Callers` stack walk on every Get for leak attribution.
+
+**Files Modified**: `message_pool.go`, `message_pool_metrics_test.go`, `message_pool_concurrency_test.go`, `message_pool_leak_hint_test.go`.
+
+**Change**:
+- `EnhancedMetrics` counters (hits, misses, returns, active buffers, size distribution) live in each pool shard and are written under the shard lock that Get and Put already hold. The snapshot sums them. Output keys are unchanged; the size distribution now reports the five pool classes.
+- Leak tagging stays on by default but tags one Get in 16 (`math/rand/v2`, per-thread). A leaking call site still tops `MessagePoolLeakHint` and the 60s pool report, at 1/16 of its count with the same ratios. Untagged buffers share tag 0, which no call site is assigned, and the report labels it as untagged.
+
+**Impact** (A/B on the same host, 3 runs each): CPU per MB down 15% at 16 and 64 pairs (20.6 to 17.4 and 22.1 to 18.9 ms/MB), throughput up 16% to 20%. Idle memory at 500 clients unchanged. Peak heap during the 64-pair transfer rose with throughput (69 to 77 MiB, the same per MB/s), from GC pacing rather than retained memory.

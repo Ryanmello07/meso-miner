@@ -11,31 +11,27 @@ func TestEnhancedMetricsShape(t *testing.T) {
 			t.Fatalf("EnhancedMetrics missing key %q", key)
 		}
 	}
-	// ActiveBuffers is a process-global gauge shared with other tests that
-	// called Get() without Put(), so it is NOT expected to be 0 here. We
-	// assert on the DELTA my round-trip produces instead.
+	// active_buffers is process-wide and other tests hold buffers, so assert
+	// on the delta of a Get/Return round-trip in every size class.
 	before := m["active_buffers"].(uint64)
 	beforeReturns := m["returns"].(uint64)
+	beforeSizes := m["size_distribution"].(map[string]uint64)
 
-	// A Get/Put round-trip must net out the active count and increment returns,
-	// without panicking on any pool size.
-	sizes := []int{2048, 4096, 16384, 32768, 65536, 12345} // 12345 is NOT in the fixed set -> exercises lazy size-distribution
+	sizes := []int{1500, 4000, 16000, 32000, 65000}
 	for _, size := range sizes {
-		pool := newMessagePool(size, 4)
-		b := pool.Get()
-		pool.Put(b)
+		MessagePoolReturn(MessagePoolGet(size))
 	}
 	m2 := EnhancedMetrics()
-	after := m2["active_buffers"].(uint64)
-	if after != before {
+	if after := m2["active_buffers"].(uint64); after != before {
 		t.Fatalf("expected active_buffers to net back to %d after round-trip, got %d", before, after)
 	}
-	if m2["returns"].(uint64)-beforeReturns != uint64(len(sizes)) {
-		t.Fatalf("expected %d returns after round-trip, got %d", len(sizes), m2["returns"].(uint64)-beforeReturns)
+	if got := m2["returns"].(uint64) - beforeReturns; got != uint64(len(sizes)) {
+		t.Fatalf("expected %d returns after round-trip, got %d", len(sizes), got)
 	}
-	// Each new pool size must appear in the distribution (incl. 12345).
 	sd := m2["size_distribution"].(map[string]uint64)
-	if _, ok := sd["12345"]; !ok || sd["12345"] == 0 {
-		t.Fatalf("expected size 12345 in size_distribution, got %v", sd)
+	for _, size := range []string{"2048", "4096", "16384", "32768", "65536"} {
+		if sd[size] != beforeSizes[size]+1 {
+			t.Fatalf("size %s: %d gets, want %d", size, sd[size], beforeSizes[size]+1)
+		}
 	}
 }

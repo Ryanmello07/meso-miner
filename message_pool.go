@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/maphash"
 	"io"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -34,64 +35,9 @@ var DefaultMessagePoolShardCount = func() int {
 	return 16
 }()
 
-// PoolMetrics tracks performance counters for the message relay pool.
-// Counters use atomics so Get/Put on the hot path do not contend.
-// SizeDistribution is created lazily so an unknown pool size cannot
-// nil-dereference on first use.
-type PoolMetrics struct {
-	Hits             atomic.Uint64
-	Misses           atomic.Uint64
-	Returns          atomic.Uint64
-	ActiveBuffers    atomic.Uint64
-	GCPauses         atomic.Uint64
-	SizeDistribution map[int]*atomic.Uint64
-	LastResetTime    time.Time
-}
-
-var globalPoolMetrics = &PoolMetrics{
-	SizeDistribution: map[int]*atomic.Uint64{},
-	LastResetTime:    time.Now(),
-}
-
-var sizeDistMu sync.RWMutex
-
-var initSizeDistOnce sync.Once
-
-func initSizeDist() {
-	sizeDistMu.Lock()
-	defer sizeDistMu.Unlock()
-	for _, size := range []int{2048, 4096, 16384, 32768, 65536} {
-		globalPoolMetrics.SizeDistribution[size] = &atomic.Uint64{}
-	}
-}
-
-// addSizeDistribution increments the per-size buffer counter for size.
-// Lock-free fast path for the 5 known pool sizes (pre-populated by initSizeDist).
-// Unknown sizes fall back to a locked lazy-create (cold path, rare in practice).
-func addSizeDistribution(size int) {
-	initSizeDistOnce.Do(initSizeDist)
-	// Fast path (5 known pool sizes): read the pre-populated entry under a
-	// read lock. RLock is required — the map is WRITTEN by the cold path and
-	// the snapshot iterator, so an unlocked read races a concurrent map write
-	// and crashes the process (`fatal: concurrent map read and map write`).
-	sizeDistMu.RLock()
-	counter, ok := globalPoolMetrics.SizeDistribution[size]
-	sizeDistMu.RUnlock()
-	if ok {
-		counter.Add(1)
-		return
-	}
-	// Cold path: unknown pool size — create entry under write lock.
-	sizeDistMu.Lock()
-	defer sizeDistMu.Unlock()
-	if counter, ok := globalPoolMetrics.SizeDistribution[size]; ok {
-		counter.Add(1)
-	} else {
-		counter = &atomic.Uint64{}
-		globalPoolMetrics.SizeDistribution[size] = counter
-		counter.Add(1)
-	}
-}
+// poolMetricsResetTime is when the pool counters started; reported by
+// EnhancedMetrics. The counters themselves live in each shard (see poolShard).
+var poolMetricsResetTime = time.Now()
 
 // new byte allocations in the connect package use pooled message buffers,
 // either via `MessagePoolCopy` or `MessagePoolGet`.
@@ -126,6 +72,23 @@ var debugTags atomic.Bool
 
 func init() { debugTags.Store(true) }
 
+// debugTagSampleMask samples which Gets are tagged: one in mask+1. Tagging
+// costs a runtime.Callers walk per Get, about 5% of CPU at bulk throughput
+// when every Get paid it. A leaking site leaks at its full rate, so one in
+// 16 of its buffers still carries its tag and still tops the leak report
+// (at 1/16 of the count; the ratios are unchanged). Untagged buffers share
+// tag 0, which debugTag never assigns to a call site. Tests store 0 to tag
+// every Get.
+var debugTagSampleMask atomic.Uint32
+
+func init() { debugTagSampleMask.Store(15) }
+
+// debugTagSampled reports whether this Get should be tagged. rand.Uint32 is
+// per-thread state, so sampling adds no shared cache line.
+func debugTagSampled() bool {
+	return debugTags.Load() && rand.Uint32()&debugTagSampleMask.Load() == 0
+}
+
 // [8 byte id][1 byte tag][1 byte flags][2 byte ref count][1 byte shard index]
 const MessagePoolMetaByteCount = 13
 const MessagePoolFlagShared = uint8(0x01)
@@ -157,6 +120,14 @@ type poolShard struct {
 	takenTags    [256]uint64
 	returnedTags [256]uint64
 	createdTags  [256]uint64
+	// EnhancedMetrics counters, written under mutex, which Get and Put
+	// already hold. Process-global atomics here cost about 5% of CPU at
+	// bulk throughput: every core bounced the same cache lines. A buffer
+	// returns to the shard it came from, so active nets out per shard.
+	hits    uint64
+	misses  uint64
+	returns uint64
+	active  uint64
 }
 
 func newPoolShard(maxCount int) *poolShard {
@@ -260,9 +231,8 @@ func (self *messagePool) Get() []byte {
 		shard.pool[shard.count-1] = nil
 		shard.count -= 1
 		poolMessage[self.size+12] = uint8(shardIndex)
-		globalPoolMetrics.Hits.Add(1)
-		globalPoolMetrics.ActiveBuffers.Add(1)
-		addSizeDistribution(self.size)
+		shard.hits += 1
+		shard.active += 1
 		return poolMessage
 	}
 
@@ -272,9 +242,8 @@ func (self *messagePool) Get() []byte {
 	binary.BigEndian.PutUint64(poolMessage[self.size:], shard.nextId)
 	poolMessage[self.size+8] = 255
 	poolMessage[self.size+12] = uint8(shardIndex)
-	globalPoolMetrics.Misses.Add(1)
-	globalPoolMetrics.ActiveBuffers.Add(1)
-	addSizeDistribution(self.size)
+	shard.misses += 1
+	shard.active += 1
 	return poolMessage
 }
 
@@ -299,12 +268,12 @@ func (self *messagePool) Put(poolMessage []byte) {
 
 	// The buffer is no longer active whether it is pooled or discarded, so
 	// decrement regardless of the capacity branch (avoids monotonic drift).
-	globalPoolMetrics.ActiveBuffers.Add(^uint64(0))
+	shard.active -= 1
 	if shard.count < len(shard.pool) {
 		// note we do not need to zero out the message
 		shard.pool[shard.count] = poolMessage
 		shard.count += 1
-		globalPoolMetrics.Returns.Add(1)
+		shard.returns += 1
 	}
 	// else no capacity, discard the message
 }
@@ -396,6 +365,9 @@ func MessagePoolLeakHint(limit int) []MessagePoolLeakTag {
 			defer debugStateLock.RUnlock()
 			return strings.Join(maps.Keys(tagCallers[tag]), "/")
 		}()
+		if tag == 0 {
+			callers = "(untagged: the unsampled share of every site)"
+		}
 		// Signed math: if a double-return ever makes returned > taken, or a
 		// counter reset races a live goroutine, an unsigned subtraction
 		// would underflow to a huge number and sort this tag to the TOP of
@@ -570,6 +542,10 @@ func debugTag() uint8 {
 	binary.LittleEndian.PutUint64(b[0:8], uint64(pcs[0]))
 	binary.LittleEndian.PutUint64(b[8:16], uint64(pcs[1]))
 	tag := uint8(maphash.Bytes(seed, b[:]))
+	if tag == 0 {
+		// tag 0 is reserved for untagged (unsampled) buffers
+		tag = 1
+	}
 
 	key := pcs // key is [2]uintptr, comparable
 
@@ -780,7 +756,7 @@ func MessagePoolCopy(message []byte) []byte {
 	// the frame that called the public pool function, so an extra wrapper
 	// frame would make every MessagePoolCopy caller share one tag.
 	var tag uint8
-	if debugTags.Load() {
+	if debugTagSampled() {
 		tag = debugTag()
 	}
 	b, _ := MessagePoolCopyDetailedWithTag(message, tag)
@@ -789,7 +765,7 @@ func MessagePoolCopy(message []byte) []byte {
 
 func MessagePoolCopyDetailed(message []byte) ([]byte, bool) {
 	var tag uint8
-	if debugTags.Load() {
+	if debugTagSampled() {
 		tag = debugTag()
 	}
 	return MessagePoolCopyDetailedWithTag(message, tag)
@@ -804,7 +780,7 @@ func MessagePoolCopyDetailedWithTag(message []byte, tag uint8) ([]byte, bool) {
 func MessagePoolGet(n int) []byte {
 	// See MessagePoolCopy: stamp the tag at the public-function depth.
 	var tag uint8
-	if debugTags.Load() {
+	if debugTagSampled() {
 		tag = debugTag()
 	}
 	b, _ := MessagePoolGetDetailedWithTag(n, tag)
@@ -813,7 +789,7 @@ func MessagePoolGet(n int) []byte {
 
 func MessagePoolGetDetailed(n int) ([]byte, bool) {
 	var tag uint8
-	if debugTags.Load() {
+	if debugTagSampled() {
 		tag = debugTag()
 	}
 	return MessagePoolGetDetailedWithTag(n, tag)
@@ -1017,7 +993,7 @@ func MessagePoolCheck(message []byte) (pooled bool, shared bool) {
 
 func ProtoMarshal(m proto.Message) ([]byte, error) {
 	var tag uint8
-	if debugTags.Load() {
+	if debugTagSampled() {
 		tag = debugTag()
 	}
 	return ProtoMarshalWithTag(m, tag)
@@ -1072,38 +1048,34 @@ func DecodeBase64(enc *base64.Encoding, s string) ([]byte, error) {
 // sum live capacity, so it is intended for occasional operator pulls, not
 // tight polling.
 func EnhancedMetrics() map[string]any {
-	totalPooled := uint64(0)
+	var totalPooled, hits, misses, returns, active uint64
+	sizeDistribution := map[string]uint64{}
 	for _, pool := range orderedMessagePools() {
+		var gets uint64
 		for _, shard := range pool.shards {
 			func() {
 				shard.mutex.Lock()
 				defer shard.mutex.Unlock()
 				totalPooled += uint64(shard.count)
+				hits += shard.hits
+				misses += shard.misses
+				returns += shard.returns
+				active += shard.active
+				gets += shard.hits + shard.misses
 			}()
 		}
+		sizeDistribution[fmt.Sprintf("%d", pool.size)] = gets
 	}
-
-	gcPauses := sampleGCPauses()
-
-	sizeDistribution := map[string]uint64{}
-	// RLock: the snapshot only reads this map; a read lock still excludes the
-	// cold-path writer (which takes Lock), so the iteration never races a map
-	// write, while letting concurrent fast-path readers proceed.
-	sizeDistMu.RLock()
-	for size, count := range globalPoolMetrics.SizeDistribution {
-		sizeDistribution[fmt.Sprintf("%d", size)] = count.Load()
-	}
-	sizeDistMu.RUnlock()
 
 	return map[string]any{
-		"hits":              globalPoolMetrics.Hits.Load(),
-		"misses":            globalPoolMetrics.Misses.Load(),
-		"returns":           globalPoolMetrics.Returns.Load(),
-		"active_buffers":    globalPoolMetrics.ActiveBuffers.Load(),
+		"hits":              hits,
+		"misses":            misses,
+		"returns":           returns,
+		"active_buffers":    active,
 		"pooled_buffers":    totalPooled,
-		"gc_pauses":         gcPauses,
+		"gc_pauses":         sampleGCPauses(),
 		"size_distribution": sizeDistribution,
-		"last_reset_time":   globalPoolMetrics.LastResetTime.Format(time.RFC3339),
+		"last_reset_time":   poolMetricsResetTime.Format(time.RFC3339),
 	}
 }
 

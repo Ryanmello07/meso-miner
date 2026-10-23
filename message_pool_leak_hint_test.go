@@ -12,6 +12,7 @@ import (
 // that is acquired but never returned must show up as a tag whose leaked
 // count grows while its returned ratio stays below 100%.
 func TestMessagePoolLeakHintAttribution(t *testing.T) {
+	tagEveryPoolGetForTest(t)
 	// debugTags is permanently on; just make sure the leak hint reflects a
 	// deliberately-leaked buffer so the heartbeat can name the caller.
 	if !debugTags.Load() {
@@ -75,6 +76,7 @@ func TestMessagePoolLeakHintRequiresDebugTags(t *testing.T) {
 // acquired the buffer, not a pool wrapper frame. Two distinct call sites of
 // the same public getter must also get distinct tags.
 func TestMessagePoolLeakHintNamesExternalCaller(t *testing.T) {
+	tagEveryPoolGetForTest(t)
 	ResetMessagePoolStats()
 	first := MessagePoolGet(2048)
 	t.Cleanup(func() { MessagePoolReturn(first) })
@@ -135,5 +137,47 @@ func TestMessagePoolLeakHintOmitsBalancedTags(t *testing.T) {
 	MessagePoolReturn(b)
 	if hints := MessagePoolLeakHint(10); len(hints) != 0 {
 		t.Fatalf("balanced get/return must not be reported, got %v", hints)
+	}
+}
+
+func tagEveryPoolGetForTest(t *testing.T) {
+	previous := debugTagSampleMask.Load()
+	debugTagSampleMask.Store(0)
+	t.Cleanup(func() { debugTagSampleMask.Store(previous) })
+}
+
+// In production one Get in 16 is tagged; the rest share the reserved tag 0,
+// which the report labels instead of blaming a call site for them.
+func TestMessagePoolTagsAreSampled(t *testing.T) {
+	if mask := debugTagSampleMask.Load(); mask != 15 {
+		t.Fatalf("sample mask %d", mask)
+	}
+	ResetMessagePoolStats()
+	held := make([][]byte, 0, 1600)
+	for range cap(held) {
+		held = append(held, MessagePoolGet(64))
+	}
+	tagged := 0
+	for _, b := range held {
+		if b[:cap(b)][cap(b)-MessagePoolMetaByteCount+8] != 0 {
+			tagged++
+		}
+	}
+	// expected 100 of 1600; the bounds are far outside binomial noise
+	if tagged < 40 || 200 < tagged {
+		t.Fatalf("%d of %d Gets tagged, want about 1 in 16", tagged, len(held))
+	}
+	hints := MessagePoolLeakHint(256)
+	foundUntagged := false
+	for _, h := range hints {
+		if h.Tag == 0 {
+			foundUntagged = strings.HasPrefix(h.Caller, "(untagged")
+		}
+	}
+	for _, b := range held {
+		MessagePoolReturn(b)
+	}
+	if !foundUntagged {
+		t.Fatalf("untagged buffers not labelled in %v", hints)
 	}
 }
