@@ -3943,3 +3943,18 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 **Change**: `CreateContract` sets `SenderRole` from the contract key's encryption role (client or server).
 
 **Impact**: none on the data path; the platform can tell meso's contract lanes apart like upstream's.
+
+## 194. SMTP Guard Validates the Whole TLS ClientHello
+
+**Purpose**: parity review of the egress policy. On ports 465 (and 587 after STARTTLS) meso treated a flow as encrypted once its first nine bytes looked like a TLS ClientHello header; its own comment said a determined client could send that header and then plaintext SMTP. Upstream connect now buffers and parses the complete ClientHello first, which closes that path for spam over a provider.
+
+**Files Modified**: `ip_smtp_policy.go`, `ip_smtp_policy_test.go`.
+
+**Change**:
+- `tlsClientHelloStream` and `validTlsClientHelloBody` from upstream: every TLS record header, the handshake length, and every field of the ClientHello (legacy version, session id, cipher suites, compression methods, the extension vector, no duplicate extensions) must parse before the flow is secure. A ClientHello may span records and segments.
+- Meso caps a ClientHello at one full record (16 KiB body, 17 KiB on the wire) where upstream allows 64 KiB, so a client holding many half-sent hellos pins at most about 17 KiB per flow. Real SMTP clients send a few KiB.
+- Once secure, the flow keeps only its short verified prefix (9 bytes on 465, up to 2 KiB on 587, as before) in a fresh buffer, so the ClientHello buffer is freed. Meso keeps its retransmission check on that prefix (upstream drops it). A rejected flow drops its buffer too.
+- The 587 negotiation stays bounded at 2 KiB of commands, now checked per complete line as upstream does.
+- Not ported: upstream's per-owner flow cap, idle reaping and FIN teardown of SMTP flow state, which depend on its NAT memory budget and flow retirement work.
+
+**Impact**: plaintext SMTP behind a fake TLS header is reset. Only ports 465/587 are affected; no change on the bulk data path.

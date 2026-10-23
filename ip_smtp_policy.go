@@ -14,9 +14,21 @@ import (
 // ClientHello; port 587 may send only bounded SMTP negotiation until STARTTLS
 // is immediately followed by a TLS ClientHello.
 const (
-	smtpLocalPort                 = 25
-	smtpImplicitTlsPort           = 465
-	smtpStartTlsPort              = 587
+	smtpLocalPort               = 25
+	smtpImplicitTlsPort         = 465
+	smtpStartTlsPort            = 587
+	smtpTlsRecordHeaderBytes    = 5
+	smtpTlsHandshakeHeaderBytes = 4
+	smtpMaxTlsRecordBytes       = 16 * 1024
+	// The whole ClientHello is buffered and validated before a flow counts as
+	// secure. Upstream allows 64 KiB of ClientHello (68 KiB on the wire); meso
+	// caps it at one full record so that a client holding many half-sent
+	// hellos open pins at most about 17 KiB per flow (the table holds 1024).
+	// Real SMTP clients send a few KiB, post-quantum key shares included.
+	smtpMaxTlsClientHelloBodyBytes = smtpMaxTlsRecordBytes - smtpTlsHandshakeHeaderBytes
+	smtpMaxTlsClientHelloWireBytes = 17 * 1024
+	// After a flow turns secure only this much of a 465 stream is kept, as the
+	// retransmission guard (see inspectSecureRetransmission).
 	smtpTlsClientHelloPrefixBytes = 9
 	smtpMaxNegotiationBytes       = 2048
 	smtpMaxCommandLineBytes       = 510 // RFC 5321's 512 includes CRLF.
@@ -206,6 +218,8 @@ func (self *smtpEgressGuard) inspectForOwner(
 	}
 	if !flow.inspectPayload(segmentSequence, payload) {
 		flow.rejected = true
+		// a rejected flow is latched and never inspected again
+		flow.stream = nil
 		return smtpEgressReject
 	}
 	return smtpEgressAllow
@@ -285,7 +299,7 @@ func (self *smtpFlowState) inspectPayload(sequence uint32, payload []byte) bool 
 	}
 
 	// TCP serial arithmetic is safe here because the retained prefix is at
-	// most 2 KiB, far below the half-sequence-space ambiguity boundary.
+	// most about 19 KiB, far below the half-sequence-space ambiguity boundary.
 	relative := int64(int32(sequence - self.baseSequence))
 	if relative < 0 || int64(len(self.stream)) < relative {
 		// A gap cannot be forwarded safely: bytes hidden in the gap could turn
@@ -308,9 +322,9 @@ func (self *smtpFlowState) inspectPayload(sequence uint32, payload []byte) bool 
 	}
 
 	newBytes := payload[overlap:]
-	limit := smtpTlsClientHelloPrefixBytes
+	limit := smtpMaxTlsClientHelloWireBytes
 	if self.destinationPort == smtpStartTlsPort {
-		limit = smtpMaxNegotiationBytes
+		limit += smtpMaxNegotiationBytes
 	}
 	remainingCapacity := limit - len(self.stream)
 	retainedBytes := newBytes
@@ -322,16 +336,22 @@ func (self *smtpFlowState) inspectPayload(sequence uint32, payload []byte) bool 
 	var valid bool
 	switch self.destinationPort {
 	case smtpImplicitTlsPort:
-		valid, self.secure = tlsClientHelloStreamPrefix(self.stream)
+		valid, self.secure = tlsClientHelloStream(self.stream)
 	case smtpStartTlsPort:
 		valid, self.secure = self.inspect587Stream()
 	default:
 		return false
 	}
 	if self.secure {
-		// Keep only the already-bounded verified prefix. It prevents a
-		// conflicting retransmission from replacing the negotiation bytes after
-		// the connection has moved into opaque TLS sequence space.
+		// Keep only a short verified prefix, in a buffer of its own so the
+		// ClientHello buffer is freed. It prevents a conflicting retransmission
+		// from replacing the negotiation bytes after the connection has moved
+		// into opaque TLS sequence space.
+		retain := smtpTlsClientHelloPrefixBytes
+		if self.destinationPort == smtpStartTlsPort {
+			retain = smtpMaxNegotiationBytes
+		}
+		self.stream = append([]byte(nil), self.stream[:min(retain, len(self.stream))]...)
 		return valid
 	}
 	// More unverified bytes than the bounded prefix can represent fail closed.
@@ -366,59 +386,163 @@ func (self *smtpFlowState) inspectSecureRetransmission(sequence uint32, payload 
 	return bytes.Equal(self.stream[start:start+overlap], payload[:overlap])
 }
 
-// tlsClientHelloStreamPrefix validates the TLS record header and handshake
-// header as bytes arrive. A complete prefix is nine bytes: TLS Handshake,
-// legacy record version, a sane non-empty record, ClientHello, and a sane
-// ClientHello body length. The ClientHello body may span TLS records. The
-// matcher is a heuristic: it enforces TLS discipline against accidental
-// plaintext and naive misconfiguration, not against a determined client that
-// can craft a plausible 9-byte prefix followed by arbitrary bytes.
-func tlsClientHelloStreamPrefix(stream []byte) (valid bool, complete bool) {
-	if smtpTlsClientHelloPrefixBytes < len(stream) {
-		stream = stream[:smtpTlsClientHelloPrefixBytes]
-	}
-	for index, value := range stream {
+// tlsHandshakeRecordHeaderPrefix validates an incomplete or complete TLS
+// Handshake record header.
+func tlsHandshakeRecordHeaderPrefix(header []byte) bool {
+	for index, value := range header {
 		switch index {
 		case 0:
-			if value != 0x16 { // Handshake record.
-				return false, false
+			if value != 0x16 {
+				return false
 			}
 		case 1:
 			if value != 0x03 {
-				return false, false
+				return false
 			}
 		case 2:
 			if value < 0x01 || 0x04 < value {
-				return false, false
-			}
-		case 5:
-			if value != 0x01 { // ClientHello handshake message.
-				return false, false
+				return false
 			}
 		}
 	}
-	if 5 <= len(stream) {
-		recordBytes := int(binary.BigEndian.Uint16(stream[3:5]))
-		if recordBytes < 4 || 1<<14 < recordBytes {
-			return false, false
+	if smtpTlsRecordHeaderBytes <= len(header) {
+		recordBytes := int(binary.BigEndian.Uint16(header[3:5]))
+		if recordBytes == 0 || smtpMaxTlsRecordBytes < recordBytes {
+			return false
 		}
 	}
-	if len(stream) < smtpTlsClientHelloPrefixBytes {
-		return true, false
+	return true
+}
+
+// validTlsClientHelloBody validates every length-delimited field in a complete
+// ClientHello, including the extension vector and duplicate-extension rule.
+func validTlsClientHelloBody(body []byte) bool {
+	var extensionTypes [1024]uint64
+	return validTlsClientHelloBodyWithScratch(body, &extensionTypes)
+}
+
+func validTlsClientHelloBodyWithScratch(body []byte, extensionTypes *[1024]uint64) bool {
+	if len(body) < 41 || body[0] != 0x03 || body[1] < 0x01 || 0x03 < body[1] {
+		return false
 	}
-	handshakeBytes := int(stream[6])<<16 | int(stream[7])<<8 | int(stream[8])
-	// 41 bytes is the minimum ClientHello body (legacy version, random,
-	// empty session id, one cipher suite, and one compression method).
-	if handshakeBytes < 41 || 1<<20 < handshakeBytes {
+	offset := 2 + 32
+	sessionIdBytes := int(body[offset])
+	offset += 1
+	if 32 < sessionIdBytes || len(body) < offset+sessionIdBytes+2 {
+		return false
+	}
+	offset += sessionIdBytes
+	cipherSuiteBytes := int(binary.BigEndian.Uint16(body[offset : offset+2]))
+	offset += 2
+	if cipherSuiteBytes < 2 || cipherSuiteBytes%2 != 0 || len(body) < offset+cipherSuiteBytes+1 {
+		return false
+	}
+	offset += cipherSuiteBytes
+	compressionMethodBytes := int(body[offset])
+	offset += 1
+	if compressionMethodBytes == 0 || len(body) < offset+compressionMethodBytes {
+		return false
+	}
+	offset += compressionMethodBytes
+	if offset == len(body) {
+		return true
+	}
+	if len(body) < offset+2 {
+		return false
+	}
+	extensionBytes := int(binary.BigEndian.Uint16(body[offset : offset+2]))
+	offset += 2
+	if extensionBytes != len(body)-offset {
+		return false
+	}
+	// All extension types fit this exact 8-KiB bitset. An attacker can send
+	// thousands of zero-length extensions; a map scales with that count.
+	clear(extensionTypes[:])
+	for offset < len(body) {
+		if len(body) < offset+4 {
+			return false
+		}
+		extensionType := binary.BigEndian.Uint16(body[offset : offset+2])
+		extensionDataBytes := int(binary.BigEndian.Uint16(body[offset+2 : offset+4]))
+		offset += 4
+		word, bit := extensionType/64, uint64(1)<<(extensionType%64)
+		if extensionTypes[word]&bit != 0 || len(body) < offset+extensionDataBytes {
+			return false
+		}
+		extensionTypes[word] |= bit
+		offset += extensionDataBytes
+	}
+	return true
+}
+
+// tlsClientHelloStream validates complete TLS records until a complete,
+// structurally valid ClientHello has arrived. Handshake bytes may span records;
+// both logical and wire sizes are bounded before the flow can become secure.
+func tlsClientHelloStream(stream []byte) (valid bool, complete bool) {
+	if smtpMaxTlsClientHelloWireBytes < len(stream) {
 		return false, false
 	}
-	return true, true
+	handshake := make([]byte, 0, len(stream))
+	for recordOffset := 0; ; {
+		remaining := stream[recordOffset:]
+		if len(remaining) < smtpTlsRecordHeaderBytes {
+			return tlsHandshakeRecordHeaderPrefix(remaining), false
+		}
+		header := remaining[:smtpTlsRecordHeaderBytes]
+		if !tlsHandshakeRecordHeaderPrefix(header) {
+			return false, false
+		}
+		recordBytes := int(binary.BigEndian.Uint16(header[3:5]))
+		recordEnd := recordOffset + smtpTlsRecordHeaderBytes + recordBytes
+		if smtpMaxTlsClientHelloWireBytes < recordEnd {
+			return false, false
+		}
+		if len(stream) < recordEnd {
+			handshake = append(handshake, stream[recordOffset+smtpTlsRecordHeaderBytes:]...)
+			if 0 < len(handshake) && handshake[0] != 0x01 {
+				return false, false
+			}
+			if smtpTlsHandshakeHeaderBytes <= len(handshake) {
+				handshakeBodyBytes := int(handshake[1])<<16 |
+					int(handshake[2])<<8 |
+					int(handshake[3])
+				if handshakeBodyBytes < 41 || smtpMaxTlsClientHelloBodyBytes < handshakeBodyBytes {
+					return false, false
+				}
+			}
+			return true, false
+		}
+		handshake = append(handshake, stream[recordOffset+smtpTlsRecordHeaderBytes:recordEnd]...)
+		if 0 < len(handshake) && handshake[0] != 0x01 {
+			return false, false
+		}
+		if smtpTlsHandshakeHeaderBytes <= len(handshake) {
+			handshakeBodyBytes := int(handshake[1])<<16 |
+				int(handshake[2])<<8 |
+				int(handshake[3])
+			if handshakeBodyBytes < 41 || smtpMaxTlsClientHelloBodyBytes < handshakeBodyBytes {
+				return false, false
+			}
+			handshakeEnd := smtpTlsHandshakeHeaderBytes + handshakeBodyBytes
+			if handshakeEnd <= len(handshake) {
+				body := handshake[smtpTlsHandshakeHeaderBytes:handshakeEnd]
+				if !validTlsClientHelloBody(body) {
+					return false, false
+				}
+				return true, true
+			}
+		}
+		recordOffset = recordEnd
+		if recordOffset == len(stream) {
+			return true, false
+		}
+	}
 }
 
 func (self *smtpFlowState) inspect587Stream() (valid bool, secure bool) {
 	for {
 		if self.phase587 == smtp587ExpectClientHello {
-			return tlsClientHelloStreamPrefix(self.stream[self.parseOffset:])
+			return tlsClientHelloStream(self.stream[self.parseOffset:])
 		}
 		if self.parseOffset == len(self.stream) {
 			return true, false
@@ -427,7 +551,8 @@ func (self *smtpFlowState) inspect587Stream() (valid bool, secure bool) {
 		remaining := self.stream[self.parseOffset:]
 		lineEnd := bytes.Index(remaining, []byte("\r\n"))
 		if lineEnd < 0 {
-			return validPartialSmtpNegotiationLine(remaining), false
+			return len(self.stream) <= smtpMaxNegotiationBytes &&
+				validPartialSmtpNegotiationLine(remaining), false
 		}
 		if smtpMaxCommandLineBytes < lineEnd ||
 			bytes.IndexByte(remaining[:lineEnd], '\r') >= 0 ||
@@ -440,6 +565,9 @@ func (self *smtpFlowState) inspect587Stream() (valid bool, secure bool) {
 			return false, false
 		}
 		self.parseOffset += lineEnd + 2
+		if smtpMaxNegotiationBytes < self.parseOffset {
+			return false, false
+		}
 		if command == smtpCommandStartTls {
 			self.phase587 = smtp587ExpectClientHello
 		}

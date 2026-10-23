@@ -10,8 +10,17 @@ import (
 )
 
 var smtpTestClientHello = []byte{
-	0x16, 0x03, 0x01, 0x00, 0x40, // TLS handshake record, 64 bytes.
-	0x01, 0x00, 0x00, 0x3c, // ClientHello, 60-byte body.
+	0x16, 0x03, 0x01, 0x00, 0x2d, // TLS Handshake record, 45 bytes.
+	0x01, 0x00, 0x00, 0x29, // ClientHello, 41-byte body.
+	0x03, 0x03, // TLS 1.2 legacy version.
+	0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+	0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+	0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+	0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+	0x00,       // Empty legacy session id.
+	0x00, 0x02, // One cipher suite.
+	0xc0, 0x2f,
+	0x01, 0x00, // One null compression method.
 }
 
 func smtpTestPath(sourcePort int, destinationPort int, sequence uint32) *IpPath {
@@ -79,11 +88,11 @@ func TestSmtp465RequiresFragmentedTlsClientHello(t *testing.T) {
 	requireSmtpVerdict(t, smtpEgressAllow, guard.inspect(
 		smtpTestPath(sourcePort, smtpImplicitTlsPort, synSequence+1), first,
 	))
-	// An overlapping retransmission supplies the rest of the nine-byte prefix.
+	// An overlapping retransmission supplies the rest of the complete hello.
 	requireSmtpVerdict(t, smtpEgressAllow, guard.inspect(
 		smtpTestPath(sourcePort, smtpImplicitTlsPort, synSequence+2), smtpTestClientHello[1:],
 	))
-	// Once the prefix is verified, opaque TLS records are no longer inspected.
+	// Once the hello is verified, opaque TLS records are no longer inspected.
 	requireSmtpVerdict(t, smtpEgressAllow, guard.inspect(
 		smtpTestPath(sourcePort, smtpImplicitTlsPort, synSequence+10), []byte{0xff, 0x00, 0x7f},
 	))
@@ -671,99 +680,181 @@ func TestSmtpGuardEnforcesEncryptionOverIpv6(t *testing.T) {
 	))
 }
 
-// tlsClientHelloStreamPrefix is exercised indirectly through the guard
-// elsewhere; these are direct boundary checks on the record-length and
-// handshake-length fields it validates.
-func TestTlsClientHelloStreamPrefixBoundaries(t *testing.T) {
-	buildPrefix := func(versionMinor byte, recordBytes uint16, handshakeBytes uint32) []byte {
-		prefix := make([]byte, smtpTlsClientHelloPrefixBytes)
-		prefix[0] = 0x16
-		prefix[1] = 0x03
-		prefix[2] = versionMinor
-		binary.BigEndian.PutUint16(prefix[3:5], recordBytes)
-		prefix[5] = 0x01
-		prefix[6] = byte(handshakeBytes >> 16)
-		prefix[7] = byte(handshakeBytes >> 8)
-		prefix[8] = byte(handshakeBytes)
-		return prefix
+func smtpTestClientHelloWithBody(body []byte) []byte {
+	handshakeBytes := smtpTlsHandshakeHeaderBytes + len(body)
+	record := make([]byte, smtpTlsRecordHeaderBytes+handshakeBytes)
+	record[0] = 0x16
+	record[1] = 0x03
+	record[2] = 0x01
+	binary.BigEndian.PutUint16(record[3:5], uint16(handshakeBytes))
+	record[5] = 0x01
+	record[6] = byte(len(body) >> 16)
+	record[7] = byte(len(body) >> 8)
+	record[8] = byte(len(body))
+	copy(record[9:], body)
+	return record
+}
+
+func TestSmtp465RejectsMalformedCompleteClientHello(t *testing.T) {
+	validBody := smtpTestClientHello[smtpTlsRecordHeaderBytes+smtpTlsHandshakeHeaderBytes:]
+	invalidLegacyVersion := append([]byte{}, validBody...)
+	invalidLegacyVersion[0] = 0x02
+	oversizedSessionId := append([]byte{}, validBody...)
+	oversizedSessionId[34] = 33
+	oddCipherSuites := append([]byte{}, validBody...)
+	oddCipherSuites[35] = 0
+	oddCipherSuites[36] = 1
+	missingCompressionMethod := append([]byte{}, validBody...)
+	missingCompressionMethod[39] = 0
+	badExtensionLength := append(append([]byte{}, validBody...), 0x00, 0x01, 0x00)
+	duplicateExtensions := append(
+		append([]byte{}, validBody...),
+		0x00, 0x08,
+		0x00, 0x15, 0x00, 0x00,
+		0x00, 0x15, 0x00, 0x00,
+	)
+	cases := []struct {
+		name string
+		body []byte
+	}{
+		{name: "legacy version", body: invalidLegacyVersion},
+		{name: "session id length", body: oversizedSessionId},
+		{name: "cipher suite length", body: oddCipherSuites},
+		{name: "compression methods", body: missingCompressionMethod},
+		{name: "extension vector length", body: badExtensionLength},
+		{name: "duplicate extension", body: duplicateExtensions},
 	}
-
-	t.Run("minimum handshake body length is valid", func(t *testing.T) {
-		valid, complete := tlsClientHelloStreamPrefix(buildPrefix(0x01, 0x40, 41))
-		if !valid || !complete {
-			t.Fatalf("handshakeBytes=41 valid=%t complete=%t, want true/true", valid, complete)
+	for index, testCase := range cases {
+		var guard smtpEgressGuard
+		verdict := guard.inspect(
+			smtpTestPath(41100+index, smtpImplicitTlsPort, 3700),
+			smtpTestClientHelloWithBody(testCase.body),
+		)
+		if verdict != smtpEgressReject {
+			t.Errorf("%s verdict = %d, want reject", testCase.name, verdict)
 		}
-	})
+	}
+}
 
-	t.Run("just below minimum handshake body length is invalid", func(t *testing.T) {
-		valid, _ := tlsClientHelloStreamPrefix(buildPrefix(0x01, 0x40, 40))
-		if valid {
-			t.Fatal("handshakeBytes=40 was accepted, want rejected")
+func TestSmtp465AcceptsClientHelloSplitAcrossTlsRecords(t *testing.T) {
+	handshake := smtpTestClientHello[smtpTlsRecordHeaderBytes:]
+	firstPayloadBytes := 7
+	firstRecord := make([]byte, smtpTlsRecordHeaderBytes+firstPayloadBytes)
+	copy(firstRecord, []byte{0x16, 0x03, 0x01})
+	binary.BigEndian.PutUint16(firstRecord[3:5], uint16(firstPayloadBytes))
+	copy(firstRecord[smtpTlsRecordHeaderBytes:], handshake[:firstPayloadBytes])
+	secondPayload := handshake[firstPayloadBytes:]
+	secondRecord := make([]byte, smtpTlsRecordHeaderBytes+len(secondPayload))
+	copy(secondRecord, []byte{0x16, 0x03, 0x01})
+	binary.BigEndian.PutUint16(secondRecord[3:5], uint16(len(secondPayload)))
+	copy(secondRecord[smtpTlsRecordHeaderBytes:], secondPayload)
+	wireHello := append(firstRecord, secondRecord...)
+
+	var guard smtpEgressGuard
+	sequence := uint32(3800)
+	cut := len(firstRecord) + 3
+	requireSmtpVerdict(t, smtpEgressAllow, guard.inspect(
+		smtpTestPath(41110, smtpImplicitTlsPort, sequence),
+		wireHello[:cut],
+	))
+	requireSmtpVerdict(t, smtpEgressAllow, guard.inspect(
+		smtpTestPath(41110, smtpImplicitTlsPort, sequence+uint32(cut)),
+		wireHello[cut:],
+	))
+
+	guard.stateLock.Lock()
+	defer guard.stateLock.Unlock()
+	for _, flow := range guard.flows {
+		if !flow.secure || len(flow.stream) != smtpTlsClientHelloPrefixBytes {
+			t.Fatalf("record-fragmented ClientHello state: secure=%t retained=%d", flow.secure, len(flow.stream))
 		}
-	})
+	}
+}
 
-	t.Run("maximum handshake body length is valid", func(t *testing.T) {
-		valid, complete := tlsClientHelloStreamPrefix(buildPrefix(0x01, 0x40, 1<<20))
-		if !valid || !complete {
-			t.Fatalf("handshakeBytes=2^20 valid=%t complete=%t, want true/true", valid, complete)
-		}
-	})
+// The hole the full validation closes: a client that sends a plausible
+// record and handshake header, then plaintext SMTP, used to pass after nine
+// bytes. Now the whole ClientHello must parse before the flow is secure.
+func TestSmtp465RejectsPlaintextBehindAPlausibleTlsHeader(t *testing.T) {
+	var guard smtpEgressGuard
+	header := []byte{0x16, 0x03, 0x01, 0x00, 0x40, 0x01, 0x00, 0x00, 0x3c}
+	payload := append(append([]byte{}, header...), []byte("EHLO spam.example\r\nMAIL FROM:<a@b>\r\nRCPT TO:<c@d>\r\nDATA\r\n")...)
+	payload = append(payload, make([]byte, 64-len(payload)+len(header))...)
+	requireSmtpVerdict(t, smtpEgressReject, guard.inspect(
+		smtpTestPath(41120, smtpImplicitTlsPort, 3900), payload,
+	))
+}
 
-	t.Run("just above maximum handshake body length is invalid", func(t *testing.T) {
-		valid, _ := tlsClientHelloStreamPrefix(buildPrefix(0x01, 0x40, (1<<20)+1))
-		if valid {
-			t.Fatal("handshakeBytes=2^20+1 was accepted, want rejected")
-		}
-	})
-
-	t.Run("minimum record length is valid while incomplete", func(t *testing.T) {
-		valid, complete := tlsClientHelloStreamPrefix(buildPrefix(0x01, 4, 0)[:5])
-		if !valid || complete {
-			t.Fatalf("recordBytes=4 (5-byte prefix) valid=%t complete=%t, want true/false", valid, complete)
-		}
-	})
-
-	t.Run("just below minimum record length is invalid", func(t *testing.T) {
-		valid, _ := tlsClientHelloStreamPrefix(buildPrefix(0x01, 3, 0)[:5])
-		if valid {
-			t.Fatal("recordBytes=3 was accepted, want rejected")
-		}
-	})
-
-	t.Run("maximum record length is valid while incomplete", func(t *testing.T) {
-		valid, complete := tlsClientHelloStreamPrefix(buildPrefix(0x01, 1<<14, 0)[:5])
-		if !valid || complete {
-			t.Fatalf("recordBytes=2^14 (5-byte prefix) valid=%t complete=%t, want true/false", valid, complete)
-		}
-	})
-
-	t.Run("just above maximum record length is invalid", func(t *testing.T) {
-		valid, _ := tlsClientHelloStreamPrefix(buildPrefix(0x01, (1<<14)+1, 0)[:5])
-		if valid {
-			t.Fatal("recordBytes=2^14+1 was accepted, want rejected")
-		}
-	})
-
-	t.Run("legacy record version 0x04 is valid", func(t *testing.T) {
-		valid, complete := tlsClientHelloStreamPrefix(buildPrefix(0x04, 0x40, 41))
-		if !valid || !complete {
-			t.Fatalf("versionMinor=0x04 valid=%t complete=%t, want true/true", valid, complete)
-		}
-	})
-
-	t.Run("legacy record version 0x05 is invalid", func(t *testing.T) {
-		valid, _ := tlsClientHelloStreamPrefix(buildPrefix(0x05, 0x40, 41))
-		if valid {
-			t.Fatal("versionMinor=0x05 was accepted, want rejected")
-		}
-	})
-
+// Boundary checks on the sizes tlsClientHelloStream bounds.
+func TestTlsClientHelloStreamBoundaries(t *testing.T) {
+	validBody := smtpTestClientHello[smtpTlsRecordHeaderBytes+smtpTlsHandshakeHeaderBytes:]
+	padded := func(bodyBytes int) []byte {
+		// a valid body grown with one padding extension (type 21)
+		body := append([]byte{}, validBody...)
+		extensionDataBytes := bodyBytes - len(body) - 2 - 4
+		body = binary.BigEndian.AppendUint16(body, uint16(4+extensionDataBytes))
+		body = append(body, 0x00, 0x15)
+		body = binary.BigEndian.AppendUint16(body, uint16(extensionDataBytes))
+		return append(body, make([]byte, extensionDataBytes)...)
+	}
 	t.Run("empty stream is incomplete but not rejected", func(t *testing.T) {
-		valid, complete := tlsClientHelloStreamPrefix(nil)
-		if !valid || complete {
-			t.Fatalf("empty stream valid=%t complete=%t, want true/false", valid, complete)
+		if valid, complete := tlsClientHelloStream(nil); !valid || complete {
+			t.Fatalf("valid=%t complete=%t, want true/false", valid, complete)
 		}
 	})
+	t.Run("a header alone is incomplete", func(t *testing.T) {
+		if valid, complete := tlsClientHelloStream(smtpTestClientHello[:9]); !valid || complete {
+			t.Fatalf("valid=%t complete=%t, want true/false", valid, complete)
+		}
+	})
+	t.Run("minimum hello is complete", func(t *testing.T) {
+		if valid, complete := tlsClientHelloStream(smtpTestClientHello); !valid || !complete {
+			t.Fatalf("valid=%t complete=%t, want true/true", valid, complete)
+		}
+	})
+	t.Run("largest one-record hello is complete", func(t *testing.T) {
+		hello := smtpTestClientHelloWithBody(padded(smtpMaxTlsClientHelloBodyBytes))
+		if valid, complete := tlsClientHelloStream(hello); !valid || !complete {
+			t.Fatalf("valid=%t complete=%t, want true/true", valid, complete)
+		}
+	})
+	t.Run("a body over the cap is rejected from its header", func(t *testing.T) {
+		hello := smtpTestClientHelloWithBody(padded(smtpMaxTlsClientHelloBodyBytes + 1))
+		// the record is now over 16 KiB as well; check the handshake length
+		// alone by splitting it across two records
+		handshake := hello[smtpTlsRecordHeaderBytes:]
+		record := []byte{0x16, 0x03, 0x01, 0x00, 0x04}
+		record = append(record, handshake[:4]...)
+		if valid, _ := tlsClientHelloStream(record); valid {
+			t.Fatal("a handshake length over the cap was accepted")
+		}
+	})
+	t.Run("legacy record version 0x05 is invalid", func(t *testing.T) {
+		hello := append([]byte{}, smtpTestClientHello...)
+		hello[2] = 0x05
+		if valid, _ := tlsClientHelloStream(hello); valid {
+			t.Fatal("versionMinor=0x05 was accepted")
+		}
+	})
+}
+
+// After the hello is verified only the short prefix stays, in its own buffer.
+func TestSmtp465ReleasesTheHelloBufferOnceSecure(t *testing.T) {
+	var guard smtpEgressGuard
+	validBody := smtpTestClientHello[smtpTlsRecordHeaderBytes+smtpTlsHandshakeHeaderBytes:]
+	body := append([]byte{}, validBody...)
+	body = binary.BigEndian.AppendUint16(body, 4+2000)
+	body = append(body, 0x00, 0x15, 0x07, 0xd0)
+	body = append(body, make([]byte, 2000)...)
+	requireSmtpVerdict(t, smtpEgressAllow, guard.inspect(
+		smtpTestPath(41130, smtpImplicitTlsPort, 4000), smtpTestClientHelloWithBody(body),
+	))
+	guard.stateLock.Lock()
+	defer guard.stateLock.Unlock()
+	for _, flow := range guard.flows {
+		if !flow.secure || len(flow.stream) != smtpTlsClientHelloPrefixBytes || 64 < cap(flow.stream) {
+			t.Fatalf("secure=%t retained=%d cap=%d", flow.secure, len(flow.stream), cap(flow.stream))
+		}
+	}
 }
 
 // Direct pins for the pre-TLS SMTP command vocabulary used by the 587
