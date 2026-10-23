@@ -436,3 +436,15 @@ func TestProxyReissueCommandParses(t *testing.T) {
 		}
 	}
 }
+
+// A state dir that does not exist yet gets a clear answer, not a lock error.
+func TestProviderReissueOnAnEmptyStateDir(t *testing.T) {
+	home := operatorTestHome(t)
+	t.Cleanup(withGlobalStore(t, filepath.Join(home, ".urnetwork", ".client_jwts.json")))
+	if _, err := reissueProviderSlot("direct", false); err == nil || !strings.Contains(err.Error(), "no registration is saved") {
+		t.Fatalf("reissue on an empty state dir = %v", err)
+	}
+	if generation, err := reissueProviderSlot("direct", true); err != nil || generation != 1 {
+		t.Fatalf("forced reissue = %d, %v", generation, err)
+	}
+}

@@ -294,8 +294,17 @@ func durableWriteFile(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
+// providerRegistrationStorePath also creates the state dir, since the store's
+// lock file lives beside it and is opened before anything is written.
 func providerRegistrationStorePath() (string, error) {
-	return providerStatePath(providerRegistrationStoreName)
+	path, err := providerStatePath(providerRegistrationStoreName)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func readProviderRegistrations(path string) (map[string]*clientRegistrationRecord, error) {
