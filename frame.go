@@ -75,6 +75,26 @@ func ToFrame(message proto.Message, protocolVersion int) (*protocol.Frame, error
 		messageType = protocol.MessageType_TransferEncryptedKey
 	case *protocol.ClientKey:
 		messageType = protocol.MessageType_TransferClientKey
+	// Newer platform frames. Meso maps them so it can decode what the
+	// platform sends; each feature decides separately whether to act on one.
+	case *protocol.StreamAuthorization:
+		messageType = protocol.MessageType_TransferStreamAuthorization
+	case *protocol.NetworkSessionsChanged:
+		messageType = protocol.MessageType_TransferNetworkSessionsChanged
+	case *protocol.NetworkPeersReset:
+		messageType = protocol.MessageType_TransferNetworkPeersReset
+	case *protocol.NetworkPeersUpdate:
+		messageType = protocol.MessageType_TransferNetworkPeersUpdate
+	case *protocol.ResidentMigrate:
+		messageType = protocol.MessageType_TransferResidentMigrate
+	case *protocol.ResidentMoveResult:
+		messageType = protocol.MessageType_TransferResidentMoveResult
+	case *protocol.IpProviderDiagnostics:
+		messageType = protocol.MessageType_IpIpProviderDiagnostics
+	case *protocol.SubprotocolsQuery:
+		messageType = protocol.MessageType_TransferSubprotocolsQuery
+	case *protocol.SubprotocolsQueryResult:
+		messageType = protocol.MessageType_TransferSubprotocolsQueryResult
 	default:
 		return nil, fmt.Errorf("Unknown message type: %T", v)
 	}
@@ -180,6 +200,24 @@ func FromFrame(frame *protocol.Frame) (proto.Message, error) {
 		message = &protocol.EncryptedKey{}
 	case protocol.MessageType_TransferClientKey:
 		message = &protocol.ClientKey{}
+	case protocol.MessageType_TransferStreamAuthorization:
+		message = &protocol.StreamAuthorization{}
+	case protocol.MessageType_TransferNetworkSessionsChanged:
+		message = &protocol.NetworkSessionsChanged{}
+	case protocol.MessageType_TransferNetworkPeersReset:
+		message = &protocol.NetworkPeersReset{}
+	case protocol.MessageType_TransferNetworkPeersUpdate:
+		message = &protocol.NetworkPeersUpdate{}
+	case protocol.MessageType_TransferResidentMigrate:
+		message = &protocol.ResidentMigrate{}
+	case protocol.MessageType_TransferResidentMoveResult:
+		message = &protocol.ResidentMoveResult{}
+	case protocol.MessageType_IpIpProviderDiagnostics:
+		message = &protocol.IpProviderDiagnostics{}
+	case protocol.MessageType_TransferSubprotocolsQuery:
+		message = &protocol.SubprotocolsQuery{}
+	case protocol.MessageType_TransferSubprotocolsQueryResult:
+		message = &protocol.SubprotocolsQueryResult{}
 	default:
 		return nil, fmt.Errorf("Unknown message type: %s", frame.MessageType)
 	}

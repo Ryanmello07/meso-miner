@@ -115,6 +115,35 @@ message Pack {
     // this is required for nack messages. There is no need to set this for ack messages.
     // ulid
     optional bytes contract_id = 9;
+
+    // Sender-sequence lane discriminators (changes 2026-08). A sender keys its
+    // send sequence by local route options that were historically invisible on
+    // the wire, so the receiver held ONE head slot per (source, role,
+    // companion) and the sender had to retire a live sequence on every option
+    // flip — lossy under alternation (e.g. dual encryption-session
+    // establishment alternating force-stream carriers). Stamping the lane
+    // lets the receiver key its head slot per lane so both sequences coexist.
+    // proto3 defaults (false/false) are exactly the legacy lane, so peers
+    // that predate these fields interoperate unchanged for default-lane
+    // traffic.
+    bool force_stream = 10;
+    bool companion_contract = 11;
+
+    // A bounded receiver-visible ordering lane. Lane zero is the legacy and
+    // control lane. A sender may use lanes 1..8 only after a delivery Ack on
+    // the live lane-zero sequence advertises logical_lane_version >= 1.
+    // Legacy peers ignore this field and never advertise the capability, so
+    // they continue to receive exactly one ordered sequence.
+    uint32 logical_lane = 12;
+
+    // This Pack announces the successor contract in `contract_frame` rather
+    // than opening it: the receiver verifies and stores it, and does not make
+    // it current (THROUGHPUTFIX §39.1). The switch happens later, where it
+    // happens today, when the first Pack under the new contract arrives. The
+    // Pack carries no data frames. Legacy peers never see this field, because
+    // a sender announces ahead only to a receiver that advertised
+    // `Ack.contract_ahead`.
+    bool contract_ahead = 13;
 }
 
 
@@ -136,11 +165,118 @@ message Ack {
     // from the `Pack` this responds to
     optional Tag tag = 4;
 
-    // what this receiver can still hold out of order, so the sender may clamp
-    // its window to it. Optional so an older peer's ack decodes as absent
-    // rather than as zero: absent is a legacy peer, zero is a receiver with no
-    // capacity at all.
+    // The receiver could not resolve a compact Pack.contract_id from verified
+    // sequence state. This is a recovery request, not delivery acknowledgement:
+    // message_id remains pending until the sender retransmits a full contract.
+    // ulid
+    optional bytes missing_contract_id = 5;
+
+    // Advertises that this receiver can request a full contract when compact
+    // contract state is missing. A sender must not emit compact contract heads
+    // until a delivery Ack carries this capability; false is the legacy peer.
+    //
+    // MONOTONE. Once a delivery Ack has carried it the sender keeps it, and a
+    // later Ack without it does not withdraw it. That is deliberate rather
+    // than an omission: the capability says the receiver can ask for a full
+    // contract through missing_contract_id, which is its own recovery path and
+    // cannot stop being available, and a withdrawal would strand any compact
+    // head already in flight with nothing able to resolve it. State monotone
+    // or withdrawable for every new capability bit on this message - the two
+    // adjacent bits here differ, and neither said which until this line.
+    bool compact_contract_recovery = 6;
+
+    // Advertises support for Pack.logical_lane. Version zero is a legacy peer.
+    // The sender scopes this evidence to the live lane-zero SendSequence and
+    // retires every nonzero lane when that sequence closes or a later delivery
+    // Ack omits the capability.
+    //
+    // WITHDRAWABLE, by both of those triggers, and so unlike
+    // compact_contract_recovery above. The capability is evidence about one
+    // peer generation learned on one sequence, not a durable property of the
+    // address: a peer that restarts at an older build behind the same address
+    // reads Pack.logical_lane as nothing and keeps a single head slot for the
+    // whole class, which is the lossy alternation lanes exist to remove, so
+    // the evidence has to die with the sequence that earned it.
+    //
+    // Note this is a plain uint32 and not optional, so an older peer's Ack
+    // decodes as zero rather than as unset and absent and zero are the same
+    // fact - the opposite of receive_window_byte_count two fields along, where
+    // the optional keyword makes them different and a live case depends on it.
+    uint32 logical_lane_version = 7;
+
+    // What this receiver may hold out of order, measured from the delivered
+    // point: the hold's capacity, not its free space. A sender may not let its
+    // outstanding-from-delivered bytes exceed the latest advertised value.
+    // Held bytes are not subtracted, because a selective acknowledgement does
+    // not release the item at the sender, so they are already inside its
+    // outstanding count; subtracting them would pull the right edge of the
+    // window inward as the hold fills, which a window must never do.
+    //
+    // A sender that keeps to this can never force an eviction, whatever the
+    // gap structure, because the hold would have to contain more than the
+    // sender has outstanding.
+    //
+    // Absent is a legacy peer, which the sender treats as the shipping hold
+    // rather than as zero. Zero is a real value and means a receiver with no
+    // capacity at all, which is why this is optional rather than a plain
+    // varint with a sentinel.
     optional uint64 receive_window_byte_count = 8;
+
+    // Maximum receiver acknowledgement compression, in microseconds. Zero
+    // means immediate acknowledgements; absent is a legacy receiver (10 ms).
+    // A sender sizes the window for this bounded residence in addition to
+    // its minimum RTT, without feeding its own queue delay back into growth.
+    // Latest present value wins within the sequence; absent does not erase
+    // previously received evidence from a newer peer.
+    optional uint32 ack_compress_timeout_micros = 11;
+
+    // Actual receiver residence of message_id, from Pack ingress until this
+    // Ack is encoded. Includes receive handoff, ordering, application delivery
+    // and compression waits. This is an elapsed duration on the receiver's
+    // clock, not a timestamp to compare with the sender's clock. It does not
+    // include a later wait in the outgoing carrier.
+    //
+    // Zero is an immediate reply; absent means timing is unavailable, including
+    // legacy receivers. The sender may subtract this duration only from an
+    // unambiguous measurement of this exact message's physical first write.
+    // Missing-contract requests do not supply delivery timing.
+    optional uint32 receiver_ack_delay_micros = 12;
+
+    // Sequence numbers of items this receiver had acknowledged and then removed
+    // from its hold to admit an earlier arrival. A selective acknowledgement
+    // leases an item rather than releasing it: the sender keeps it in its
+    // resend queue with its resend time pushed out by the selective-ack
+    // timeout, and every resend path skips it until that timeout expires. So a
+    // removal the sender is not told about is a silent withdrawal of bytes it
+    // believes were delivered, and the only recovery is a minute-long timeout.
+    //
+    // On receiving these a sender clears the selective-ack mark and resends at
+    // once. Packed varints, and a generation larger than one acknowledgement
+    // can carry is split across acknowledgements.
+    repeated uint64 evicted_sequence_numbers = 9;
+
+    // Advertises that this receiver can register a successor contract that
+    // arrives ahead of the data it will carry, on a Pack with
+    // `contract_ahead` set, without switching to it (THROUGHPUTFIX §39.1).
+    //
+    // WITHDRAWABLE, stated because the two capabilities above disagree and
+    // neither says so: compact_contract_recovery is monotone — set at five
+    // sites and cleared nowhere — while logical_lane_version is withdrawable.
+    // This one is withdrawable, and it has the same two triggers as
+    // logical_lane_version: a later delivery Ack that omits it retires it, and
+    // the capability is scoped to the SendSequence that learned it, so a new
+    // sequence to the same peer starts conservative until its own first
+    // delivery Ack. Selective acknowledgements are not evidence either way.
+    //
+    // A sender must not announce a contract ahead until a delivery Ack carries
+    // this capability; false is the legacy peer, which gets today's promotion
+    // instead. Plain scalar rather than optional: absent and false are the same
+    // fact here, a receiver that will not register an announcement, so there is
+    // no third branch to leave unexercised.
+    //
+    // Field 10 rather than the design's 8: 8 and 9 were taken by the receive
+    // window advertisement and the eviction notice while §39.1 was written.
+    bool contract_ahead = 10;
 }
 
 
@@ -172,12 +308,38 @@ message Auth {
     // both QUIC endpoints negotiated RFC 9221 DATAGRAM support.
     uint32 h3_datagram_accepted_version = 5;
 
-    // 6 is upstream ip_family, not ported. Do not reuse.
+    // the address family a family-pinned platform transport intends to prove:
+    // 4 or 6. Zero (absent) is a legacy family-agnostic transport, which the
+    // platform counts as v4. The platform ignores the intent unless the
+    // family it observed the connection arrive on agrees.
+    int32 ip_family = 6;
+
+    // the client intends to provide publicly on this connection. The platform
+    // then judges the client as a provider instead of counting it toward the
+    // network's concurrent client limit. This is the frame form of the H1
+    // `X-UR-Provide-Intent: 1` header, for transports that authenticate with
+    // this frame (H3, DNS-carried H3 and the legacy H1 first frame). An old
+    // server ignores the unknown field, which counts as no intent.
     bool provide_intent = 7;
+    string client_info = 8;
+    uint32 stream_lease_version = 9;
+
+    // the highest `ResidentMigrate` move version the client honors
+    // (server/connect/MOVE.md). 1: the client dials a move's target address
+    // while keeping the platform hostname, reports declines and failures, and
+    // prefers the target for reconnects. Zero (absent) is a client that only
+    // migrates by name, which the platform never sends an advisory move.
+    // This is the frame form of the H1 `X-UR-ResidentMoveVersion` header.
+    uint32 resident_move_version = 10;
 }
 
 
-// CHANGE FROM PRIOR VERSION, modes should be considered individually as a mask and do not imply other modes
+// ProvideMode is a SET of independent relationship flags (a mask), NOT an ordered
+// scale. Each mode stands on its own and does not imply any other mode. The
+// numeric values carry no ordinal meaning, so they must never be compared with
+// <, >, <=, >= and must never be passed to max() or min(). Decide per-case by
+// testing for the specific mode(s) you mean (e.g. `mode == Network`). Any range,
+// max, or min over a provide mode is a bug.
 enum ProvideMode {
     None = 0; // this is interpreted the same as a `null` provide mode
     Network = 1;
@@ -204,6 +366,9 @@ message ProvideKey {
 // including the first and last hops
 // this is sent each time a stream contract is created
 message StreamOpen {
+    bytes authorization_generation = 4;
+    uint32 authorization_lease_millis = 5;
+    int64 authorization_deadline_unix_millis = 6;
     // ulid
     optional bytes source_id = 2;
     // ulid
@@ -215,6 +380,7 @@ message StreamOpen {
 // each hop on the stream receives this to configure its state
 // this is sent when all open contracts for the stream are closed
 message StreamClose {
+    bytes authorization_generation = 4;
     // ulid
     bytes stream_id = 3;
 }
@@ -222,6 +388,7 @@ message StreamClose {
 message StreamReset {
     repeated StreamOpen streams = 1;
 }
+
 
 // a network peer: a connected top-level client in the same network and its
 // identity metadata. When `disconnect_time` is set, this entry is a
@@ -273,6 +440,14 @@ message ExchangeSignals {
     // initial WaitingForSdpOffer from a newly restarted passive association.
     // Older peers omit/ignore it and retain the legacy compatibility path.
     bytes sender_generation_id = 4;
+    // True for the signaling of the peer-to-peer webrtc extender carrier
+    // (EXTENDER.md S): a dialer's SDP offer to an extender and the extender's
+    // SDP answer, keyed by stream_id like a p2p negotiation but never bound
+    // to a transport peer connection. A receiver that predates the field
+    // sees an offer for a stream it has no peer connection for and drops it,
+    // which is the compatibility path: an old extender simply does not
+    // answer.
+    bool extender_carrier = 5;
 }
 
 // signals are sent in real time to the destination of the peer pair
@@ -309,6 +484,12 @@ message CreateContract {
     optional bool force_stream = 7;
     // see stream version reference at top
     optional uint32 stream_version = 8;
+
+    // Fixed sender-side ContractKey sequence lane that requested this
+    // contract. This is diagnostic capability metadata only: it does not
+    // select or alter a route, contract, or encryption session. Presence
+    // proves the sender can report the lane; absence remains unknown.
+    optional SequenceRole sender_role = 9;
 }
 // the creator knows all the hops on the stream from the enumerated linpaths
 // when evaluating the completed contracts, the send and receive count involving the source_id
@@ -321,6 +502,11 @@ enum ContractError {
     Setup = 2;
     Trust = 3;
     Invalid = 4;
+    // The requested destination is no longer a reliable route. Unlike an
+    // account or authorization error, this is actionable by a multi-client:
+    // retire the exact window client that produced the result and choose a
+    // replacement.
+    Reliability = 5;
 }
 
 
@@ -404,6 +590,20 @@ message StoredContract {
     // session's trusted-peer-cert set.
     bytes destination_client_key_signed_tls_certificate = 9;
 
+    // roles assigned to the source client at creation. Sealed into the
+    // platform-signed contract bytes. Set only when `provide_mode` is
+    // `Network`; empty for all other provide modes.
+    repeated string roles = 10;
+    // identity principal assigned to the source client at creation.
+    // Sealed into the platform-signed contract bytes. Set only when
+    // `provide_mode` is `Network`; empty for all other provide modes.
+    string principal = 11;
+
+    // Absolute admission deadline, sealed into the platform-signed bytes.
+    // Missing preserves legacy contracts without a time limit. At or after
+    // this Unix millisecond timestamp no new transfer bytes may be debited.
+    optional int64 expiration_time_unix_milli = 12;
+
     // FIXME companion contract id
 }
 
@@ -419,6 +619,15 @@ message CloseContract {
     // this ID with the exact party, amount and checkpoint flag before emission
     // is enabled on hosted clients; older backends ignore the field.
     bytes report_id = 5;
+    // Optional canonical original-close-report envelope signed by the client key.
+    // The versioned envelope binds its policy domain and this exact report tuple.
+    // Empty preserves legacy bytes; evidence-aware backends retain the original
+    // before counting it as authenticated work. A signature alone does not prove
+    // a complete contract, earning window, reliability or provider eligibility.
+    bytes original_report = 6;
+    // Optional signed report-chain companion. Older routes may omit it; missing
+    // inventory remains unknown without changing the original close obligation.
+    bytes original_inventory = 7;
 }
 
 
@@ -468,6 +677,34 @@ enum EncryptedControlType {
     // long-lived identity, defeating an active MITM whose substituted
     // TLS cert would produce a different exporter on each leg.
     EncryptedControlIdentityProof = 2;
+    // Undecryptable-wrap feedback (changes 2026-08): the receiver of a wrapped
+    // frame that no local session/epoch can open sends this (no payload,
+    // rate-limited) back to the sealer. `session_role` is the nacking
+    // session's role per the envelope convention, so the sealer routes it to
+    // its complement (client) session; `epoch_id` is the epoch the nacking
+    // side can currently read or is actively establishing, unset when it has
+    // neither (e.g. a process restart that lost the responder session). The
+    // establishing case distinguishes the ordinary window where the TLS
+    // initiator seals first from genuine state loss: destroying the healthy
+    // initiator epoch there puts its replacement ClientHello behind the
+    // dropped application's receive-sequence gap.
+    //
+    // The sealer acts only when `epoch_id` is unset. A real epoch means the
+    // peer can read that generation or is already converging onto one the
+    // initiator minted, so moving the target with another restart is wrong.
+    // On genuine desync the sealer demotes the dead epochs (the peer provably
+    // cannot read them) and re-handshakes; each mode's own contract then
+    // recovers the flow: Opportunistic resends re-wrap as plaintext (its
+    // fail-open baseline; a forged nack can force this rate-limited window,
+    // which is within opportunistic's threat model), Required holds
+    // application data at the entry gate until the fresh epoch seals (a
+    // forged nack costs a rate-limited re-handshake, never plaintext).
+    // Without this signal the sealer keeps wrapping under the dead epoch and
+    // an active flow stalls for the full AckTimeout against a peer that lost
+    // session state — and rekey continuity means even the lifecycle recovery
+    // re-wedges (the receiver cannot sequence past frames it cannot read).
+    // Unset/unknown on legacy peers: dropped, keeping timeout recovery.
+    EncryptedControlUnknownWrapNack = 3;
 }
 
 // EncryptedKey publishes this client's public TLS certificate to the
@@ -505,6 +742,10 @@ message EncryptedKey {
 message ClientKey {
     // 32-byte Ed25519 public key.
     bytes public_key = 1;
+    // Optional exact client-key history namespace; absent keeps the legacy
+    // operator-selected domain. A configured provider sends the same digest
+    // used by its original signed close reports on every key rotation.
+    bytes history_domain_hash = 2;
 }
 
 
@@ -557,3 +798,99 @@ message EncryptedControl {
     optional bytes epoch_id = 5;
 }
 
+
+
+// each hop asks its client to migrate the platform transport
+// (make-before-break) because the resident is draining
+// (CONNECTDRAIN2.md §3.3). The client establishes a replacement transport at
+// `migrate_time` while the current one keeps carrying traffic, then closes
+// the old transport once the replacement is up.
+//
+// With a kind other than drain, the message is a move (server/connect/MOVE.md):
+// the client dials one of `targets`, keeping the platform hostname for TLS and
+// HTTP, so the platform decides which edge the client uses. An older client
+// ignores the move fields and migrates by name, which is the drain behavior.
+message ResidentMigrate {
+    // unix milliseconds when the client should begin the migration.
+    // the server jitters this across the drain migrate window so the
+    // clients do not thundering-herd the siblings
+    uint64 migrate_time = 1;
+    // a ulid that identifies the move in the platform's intent, in result
+    // reports and in client dedupe. Absent for a drain migrate.
+    bytes move_id = 2;
+    ResidentMoveKind kind = 3;
+    // at most one target per ip family. The client dials the target of its
+    // transport's family on the platform port, keeping the platform hostname.
+    repeated ResidentMoveTarget targets = 4;
+    // compulsory only: unix milliseconds when the platform closes the old
+    // transport if the client has not moved.
+    uint64 close_time = 5;
+    // milliseconds the client prefers the target address for reconnects to
+    // the platform hostname, after a successful move.
+    uint64 prefer_duration = 6;
+}
+
+enum ResidentMoveKind {
+    // the legacy migrate: same hostname, no target (CONNECTDRAIN2.md)
+    ResidentMoveKindDrain = 0;
+    // guidance the client may decline
+    ResidentMoveKindAdvisory = 1;
+    // the platform closes the old transport at `close_time`
+    ResidentMoveKindCompulsory = 2;
+}
+
+message ResidentMoveTarget {
+    // 4 or 16 bytes
+    bytes ip = 1;
+}
+
+// a client's report that it declined a move, or that the replacement transport
+// failed. A move that succeeds is visible to the platform as an arrival, so it
+// sends no report. Sent to the control id, best effort.
+message ResidentMoveResult {
+    bytes move_id = 1;
+    ResidentMoveOutcome outcome = 2;
+    ResidentMoveReason reason = 3;
+    // the ip family the report applies to: 4 or 6. Zero when not family specific.
+    uint32 ip_family = 4;
+    // failures only: milliseconds from the start of the dial to the failure
+    uint64 elapsed = 5;
+}
+
+enum ResidentMoveOutcome {
+    ResidentMoveOutcomeDeclined = 0;
+    ResidentMoveOutcomeFailed = 1;
+}
+
+enum ResidentMoveReason {
+    ResidentMoveReasonOther = 0;
+    ResidentMoveReasonExtenderCarrier = 1;
+    ResidentMoveReasonDnsCarrier = 2;
+    ResidentMoveReasonNoFamilyTarget = 3;
+    ResidentMoveReasonMemoryBudget = 4;
+    ResidentMoveReasonRecentMove = 5;
+    ResidentMoveReasonTargetFailedRecently = 6;
+    ResidentMoveReasonMobileBackgroundOrMetered = 7;
+    ResidentMoveReasonMoveInProgress = 8;
+    ResidentMoveReasonConnectTimeout = 9;
+    ResidentMoveReasonDialError = 10;
+    ResidentMoveReasonTlsError = 11;
+    ResidentMoveReasonAuthError = 12;
+}
+
+// A hint; receivers refetch an authoritative snapshot before replacing state.
+message NetworkSessionsChanged {
+ string generation = 1;
+ int64 event_id = 2;
+}
+// Accepted only from authenticated platform control. A retired generation cannot
+// be revived by a delayed renew, StreamOpen, or resident migration snapshot.
+message StreamAuthorization {
+ bytes stream_id = 1;
+ bytes authorization_generation = 2;
+ uint32 lease_millis = 3;
+ bool retired = 4;
+ bytes clock_id = 5;
+ int64 clock_unix_millis = 6;
+ int64 deadline_unix_millis = 7;
+}
