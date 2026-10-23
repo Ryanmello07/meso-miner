@@ -1,0 +1,7 @@
+//go:build bulkbench
+
+package connect
+
+const bulkEngineName = "connect-main"
+
+func bulkDest(id Id) Id { return id }
