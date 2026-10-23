@@ -45,6 +45,7 @@ show_help ()
     echo "  proxy refresh            🔄  Re-read configs and hot-reload proxies"
     echo "  proxy summary            📊  Fleet summary (sources, health, counts)"
     echo "  proxy remove-dead        💀  Interactively prune dead/degraded/failing"
+    echo "  proxy reissue <addr>     🔁  New client for a proxy whose client was removed"
     echo "  fast-auth [on|off]       ⚡  Bypass auth rate limiter without restart"
     echo "  self-heal [on|off]       🏥  Auto-regulate proxies (load gate + cleanup) (default: off)"
     echo "  set [<k> [<v>|off]]      ⚙   Show or change runtime tuning overrides"
@@ -3919,11 +3920,14 @@ do_proxy () {
         remove-dead)
             "$provider_bin" proxy remove-dead "$@"
             ;;
+        reissue)
+            "$provider_bin" proxy reissue "$@"
+            ;;
         summary)
             "$provider_bin" proxy summary
             ;;
         *)
-            pr_err "Unknown proxy command: %s (Try 'add', 'clear', 'health', 'traffic', 'refresh', 'remove-dead', or 'summary')" "$cmd"
+            pr_err "Unknown proxy command: %s (Try 'add', 'clear', 'health', 'traffic', 'refresh', 'remove-dead', 'reissue', or 'summary')" "$cmd"
             exit 1
             ;;
     esac
@@ -4276,7 +4280,7 @@ do_session ()
             fi
 
             files=""
-            for f in .client_jwts.json jwt jwt_last_refresh .provider.key .provider.cert proxy proxy_url.json proxy.state; do
+            for f in .client_jwts.json .client_registrations.json .client_registration_generations.json jwt jwt_last_refresh .provider.key .provider.cert proxy proxy_url.json proxy.state; do
                 if [ -f "$state_dir/$f" ]; then
                     files="$files $f"
                 fi
@@ -4377,7 +4381,7 @@ do_session ()
 
             backup_dir="$state_dir/.session-backup-$(date +%Y%m%d-%H%M%S)"
             mkdir -p "$backup_dir"
-            for f in .client_jwts.json jwt jwt_last_refresh .provider.key .provider.cert proxy proxy_url.json proxy.state; do
+            for f in .client_jwts.json .client_registrations.json .client_registration_generations.json jwt jwt_last_refresh .provider.key .provider.cert proxy proxy_url.json proxy.state; do
                 if [ -f "$state_dir/$f" ]; then
                     cp "$state_dir/$f" "$backup_dir/$f"
                 fi
@@ -4386,7 +4390,7 @@ do_session ()
 
             rm -rf "$staging_dir"
             mkdir -p "$staging_dir"
-            for f in .client_jwts.json jwt jwt_last_refresh .provider.key .provider.cert proxy proxy_url.json proxy.state; do
+            for f in .client_jwts.json .client_registrations.json .client_registration_generations.json jwt jwt_last_refresh .provider.key .provider.cert proxy proxy_url.json proxy.state; do
                 if [ -f "$tmpdir/$f" ]; then
                     mv "$tmpdir/$f" "$staging_dir/$f"
                 fi
@@ -4397,7 +4401,8 @@ do_session ()
 
             # Warn about entries near the 30-day stale cutoff
             if [ -f "$staging_dir/.client_jwts.json" ]; then
-                mint_count=$(grep -c '"minted_at"' "$staging_dir/.client_jwts.json" 2>/dev/null || echo 0)
+                mint_count=$(grep -c '"minted_at"' "$staging_dir/.client_jwts.json" 2>/dev/null)
+                [ -n "$mint_count" ] || mint_count=0
                 pr_info "Session contains %s client JWT entries." "$mint_count"
                 pr_info "Note: entries older than 30 days will be automatically pruned"
                 pr_info "on next startup."

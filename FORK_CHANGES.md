@@ -3885,3 +3885,17 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 - Unchanged: generation 0 slots (every proxy never reissued), the provider key, and every other proxy's client. This matches upstream's rule that a fresh registration happens only when the operator asks for it explicitly.
 
 **Impact**: one removed client costs one new client, not a re-registration of the whole node.
+
+## 189. Installer Fixes: Session Files, FreeBSD Commands, Reissue
+
+**Purpose**: an installer pass while checking round 6 found three problems. Shell session bundles (`urnet-tools session save/load` on Linux and macOS) left out the registration store from §185, so a node restored from a bundle could not replay its retained registrations and would be refused for that scope. On FreeBSD, `urnet-tools proxy refresh|remove-dead|summary` and `session save|load` called provider commands that do not exist (`proxy-refresh`, `session-save`, ...) and always failed. The Linux, macOS and FreeBSD wrappers had no way to reach `proxy reissue` (§188).
+
+**Files Modified**: `scripts/Provider_Install_Linux.sh`, `scripts/Provider_Install_Mac.sh`, `scripts/Provider_Install_FreeBSD.sh`.
+
+**Change**:
+- Session save, backup and staging include `.client_registrations.json` and `.client_registration_generations.json` (the Go `urnet-tools` and the provider's staging allowlist already did).
+- FreeBSD calls `provider proxy refresh|remove-dead|summary`, and implements session save/load like macOS (same bundle format, so bundles move between them), using temp files instead of `pipefail`, which FreeBSD 13's `sh` lacks.
+- `urnet-tools proxy reissue` on all three wrappers, and in their help.
+- Session load printed "contains 0\n0 client JWT entries" when the bundle had none.
+
+**Impact**: FreeBSD proxy and session commands work; restored nodes keep their registrations.

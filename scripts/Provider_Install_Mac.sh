@@ -29,6 +29,7 @@ show_help() {
     echo "Proxy Management:"
     echo "  proxy refresh             Re-read configs and hot-reload proxies"
     echo "  proxy remove-dead         Interactively prune dead/degraded/failing"
+    echo "  proxy reissue <addr>      New client for a proxy whose client was removed"
     echo "  proxy summary             Fleet summary (sources, health, counts)"
     echo ""
     echo "Options:"
@@ -430,7 +431,7 @@ do_session() {
             fi
 
             files=""
-            for f in .client_jwts.json jwt jwt_last_refresh .provider.key .provider.cert proxy proxy_url.json proxy.state; do
+            for f in .client_jwts.json .client_registrations.json .client_registration_generations.json jwt jwt_last_refresh .provider.key .provider.cert proxy proxy_url.json proxy.state; do
                 if [ -f "$state_dir/$f" ]; then
                     files="$files $f"
                 fi
@@ -530,7 +531,7 @@ do_session() {
 
             backup_dir="$state_dir/.session-backup-$(date +%Y%m%d-%H%M%S)"
             mkdir -p "$backup_dir"
-            for f in .client_jwts.json jwt jwt_last_refresh .provider.key .provider.cert proxy proxy_url.json proxy.state; do
+            for f in .client_jwts.json .client_registrations.json .client_registration_generations.json jwt jwt_last_refresh .provider.key .provider.cert proxy proxy_url.json proxy.state; do
                 if [ -f "$state_dir/$f" ]; then
                     cp "$state_dir/$f" "$backup_dir/$f"
                 fi
@@ -539,7 +540,7 @@ do_session() {
 
             rm -rf "$staging_dir"
             mkdir -p "$staging_dir"
-            for f in .client_jwts.json jwt jwt_last_refresh .provider.key .provider.cert proxy proxy_url.json proxy.state; do
+            for f in .client_jwts.json .client_registrations.json .client_registration_generations.json jwt jwt_last_refresh .provider.key .provider.cert proxy proxy_url.json proxy.state; do
                 if [ -f "$tmpdir/$f" ]; then
                     mv "$tmpdir/$f" "$staging_dir/$f"
                 fi
@@ -549,7 +550,8 @@ do_session() {
             touch "$state_dir/.session-pending"
 
             if [ -f "$staging_dir/.client_jwts.json" ]; then
-                mint_count=$(grep -c '"minted_at"' "$staging_dir/.client_jwts.json" 2>/dev/null || echo 0)
+                mint_count=$(grep -c '"minted_at"' "$staging_dir/.client_jwts.json" 2>/dev/null)
+                [ -n "$mint_count" ] || mint_count=0
                 pr_info "Session contains %s client JWT entries." "$mint_count"
                 pr_info "Note: entries older than 30 days will be automatically pruned"
                 pr_info "on next startup."
@@ -594,8 +596,9 @@ do_proxy() {
         refresh)    "$provider_bin" proxy refresh;;
         remove-dead) "$provider_bin" proxy remove-dead;;
         summary)    "$provider_bin" proxy summary;;
+        reissue)    shift; "$provider_bin" proxy reissue "$@";;
         *)
-            pr_err "Usage: urnet-tools proxy <refresh|remove-dead|summary>"
+            pr_err "Usage: urnet-tools proxy <refresh|remove-dead|summary|reissue>"
             exit 1
             ;;
     esac
