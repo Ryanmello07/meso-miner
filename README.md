@@ -329,8 +329,3 @@ dashboard. See [Monitoring](docs/Monitoring.md).
 - **Platforms:** Linux (systemd, and Alpine/OpenRC with a native boot-start service), macOS, Windows and FreeBSD. Alpine setup: [docs/OpenRC.md](docs/OpenRC.md); FreeBSD setup: [docs/FreeBSD.md](docs/FreeBSD.md)
 - **Images:** Multi-arch `linux/amd64` + `linux/arm64`, `darwin/amd64` + `darwin/arm64` via GitHub Actions → GHCR
 - **Bridge-friendly:** runs on standard Docker bridge networks, no `--network host` required
-
----
-
-> [!WARNING]
-> This is a private, custom modification for professional provider use. Not affiliated with the official UrNetwork project.
