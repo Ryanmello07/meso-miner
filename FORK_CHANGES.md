@@ -3911,3 +3911,15 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 - The `[r]head` log is guarded and leaves the Tier-2 allowlist: it runs per received message, not per connection.
 
 **Impact** (A/B on the same host, 3 runs each): CPU per MB down 11% at 16 pairs and 6% at 64 pairs, throughput up 7% to 12%, peak heap flat.
+
+## 191. Speed Test Echoes Only Its Probes
+
+**Purpose**: during an H1 speed test meso echoed every message back to the platform. The platform interleaves real Transfer frames with the probes, and an echoed frame reflects its source back, where it is dropped as forged, so user traffic that arrived during a test was lost. Upstream connect fixed this on 2026-10-16 (`0161dfc`); this is the parity gap "speed-test probe echo" from round 1.
+
+**Files Modified**: `transport.go`, `transport_speed_echo_test.go`. **Files Added**: `transport_speed_probe.go` (from upstream).
+
+**Change**:
+- The start control's 4-byte test id is kept. Only complete probes of that test (1024 bytes, zero first byte, the test id) are echoed and counted; everything else goes to receive. A Transfer frame cannot start with a zero byte, so it is never taken for a probe.
+- The echo test now sends tagged probes with a probe-sized non-probe frame and a probe from another test interleaved, and checks all probes come back, nothing else is echoed, and the interleaved frames are delivered.
+
+**Impact**: user frames during a speed test are delivered. The probe format is what the platform sends to upstream providers since that release.
