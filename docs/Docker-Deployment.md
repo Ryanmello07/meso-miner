@@ -415,7 +415,17 @@ docker run -d \
 
 ## 🔄 Automatic Updates
 
-[Watchtower](https://containrrr.dev/watchtower/) can automatically pull new image versions and restart your container when an update is published. Add it to your `docker-compose.yml` alongside the `urnetwork` service:
+Containers in `BUILD=stable` (the default) and `BUILD=nightly` update themselves. At start-up the container checks for a newer meso-miner release and installs it before the provider starts, then checks again once a day at a random time, so a fleet does not query GitHub together. A new release is downloaded, verified against the release's sha256 digest, swapped in and the provider restarted; a check that finds the container current changes nothing.
+
+| `AUTO_UPDATE` | Behaviour |
+|---|---|
+| unset or `daily` | Check at start-up and once a day (default) |
+| `hourly` | Check at start-up and once an hour |
+| `off` | Never self-update; update by re-pulling the image |
+
+The self-updated binary lives in the container, so recreating the container from an older image starts on that image's version and the start-up check updates it again. `BUILD=jwt` and Pelican (`PELICAN=yes`) do not self-update.
+
+To also refresh the image itself, [Watchtower](https://containrrr.dev/watchtower/) can automatically pull new image versions and restart your container when an update is published. Add it to your `docker-compose.yml` alongside the `urnetwork` service:
 
 ```yaml
   watchtower:

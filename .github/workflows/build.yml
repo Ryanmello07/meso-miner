@@ -354,6 +354,11 @@ jobs:
           chmod +x docker/scripts/test_stop_forwarding.sh
           ./docker/scripts/test_stop_forwarding.sh
 
+      - name: Container auto-update policy
+        run: |
+          chmod +x docker/scripts/test_auto_update.sh
+          ./docker/scripts/test_auto_update.sh
+
       - name: Nightly login exit code tests
         run: |
           chmod +x docker/scripts/test_login_exit_code.sh

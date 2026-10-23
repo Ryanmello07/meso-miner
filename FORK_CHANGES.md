@@ -3779,3 +3779,17 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 - **Installers**: Linux systemd writes a daily timer (or the recorded interval; none when `off`); Alpine/OpenRC installs as root now turn on the periodic entry; macOS and FreeBSD installers turn it on through the Go tool; Windows runs `auto-update ensure` instead of `weekly`.
 
 **Impact**: every native node checks for a new release once a day. A check that finds the node current is one release API call and no restart. Operators keep full control with `urnet-tools auto-update <interval|off>`. Existing weekly nodes reach the daily schedule on their next scheduled update after this release (the migration runs from the updated tool).
+
+## 181. Docker Containers Self-Update Daily
+
+**Purpose**: `BUILD=stable`, the Docker default and where most bulk nodes run, never updated the provider in place; only a manual or Watchtower image re-pull did. `BUILD=nightly` checked once a day at a fixed 12:00 (America/Tijuana) for every container at once.
+
+**Files Modified**: `docker/scripts/provider_common.sh`, `docs/Docker-Deployment.md`, `.github/workflows/build.yml`. **Files Added**: `docker/scripts/test_auto_update.sh`.
+
+**Change**:
+- **stable and nightly both self-update** through the existing verified path (`func_check_update`: release API, sha256 digest check, atomic swap, `update-pending` restart).
+- **Start-up check**: a stable container updates before its first provider start, so one created from an old image never runs an out-of-date provider. A stable container seeds `version.txt` from the image binary so a current image is not re-downloaded.
+- **Interval**: `AUTO_UPDATE=daily` (default), `hourly` or `off`. Each check lands at a random point inside its interval, replacing nightly's fixed-time watcher.
+- `BUILD=jwt` and Pelican (`PELICAN=yes`) are unchanged: no self-update.
+
+**Impact**: a default container picks up a release within a day, or at its next restart. `AUTO_UPDATE=off` restores the old image-only behaviour.

@@ -43,15 +43,19 @@ elif [ -f "/app/provider_env.sh" ]; then
   . "/app/provider_env.sh"
 fi
 
-# Nightly self-update configuration. Only the nightly wrapper ever runs the
-# update path, so only it sources the digest helpers (stable/jwt must not
-# depend on update_verify.sh being present).
-if [ "$PROVIDER_MODE" = "nightly" ]; then
+# Self-update configuration. stable and nightly both update themselves from
+# the meso-miner releases (the platform retires old provider versions, so a
+# container cannot wait for its operator to re-pull the image). jwt mode does
+# not, so it must not depend on update_verify.sh being present.
+#
+# AUTO_UPDATE picks the check interval: daily (default), hourly, or off. The
+# first check runs at start-up, later ones at a random offset inside each
+# interval so a fleet does not query the release API together.
+if [ "$PROVIDER_MODE" = "nightly" ] || [ "$PROVIDER_MODE" = "stable" ]; then
     # shellcheck source=update_verify.sh
     . "$SCRIPT_DIR/update_verify.sh"
     API_ROOT="https://api.github.com/repos/urfoundation/meso-miner"
     VERSION_FILE="$APP_DIR/version.txt"
-    UPDATE_TIME="12:00"
 fi
 
 # === Logging Helper ===
@@ -353,7 +357,7 @@ func_login_retry_loop() {
     done
 }
 
-# === Provider Update Check (nightly only) ===
+# === Provider Update Check (stable and nightly) ===
 # === Release Asset Selection ===
 # Releases ship per-arch tarballs (urnetwork-provider-vX-linux-amd64.tar.gz,
 # ...-darwin-amd64.tar.gz, ...) PLUS a multi-arch fat tarball
@@ -370,6 +374,15 @@ func_check_update() {
     if [ "${PELICAN:-}" = "yes" ]; then
         log "[INFO] Runtime updates disabled under Pelican (update by re-pulling the image)"
         return 0
+    fi
+    # A stable container starts on the binary baked into its image, which has
+    # no version file yet: seed it from the binary so a current image is not
+    # re-downloaded on its first check.
+    if [ ! -s "$VERSION_FILE" ] && [ -x "$APP_DIR/urnetwork_${A_SYS_ARCH}_${PROVIDER_FLAVOR}" ]; then
+        IMAGE_VERSION="$("$APP_DIR/urnetwork_${A_SYS_ARCH}_${PROVIDER_FLAVOR}" --version 2>/dev/null | head -n 1 | sed 's/^v//')"
+        if [ -n "$IMAGE_VERSION" ]; then
+            echo "$IMAGE_VERSION" > "$VERSION_FILE" 2>/dev/null || true
+        fi
     fi
     if [ -f "$VERSION_FILE" ]; then
         CURRENT_VERSION="$(cat "$VERSION_FILE")"
@@ -897,6 +910,45 @@ func_start_provider_jwt(){
     done
 }
 
+# === Auto-Update Watcher ===
+# func_auto_update_interval: seconds between update checks for AUTO_UPDATE
+# (daily by default), or nothing when auto-update is off.
+func_auto_update_interval() {
+    case "$(printf '%s' "${AUTO_UPDATE:-daily}" | tr '[:upper:]' '[:lower:]')" in
+      off|false|0|no) ;;
+      hourly)         echo 3600 ;;
+      *)              echo 86400 ;;
+    esac
+}
+
+# func_start_update_watcher: check for a new release once per interval, at a
+# random point inside it. An installed update stops the provider; the
+# supervision loop sees update-pending and starts the new binary.
+func_start_update_watcher() {
+    UPDATE_INTERVAL="$(func_auto_update_interval)"
+    if [ -z "$UPDATE_INTERVAL" ]; then
+        log "[INFO] Auto-update is off (AUTO_UPDATE=${AUTO_UPDATE})"
+        return 0
+    fi
+    if [ "${PELICAN:-}" = "yes" ]; then
+        return 0
+    fi
+    (
+      while :; do
+        # Wait out the rest of the previous interval, then a random offset
+        # into this one, so checks stay one interval apart on average.
+        OFFSET=$(( $(od -An -N4 -tu4 /dev/urandom 2>/dev/null || echo 0) % UPDATE_INTERVAL ))
+        func_sleep "$OFFSET"
+        func_exit_if_stopping
+        log "[INFO] Auto-update: checking for a new release"
+        func_check_update
+        func_sleep $(( UPDATE_INTERVAL - OFFSET ))
+      done
+    ) &
+    WATCHER_PID=$!
+    log "[INFO] Auto-update watcher PID $WATCHER_PID (every ${UPDATE_INTERVAL}s; AUTO_UPDATE=off to disable)"
+}
+
 # === Mode Dispatchers ===
 func_do_login() {
     case "$PROVIDER_MODE" in
@@ -930,8 +982,14 @@ func_bootstrap() {
         func_report_identity
         func_ip_checker
         func_start_vnstat
+        # Update before the first start, so a container created from an old
+        # image never runs an out-of-date provider.
+        if [ -n "$(func_auto_update_interval)" ]; then
+            func_check_update
+        fi
         # Pass host's actual hostname (if provided) so provider reports correctly on dashboard
         export HOST_HOSTNAME="${HOST_HOSTNAME:-}"
+        func_start_update_watcher
         func_do_login
         func_start_provider
         ;;
@@ -951,26 +1009,7 @@ func_bootstrap() {
         func_choose_network
         # Pass host's actual hostname (if provided) so provider reports correctly on dashboard
         export HOST_HOSTNAME="${HOST_HOSTNAME:-}"
-        (
-          while :; do
-            NOW="$(TZ='America/Tijuana' date +%H:%M)"
-            if [ "$NOW" = "$UPDATE_TIME" ]; then
-                log "Watcher: hit $UPDATE_TIME, updating"
-                func_check_update
-                if ! ps aux | grep -q "[u]rnetwork_${A_SYS_ARCH}_"; then
-                    log "UrNetwork not running; launching now"
-                    func_do_login
-                    func_start_provider
-                else
-                    log "UrNetwork already running; skipping restart"
-                fi
-                sleep 60
-            fi
-            sleep 30
-          done
-        ) &
-        WATCHER_PID=$!
-        log "Time‐watcher PID is $WATCHER_PID"
+        func_start_update_watcher
         func_do_login
         func_start_provider
         ;;
