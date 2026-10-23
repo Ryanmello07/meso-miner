@@ -992,6 +992,8 @@ func main() {
 			proxyExclude(opts)
 		} else if add, _ := opts.Bool("add"); add {
 			proxyAdd(opts)
+		} else if reissue, _ := opts.Bool("reissue"); reissue {
+			proxyReissue(opts)
 		} else if removeDead, _ := opts.Bool("remove-dead"); removeDead {
 			proxyRemoveDead(opts)
 		} else if remove, _ := opts.Bool("remove"); remove {
@@ -5490,6 +5492,10 @@ func provideAuth(ctx context.Context, clientStrategy *connect.ClientStrategy, ap
 		// A refusal is not ErrTokenInvalid either: that sentinel kills the
 		// whole process, and a refusal retries via the normal backoff.
 		returnErr = err
+		var refused *ProviderRegistrationRefusedError
+		if errors.As(err, &refused) {
+			returnErr = fmt.Errorf("%w (if this proxy's client was removed, run: provider proxy reissue %s)", err, proxyReissueArgs(identityKey))
+		}
 		if operatorChild, _ := opts.Bool("--operator-child"); operatorChild {
 			returnErr = networkCredentialRejection(returnErr)
 		}
@@ -7599,6 +7605,7 @@ Usage:
     provider proxy add [<key_address>...] [--proxy_file=<proxy_file>] [--file=<file>] [--url=<url>] [--URL=<URL>] [-f]
     provider proxy remove [<key_address>...] [--all]
     provider proxy remove --match=<pattern> [--yes] [--preview]
+    provider proxy reissue (--direct | <address> [--proxy-user=<proxy_user>]) [--yes]
     provider proxy remove-dead [--degraded[=<duration>]] [--auth-failures=<N>] [--source=<source>] [--yes] [--preview]
     provider proxy activity
     provider proxy refresh [--force]
@@ -7635,6 +7642,8 @@ Options:
     --operator=<domain>              auth: sign in to this listed operator and write its jwt below its directory.
     --auto-register                  Provide --all-operators: sign in with the hotkey for every operator that
                                      has no jwt yet. Needs --hotkey_seed_file.
+    --direct                         proxy reissue: reissue the direct (no proxy) connection's client.
+    --proxy-user=<proxy_user>        proxy reissue: the proxy's sign-in user, when it has one.
     --allow-client-registration      With provide --all-operators: allow a new operator's provider to create its
                                      client identity when that operator's state directory has no .provider.key
                                      yet. Without it a new operator directory is refused. Plain provide is unchanged.

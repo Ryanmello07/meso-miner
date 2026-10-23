@@ -44,6 +44,7 @@ import (
 var sessionFiles = []string{
 	".client_jwts.json",
 	".client_registrations.json",
+	".client_registration_generations.json",
 	"jwt",
 	"jwt_last_refresh",
 	".provider.key",

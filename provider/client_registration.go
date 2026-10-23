@@ -154,12 +154,21 @@ func (self *ProviderRegistrationUnsupportedError) Error() string {
 var providerRegistrationLock sync.Mutex
 
 // providerRegistrationSlot is "direct" or "proxy-sha256:" plus the SHA-256 of
-// the proxy identity key.
-func providerRegistrationSlot(identityKey string) string {
-	if identityKey == "" || identityKey == "direct" {
-		return "direct"
+// the proxy identity key. A slot the operator reissued (generation N > 0) is
+// "proxy-sha256:" plus the SHA-256 of the identity key and its generation, a
+// scope the server has never bound.
+func providerRegistrationSlot(identityKey string, generation uint64) string {
+	if identityKey == "" {
+		identityKey = "direct"
 	}
-	sum := sha256.Sum256([]byte(identityKey))
+	if generation == 0 {
+		if identityKey == "direct" {
+			return "direct"
+		}
+		sum := sha256.Sum256([]byte(identityKey))
+		return "proxy-sha256:" + hex.EncodeToString(sum[:])
+	}
+	sum := sha256.Sum256(fmt.Appendf(nil, "%s\x00reissue\x00%d", identityKey, generation))
 	return "proxy-sha256:" + hex.EncodeToString(sum[:])
 }
 
@@ -351,6 +360,7 @@ func registerProviderClient(
 	}
 	// Every slot of a fresh install reaches here at once; under the locks
 	// exactly one creates the seed and the rest read it.
+	var generation uint64
 	seed, err := func() ([]byte, error) {
 		providerRegistrationLock.Lock()
 		defer providerRegistrationLock.Unlock()
@@ -359,6 +369,11 @@ func registerProviderClient(
 			return nil, err
 		}
 		defer release()
+		generations, err := readProviderRegistrationGenerations()
+		if err != nil {
+			return nil, err
+		}
+		generation = generations[registrationGenerationKey(identityKey)]
 		return ensureProviderClientKeySeed()
 	}()
 	if err != nil {
@@ -369,7 +384,7 @@ func registerProviderClient(
 		Endpoint:   networkClientRegistrationEndpoint(apiUrl),
 		ClientKey:  "0x" + hex.EncodeToString(public),
 		ClientRole: providerRegistrationRole,
-		ClientSlot: providerRegistrationSlot(identityKey),
+		ClientSlot: providerRegistrationSlot(identityKey, generation),
 	}
 	scopeRaw, err := json.Marshal(scope)
 	if err != nil {

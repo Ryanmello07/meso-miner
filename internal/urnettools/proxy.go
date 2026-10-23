@@ -254,6 +254,9 @@ Subcommands:
   traffic                proxy traffic from state files (single target)
   ids                    client_id per proxy from JWT store (single target)
   remove-dead            remove dead/degraded proxies (single target)
+  reissue <address>      give one proxy whose client was removed a new client
+                         (--proxy-user=<user> when it signs in; --direct for no
+                         proxy); other proxies keep theirs (single target)
   trim [<N>]             show the trim cap, or hold running proxies at N (off clears)
   audit [action]         inspect or toggle automated proxy audit engine (status|on|off|release)
   exclude                targeting flag, not a subcommand (see 'urnet-tools help')
@@ -344,7 +347,7 @@ Targets and batch flags work as for other commands (--unit/--user/--network,
 			// (provider-binary flags like --force); reject elsewhere so a
 			// typo like --netwrok cannot be silently absorbed on a
 			// destructive op.
-			if strings.HasPrefix(a, "-") && sub != "refresh" && sub != "remove-dead" && sub != "remove" && sub != "paste" {
+			if strings.HasPrefix(a, "-") && sub != "refresh" && sub != "remove-dead" && sub != "remove" && sub != "paste" && sub != "reissue" {
 				return fmt.Errorf("unknown flag %q for proxy %s", a, sub)
 			}
 			positionals = append(positionals, a)
@@ -559,6 +562,33 @@ Targets and batch flags work as for other commands (--unit/--user/--network,
 		}
 		return providerSubcommand(p, append([]string{"proxy", "trim"}, positionals...)...)
 
+	case "reissue":
+		// Single-target: a new client for one proxy the server refuses
+		// because its client was removed. The provider binary checks that the
+		// proxy has a saved registration.
+		if all || len(include) > 0 || len(exclude) > 0 {
+			return fmt.Errorf("proxy reissue operates on ONE provider — use --unit/--user/--network to target it")
+		}
+		if len(positionals) < 1 {
+			return fmt.Errorf("proxy reissue needs the proxy address (with --proxy-user=<user> when it signs in), or --direct")
+		}
+		p, err := selectTarget(providers, t)
+		if err != nil {
+			return err
+		}
+		if dryRun {
+			fmt.Printf("[dry-run] would reissue %s on %s\n", strings.Join(positionals, " "), providerLabel(p))
+			return nil
+		}
+		ok, err := confirmGate(fmt.Sprintf("reissue the client of %s", strings.Join(positionals, " ")), p, force, dryRun)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return nil // declined
+		}
+		return providerSubcommand(p, append([]string{"proxy", "reissue"}, positionals...)...)
+
 	case "paste":
 		// Paste proxies from stdin/file: normalizes formats, fetches URL sources, adds + refreshes.
 		// Single-target — the paste targets one provider at a time.
@@ -617,7 +647,7 @@ Targets and batch flags work as for other commands (--unit/--user/--network,
 		}
 		return cmdProxyAuditTarget(p, positionals, dryRun)
 	default:
-		return fmt.Errorf("unknown proxy subcommand %q (add|paste|clear|health|traffic|ids|refresh|remove-dead|add-source|remove-source|trim|audit)", sub)
+		return fmt.Errorf("unknown proxy subcommand %q (add|paste|clear|health|traffic|ids|refresh|remove-dead|reissue|add-source|remove-source|trim|audit)", sub)
 	}
 
 	// Destructive gate for clear/remove; add/refresh are additive.

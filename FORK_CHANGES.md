@@ -3871,3 +3871,17 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 - `TestStreamSequenceEndsWhenItsTransportEnds` waits for the process-wide live count instead of reading one instant; an earlier test's sequence can still be finishing its own reap, and faster loops made that window show.
 
 **Impact** (A/B on the same host, 3 runs each): CPU per MB down 7% at 16 pairs and 9% at 64 pairs, throughput up about 10%, peak heap down.
+
+## 188. Per-Proxy Reissue of a Removed Client
+
+**Purpose**: with durable registration (§185) the server keeps each proxy's registration after its client is deleted, so a proxy whose client was removed was refused forever, and the only fix was a new `.provider.key`, which changes every proxy in the state dir.
+
+**Files Added**: `provider/client_registration_reissue.go`. **Files Modified**: `provider/client_registration.go`, `provider/client_registration_test.go`, `provider/main.go` (usage, dispatch, refusal hint, session allowlist), `internal/urnettools/proxy.go`, `internal/urnettools/session_cmds.go`, `docs/Proxy-Management.md`.
+
+**Change**:
+- `provider proxy reissue (--direct | <address> [--proxy-user=<user>]) [--yes]` (and `urnet-tools proxy reissue`, with its usual target selection and confirmation) moves that one proxy's registration to its next generation, recorded in `.client_registration_generations.json`, and drops its saved client JWT. A reissued slot is `proxy-sha256:` of the identity key plus its generation, a scope the server has never bound, so the next registration creates a new client and later restarts replay that one.
+- It refuses a proxy with no saved registration unless `--yes`, so a typo changes nothing.
+- A refused registration's error now names the exact reissue command for that proxy.
+- Unchanged: generation 0 slots (every proxy never reissued), the provider key, and every other proxy's client. This matches upstream's rule that a fresh registration happens only when the operator asks for it explicitly.
+
+**Impact**: one removed client costs one new client, not a re-registration of the whole node.

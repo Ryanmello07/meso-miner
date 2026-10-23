@@ -113,6 +113,24 @@ urnet-tools proxy remove --match=bad-isp.example        # exclude pattern (persi
 
 Active exclusion patterns also appear in `urnet-tools summary` under **URL Sources**.
 
+## 🔁 Reissuing a Proxy Whose Client Was Removed
+
+Each proxy gets its own provider client, created once and replayed after any restart. The server keeps that link even after the client is deleted (for example, removed from the dashboard), so the proxy is then refused with a registration error that names this command. Reissuing gives **that one proxy** a new client. Every other proxy keeps its client, and the provider key does not change.
+
+### 🐧 Binary / Linux Service
+```sh
+urnet-tools proxy reissue 192.0.2.10:1080                      # proxy without sign-in
+urnet-tools proxy reissue 192.0.2.10:1080 --proxy-user=alice   # proxy that signs in as alice
+urnet-tools proxy reissue --direct                             # the direct (no proxy) connection
+```
+
+### 🐳 Docker
+```sh
+docker exec -it urfix urnet-tools proxy reissue 192.0.2.10:1080
+```
+
+Restart the provider afterwards; the proxy registers its new client on its next sign-in. The command refuses a proxy that has no saved registration, so a typo changes nothing. Only run it for a client that was really removed: it creates a new client, and the old one cannot come back.
+
 ## ✂️ Persistent Proxy Trim (Hard Cap & A-F Worst-First Shedding)
 
 Since `v3.23.0-fix.30.4`, operators can enforce a hard ceiling on running proxies without restarting the provider or wiping configuration files:

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/connect"
+	"golang.org/x/net/proxy"
 )
 
 var (
@@ -341,6 +342,7 @@ func TestProviderRegistrationRefusesAWrongSizedKey(t *testing.T) {
 // provideAuth mints through the registration route and stores the client JWT.
 func TestProvideAuthRegistersThroughTheVersionedRoute(t *testing.T) {
 	home := registrationTestState(t)
+	t.Cleanup(withGlobalStore(t, filepath.Join(home, ".urnetwork", ".client_jwts.json")))
 	fake, server := newFakeRegistrationServer(t)
 	if err := os.WriteFile(filepath.Join(home, ".urnetwork", "jwt"), []byte(registrationTestNetworkJWT(time.Now().Add(time.Hour))), 0600); err != nil {
 		t.Fatal(err)
@@ -354,5 +356,83 @@ func TestProvideAuthRegistersThroughTheVersionedRoute(t *testing.T) {
 	}
 	if entry, ok := globalClientJWTStore.Get("direct-registration-test"); !ok || entry.ClientID != clientId.String() {
 		t.Fatalf("client JWT not stored: %+v", entry)
+	}
+}
+
+// A revoked proxy comes back through reissue with a new client; the other
+// proxies keep theirs, and the provider key does not change.
+func TestProviderRegistrationReissueRecoversOneRevokedSlot(t *testing.T) {
+	home := registrationTestState(t)
+	t.Cleanup(withGlobalStore(t, filepath.Join(home, ".urnetwork", ".client_jwts.json")))
+	fake, server := newFakeRegistrationServer(t)
+	networkJwt := registrationTestNetworkJWT(time.Now().Add(time.Hour))
+	revokedKey := (&connect.ProxySettings{Address: "10.0.0.1:1080", Auth: &proxy.Auth{User: "alice"}}).Key()
+	otherKey := "10.0.0.2:1080"
+
+	_, revokedId, err := registerForTest(t, server, networkJwt, revokedKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, otherId, err := registerForTest(t, server, networkJwt, otherKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := globalClientJWTStore.Put(revokedKey, clientJWTEntry{ByClientJWT: "revoked", ClientID: revokedId.String()}); err != nil {
+		t.Fatal(err)
+	}
+	for _, binding := range fake.bindings {
+		if binding.clientId == revokedId {
+			binding.revoked = true
+		}
+	}
+	keyBefore, _ := os.ReadFile(filepath.Join(home, ".urnetwork", ".provider.key"))
+
+	// a mistyped proxy changes nothing
+	if _, err := reissueProviderSlot("10.0.0.9:1080", false); err == nil {
+		t.Fatal("reissued a proxy with no registration")
+	}
+	generation, err := reissueProviderSlot(revokedKey, false)
+	if err != nil || generation != 1 {
+		t.Fatalf("reissue = %d, %v", generation, err)
+	}
+	if _, ok := globalClientJWTStore.Get(revokedKey); ok {
+		t.Fatal("the revoked client's saved JWT was kept")
+	}
+
+	_, reissuedId, err := registerForTest(t, server, networkJwt, revokedKey)
+	if err != nil || reissuedId == revokedId {
+		t.Fatalf("reissued slot = %s, %v (revoked was %s)", reissuedId, err, revokedId)
+	}
+	if _, again, err := registerForTest(t, server, networkJwt, otherKey); err != nil || again != otherId {
+		t.Fatalf("other proxy = %s, %v; want its client %s", again, err, otherId)
+	}
+	// a restart replays the reissued slot's new request
+	if _, again, err := registerForTest(t, server, networkJwt, revokedKey); err != nil || again != reissuedId {
+		t.Fatalf("reissued slot after restart = %s, %v", again, err)
+	}
+	if keyAfter, _ := os.ReadFile(filepath.Join(home, ".urnetwork", ".provider.key")); string(keyAfter) != string(keyBefore) {
+		t.Fatal("reissue changed the provider key")
+	}
+	if fake.allocs != 3 {
+		t.Fatalf("%d allocations, want 3", fake.allocs)
+	}
+}
+
+func TestProxyReissueCommandParses(t *testing.T) {
+	registrationTestState(t)
+	for argv, want := range map[string]string{
+		"proxy reissue --direct":                               "--direct",
+		"proxy reissue 10.0.0.1:1080":                          "10.0.0.1:1080",
+		"proxy reissue 10.0.0.1:1080 --proxy-user=alice":       "10.0.0.1:1080 --proxy-user=alice",
+		"proxy reissue 10.0.0.1:1080 --proxy-user=alice --yes": "10.0.0.1:1080 --proxy-user=alice",
+	} {
+		opts := parseOperatorsArgsForTest(t, strings.Fields(argv))
+		if reissue, _ := opts.Bool("reissue"); !reissue {
+			t.Fatalf("%q did not parse as reissue", argv)
+		}
+		key, err := proxyReissueIdentityKey(opts)
+		if err != nil || proxyReissueArgs(key) != want {
+			t.Fatalf("%q -> key %q (%v), args %q; want %q", argv, key, err, proxyReissueArgs(key), want)
+		}
 	}
 }
