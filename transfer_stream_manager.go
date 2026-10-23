@@ -33,6 +33,8 @@ type StreamManagerSettings struct {
 type StreamManager struct {
 	ctx context.Context
 
+	authorization *streamAuthorizationState
+
 	client *Client
 
 	webRtcManager *WebRtcManager
@@ -44,6 +46,7 @@ type StreamManager struct {
 
 func NewStreamManager(ctx context.Context, client *Client, webRtcManager *WebRtcManager, streamManagerSettings *StreamManagerSettings) *StreamManager {
 	streamManager := &StreamManager{
+		authorization:         newStreamAuthorizationState(),
 		ctx:                   ctx,
 		client:                client,
 		streamManagerSettings: streamManagerSettings,
@@ -52,6 +55,10 @@ func NewStreamManager(ctx context.Context, client *Client, webRtcManager *WebRtc
 	// webRtcManager := NewWebRtcManager(ctx, streamManagerSettings.WebRtcSettings)
 
 	streamManager.initBuffers(webRtcManager)
+	// Meso's stream manager lives as long as its context; retire every lease
+	// and stop the clock worker then. AfterFunc holds no goroutine until the
+	// context ends, which matters with hundreds of clients per process.
+	context.AfterFunc(ctx, streamManager.closeAuthorizations)
 
 	return streamManager
 }
@@ -81,6 +88,19 @@ func (self *StreamManager) Receive(source TransferPath, frames []*protocol.Frame
 
 func (self *StreamManager) handleControlFrame(frame *protocol.Frame) error {
 	switch frame.MessageType {
+	case protocol.MessageType_TransferStreamAuthorization:
+		message, err := FromFrame(frame)
+		if err != nil {
+			return err
+		}
+		value := message.(*protocol.StreamAuthorization)
+		id, err := IdFromBytes(value.StreamId)
+		if err != nil {
+			return nil
+		}
+		if value.Retired {
+			self.retireStreamAuthorization(id, value.AuthorizationGeneration)
+		}
 	case protocol.MessageType_TransferStreamOpen, protocol.MessageType_TransferStreamClose, protocol.MessageType_TransferStreamReset:
 		if message, err := FromFrame(frame); err == nil {
 
@@ -108,8 +128,10 @@ func (self *StreamManager) handleControlFrame(frame *protocol.Frame) error {
 					return err
 				}
 
-				self.streamBuffer.OpenStream(sourceId, destinationId, streamId)
-				return nil
+				return self.authorizeStreamOpen(v, func() error {
+					_, err := self.streamBuffer.OpenStream(sourceId, destinationId, streamId)
+					return err
+				})
 			}
 
 			switch v := message.(type) {
@@ -129,15 +151,27 @@ func (self *StreamManager) handleControlFrame(frame *protocol.Frame) error {
 				}
 
 				streamMetrics.closeFrames.Add(1)
-				self.streamBuffer.CloseStream(streamId)
+				// The platform retired this hop; a later StreamOpen must not
+				// resurrect it. This also closes the stream.
+				self.retireStreamAuthorization(streamId, v.AuthorizationGeneration)
 
 			case *protocol.StreamReset:
 				streamMetrics.resetFrames.Add(1)
+				// Leases absent from the reset are retired before the relisted
+				// streams reopen through authorizeStreamOpen.
+				authorizations := map[Id]bool{}
+				for _, open := range v.Streams {
+					if id, err := IdFromBytes(open.StreamId); err == nil {
+						authorizations[id] = true
+					}
+				}
+				self.retireAbsentAuthorizations(authorizations)
 				self.streamBuffer.ResetStreams()
 				for _, m := range v.Streams {
-					err := streamOpen(m)
-					if err != nil {
-						return err
+					// skip and continue: one malformed entry must not strand
+					// the remaining listed streams until the next reset
+					if err := streamOpen(m); err != nil {
+						continue
 					}
 				}
 			}

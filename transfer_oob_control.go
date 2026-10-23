@@ -27,6 +27,14 @@ type OutOfBandControl interface {
 	SendControl(frames []*protocol.Frame, callback OobResultFunction)
 }
 
+// OutOfBandControlWithCtx is an optional upgrade interface for one-shot
+// control with a caller-chosen context (upstream connect). Callers fall back
+// to `SendControl` when the control does not implement it.
+type OutOfBandControlWithCtx interface {
+	OutOfBandControl
+	SendControlWithCtx(ctx context.Context, frames []*protocol.Frame, callback OobResultFunction)
+}
+
 type ApiOutOfBandControl struct {
 	api *BringYourApi
 	// audit401Count counts 401 responses observed by SendControl since the

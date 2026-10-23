@@ -185,7 +185,7 @@ func TestStreamControlFrameCountsDoNotCountResetEntriesAsOpens(t *testing.T) {
 		},
 	}
 	buffer := newLifetimeTestBuffer(t, settings)
-	manager := &StreamManager{streamBuffer: buffer}
+	manager := &StreamManager{ctx: t.Context(), authorization: newStreamAuthorizationState(), streamBuffer: buffer}
 
 	destination := NewId()
 	open := func(streamId Id) *protocol.StreamOpen {

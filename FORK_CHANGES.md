@@ -3793,3 +3793,28 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 - `BUILD=jwt` and Pelican (`PELICAN=yes`) are unchanged: no self-update.
 
 **Impact**: a default container picks up a release within a day, or at its next restart. `AUTO_UPDATE=off` restores the old image-only behaviour.
+
+## 182. Protocol Synced With Upstream Connect
+
+**Purpose**: meso's `.proto` sources had drifted behind its own generated code (they still said `ip_family` was not ported), and meso could not decode frames the platform now sends: `StreamAuthorization`, `ResidentMigrate`, `NetworkSessionsChanged`, `NetworkPeersReset/Update`, `IpProviderDiagnostics`, `SubprotocolsQuery`.
+
+**Files Modified**: `protocol/*.proto`, `protocol/*.pb.go` (from urnetwork/connect main, 2026-10-22), `frame.go`. **Files Added**: `protocol/lag.*`, `protocol/subprotocol.*`, upstream's protocol wire tests (`message_codepoint_test.go`, `session_compatibility_test.go`, `extender_wire_test.go`, `client_key_domain_test.go`).
+
+**Change**: the generated protocol is upstream's, a strict superset of meso's (no meso-only fields or codepoints were dropped). `ToFrame`/`FromFrame` map the new frame types so they decode; each feature decides separately whether to act on one. Upstream's whole-work helper files in `protocol/` are not taken yet.
+
+**Impact**: no behaviour change on its own. Regenerating from the `.proto` files no longer silently drops fields.
+
+## 183. Stream Authorization Leases
+
+**Purpose**: meso already declared `stream_lease_version=1` (Auth frame and `X-UR-StreamLeaseVersion`), which tells the platform the client honors stream leases, but it ignored lease fields and `StreamAuthorization` frames. A revoked or expired relay stream stayed open.
+
+**Files Added**: `transfer_stream_authorization.go` (ported from upstream), `lifecycle.go` (upstream's admission gate), `transfer_stream_authorization_test.go`. **Files Modified**: `transfer_stream_manager.go`, `transfer_oob_control.go` (`OutOfBandControlWithCtx`), `stream_metrics_test.go`.
+
+**Change**:
+- A `StreamOpen` with an authorization generation opens only after a platform clock anchor (one OOB request per client), and closes at its lease deadline (at most 90s past the last grant, minus a 30s clock margin).
+- `StreamClose`, a retired `StreamAuthorization`, or omission from a `StreamReset` retires the generation; a delayed open, renewal or reset cannot revive it.
+- A `StreamOpen` without a generation (older platform) behaves exactly as before.
+- Lease state is bounded (4096 records, 128 pending per client) and closes with the client's context via `context.AfterFunc`, so idle clients hold no extra goroutine.
+- Not ported: upstream's provider stream policy and rejected-open retention, which depend on network peers.
+
+**Impact**: meso now does what it already told the platform it does.
