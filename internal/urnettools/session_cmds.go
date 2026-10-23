@@ -43,6 +43,7 @@ import (
 // bundle. Mirror of the legacy do_session collection list.
 var sessionFiles = []string{
 	".client_jwts.json",
+	".client_registrations.json",
 	"jwt",
 	"jwt_last_refresh",
 	".provider.key",

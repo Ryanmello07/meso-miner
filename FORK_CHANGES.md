@@ -3831,3 +3831,18 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 - Per-source records are bounded (4096 per exit) and the message is sent nonblocking over the ordinary return path.
 
 **Impact**: meso exits count as current to upstream clients instead of unknown. One small message per client per exit, plus one after each drop batch.
+
+## 185. Durable Provider Client Registration (register-client-v1)
+
+**Purpose**: a new provider client was created with `/network/auth-client`, which is not idempotent. When its reply was lost (a proxy dropped the connection after the server committed), the retry created a second client for the same proxy, leaking client slots against the network's limit on bulk nodes. Upstream (sdk and the sn miner) moved creation to `/network/register-client-v1`.
+
+**Files Added**: `provider/client_registration.go`, `provider/client_registration_test.go`. **Files Modified**: `provider/main.go` (`provideAuth`, client key seed reload, session allowlist), `internal/urnettools/session_cmds.go`, `provider/bt_operators_gate_test.go`.
+
+**Change**:
+- Creation of a slot's client goes through `register-client-v1`. The request (random registration id plus the SHA-256 of the slot's scope) is written durably to `.client_registrations.json` before the first send. Any retry, including after a crash or restart, replays those exact bytes and gets the identity the server already allocated.
+- The scope has upstream's shape: role `provider-v1`, the exact endpoint, the public key of `.provider.key` (created and fsynced first on a fresh install, under a lock so every slot shares one key), and the slot: `direct` or `proxy-sha256:` plus the SHA-256 of meso's proxy identity key (address plus user, so several accounts at one address stay distinct).
+- The reply is checked against the retained request, the network principal and the stored client/device binding before it is used.
+- No fallback to `auth-client`: a server without the route (404/405/501) is reported as unsupported. A 401 keeps the existing handling (re-typed only for `--all-operators` children). Refusals are not stored, so the next attempt replays and a lifted refusal (a client limit) clears itself.
+- Unchanged: reuse and renewal of stored client JWTs (renewal still uses `auth-client` with the stored client id).
+
+**Impact**: retries never allocate a second client for a slot. Behaviour change: the server keeps a slot's binding after its client is deleted, so a slot whose client was revoked (for example, removed from the dashboard) stays refused instead of getting a fresh client. That slot comes back only with a new `.provider.key`, which gives every slot of that state dir a new client.

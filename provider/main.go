@@ -707,14 +707,15 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 // sessionFiles. Only these files are promoted from staging to the live
 // identity directory.
 var sessionFilesAllowlist = map[string]bool{
-	".client_jwts.json": true,
-	"jwt":               true,
-	"jwt_last_refresh":  true,
-	".provider.key":     true,
-	".provider.cert":    true,
-	"proxy":             true,
-	"proxy_url.json":    true,
-	"proxy.state":       true,
+	".client_jwts.json":          true,
+	".client_registrations.json": true,
+	"jwt":                        true,
+	"jwt_last_refresh":           true,
+	".provider.key":              true,
+	".provider.cert":             true,
+	"proxy":                      true,
+	"proxy_url.json":             true,
+	"proxy.state":                true,
 }
 
 func isSessionFile(name string) bool {
@@ -3935,6 +3936,15 @@ func provide(opts docopt.Opts) {
 
 		instanceId := connect.NewId()
 
+		// A fresh install's first registration created the seed after the
+		// settings above were read. The client must use that registered key,
+		// or it would generate another and save it over the registered one.
+		if len(clientSettings.ClientKeySeed) == 0 {
+			if seed, err := readProviderClientKeySeed(); err == nil && 0 < len(seed) {
+				clientSettings.ClientKeySeed = seed
+			}
+		}
+
 		clientOob := connect.NewApiOutOfBandControl(proxyCtx, clientStrategy, byClientJwt, apiUrl)
 		connectClient := connect.NewClient(proxyCtx, clientId, clientOob, clientSettings)
 		defer func() {
@@ -5464,87 +5474,28 @@ func provideAuth(ctx context.Context, clientStrategy *connect.ClientStrategy, ap
 		}
 	}
 
-	api := connect.NewBringYourApi(ctx, clientStrategy, apiUrl)
-
-	api.SetByJwt(byJwt)
-
-	authClientCallback, authClientChannel := connect.NewBlockingApiCallback[*connect.AuthNetworkClientResult](ctx)
-
-	// Final Description: "Identity [Version]" — computed by the shared helper
-	// so mint (here) and in-process renewal (runProxyJWTWatcher) always send
-	// the same string; the server UPDATEs the row's description on renewal.
-
-	authClientArgs := &connect.AuthNetworkClientArgs{
-		Description:   description,
-		DeviceSpec:    "",
-		ProvideIntent: provideIntentEnabled(),
-	}
-
-	api.AuthNetworkClient(authClientArgs, authClientCallback)
-
-	var authClientResult connect.ApiCallbackResult[*connect.AuthNetworkClientResult]
-	select {
-	case <-ctx.Done():
-		tlog("[auth] exiting: signal received during auth-client request\n")
-		returnErr = ctx.Err()
-		return
-	case authClientResult = <-authClientChannel:
-	}
-
-	if authClientResult.Error != nil {
+	// Create (or recover) this slot's client through the durable versioned
+	// route. A lost reply replays the same retained request, so a retry never
+	// allocates a second client for the slot (client_registration.go).
+	byClientJwt, clientId, err = registerProviderClient(ctx, clientStrategy, apiUrl, byJwt, identityKey, description)
+	if err != nil {
+		if ctx.Err() != nil {
+			tlog("[auth] exiting: signal received during client registration\n")
+			returnErr = ctx.Err()
+			return
+		}
 		// Only an operator child of provide --all-operators re-types a 401:
 		// its supervisor sets the token aside and signs in again. A plain
 		// node keeps the original error text, which its scripts match on.
-		returnErr = authClientResult.Error
+		// A refusal is not ErrTokenInvalid either: that sentinel kills the
+		// whole process, and a refusal retries via the normal backoff.
+		returnErr = err
 		if operatorChild, _ := opts.Bool("--operator-child"); operatorChild {
 			returnErr = networkCredentialRejection(returnErr)
 		}
 		return
 	}
-	if authClientResult.Result == nil {
-		returnErr = fmt.Errorf("auth response missing result")
-		return
-	}
-	if authClientResult.Result.Error != nil {
-		if authClientResult.Result.Error.ClientLimitExceeded {
-			returnErr = fmt.Errorf("client limit exceeded: %s", authClientResult.Result.Error.Message)
-			return
-		}
-		// Do NOT wrap in ErrTokenInvalid: that sentinel triggers shmLogFatal(78)
-		// which kills the entire provider process. Auth-client rejections (bad
-		// device spec, unrecognized description, temporary server error) should
-		// retry via the normal backoff path, not crash all 120 nodes.
-		returnErr = fmt.Errorf("auth-client rejected: %s", authClientResult.Result.Error.Message)
-		return
-	}
-
-	byClientJwt = authClientResult.Result.ByClientJwt
-
-	// parse the clientId
-	parser := gojwt.NewParser()
-	token, _, err := parser.ParseUnverified(byClientJwt, gojwt.MapClaims{})
-	if err != nil {
-		returnErr = fmt.Errorf("failed to parse client JWT from API response: %w", err)
-		return
-	}
-
-	claims, ok := token.Claims.(gojwt.MapClaims)
-	if !ok {
-		returnErr = fmt.Errorf("unexpected claims type in client JWT")
-		return
-	}
-
-	clientIdStr, ok := claims["client_id"].(string)
-	if !ok {
-		returnErr = fmt.Errorf("client_id claim missing or not a string in client JWT")
-		return
-	}
-
-	clientId, err = connect.ParseId(clientIdStr)
-	if err != nil {
-		returnErr = fmt.Errorf("invalid client_id in JWT claims: %w", err)
-		return
-	}
+	clientIdStr := clientId.String()
 
 	// Always persist client JWTs so the store is ready the moment hot-restart
 	// is enabled — no warmup or re-auth cycle needed. The read/reuse path

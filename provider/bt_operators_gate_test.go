@@ -66,12 +66,12 @@ func TestProvideAuthTurnsAReal401IntoAQuarantinedRejection(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(jwtPath), 0700); err != nil {
 		t.Fatal(err)
 	}
-	token := createFakeJWT(time.Now().Add(24 * time.Hour).Unix())
+	token := registrationTestNetworkJWT(time.Now().Add(24 * time.Hour))
 	if err := os.WriteFile(jwtPath, []byte(token), 0600); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/network/auth-client" {
+		if request.URL.Path != "/network/register-client-v1" {
 			http.NotFound(writer, request)
 			return
 		}
@@ -113,12 +113,12 @@ func TestPlainProvideKeepsItsOriginal401Error(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(jwtPath), 0700); err != nil {
 		t.Fatal(err)
 	}
-	token := createFakeJWT(time.Now().Add(24 * time.Hour).Unix())
+	token := registrationTestNetworkJWT(time.Now().Add(24 * time.Hour))
 	if err := os.WriteFile(jwtPath, []byte(token), 0600); err != nil {
 		t.Fatal(err)
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/network/auth-client" {
+		if request.URL.Path != "/network/register-client-v1" {
 			http.NotFound(writer, request)
 			return
 		}
