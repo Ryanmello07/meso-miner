@@ -1232,6 +1232,9 @@ func (self *ContractManager) CreateContract(contractKey ContractKey, contractSeq
 	defer self.closeContractQueue(contractKey)
 
 	streamVersion := uint32(DefaultStreamVersion)
+	// which per-peer sequence the contract is for; the platform uses it in
+	// contract lifecycle diagnostics (upstream f8b1b60)
+	senderRole := contractKey.EncryptionRole.toProtobuf()
 
 	createContract := &protocol.CreateContract{
 		DestinationId:     contractKey.Destination.DestinationId.Bytes(),
@@ -1240,6 +1243,7 @@ func (self *ContractManager) CreateContract(contractKey ContractKey, contractSeq
 		Companion:         contractKey.CompanionContract,
 		ForceStream:       &contractKey.ForceStream,
 		StreamVersion:     &streamVersion,
+		SenderRole:        &senderRole,
 	}
 	frame, err := ToFrame(createContract, self.settings.ProtocolVersion)
 	if err != nil {

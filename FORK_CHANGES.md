@@ -3933,3 +3933,13 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 **Change**: `nextShardIndex` takes the shard from the runtime's per-thread random generator (`math/rand/v2`), masked to the shard count, instead of a round-robin counter. Gets still spread evenly; a buffer still returns to the shard it came from.
 
 **Impact** (A/B on the same host, 3 runs each, median): CPU per MB down 4% at 16 pairs and 5% at 64 pairs, throughput up 4% to 5%, peak heap flat. Data: `bench/ab7_before.jsonl`, `bench/ab7_after.jsonl` in the project notes.
+
+## 193. Contract Requests Name Their Sender Role
+
+**Purpose**: parity gap "stored contract principal/roles/expiry" from round 1. On a closer read, upstream connect never reads the stored contract's roles or principal (meso already parses its expiry). The one provider-side piece missing was `CreateContract.sender_role`, which upstream sends since 2026-09-04 (`f8b1b60`) and the platform uses in contract lifecycle diagnostics. Without it, meso's requests look like a sender that predates the field.
+
+**Files Modified**: `transfer_contract_manager.go`. **Files Added**: `transfer_contract_sender_role_test.go` (from upstream).
+
+**Change**: `CreateContract` sets `SenderRole` from the contract key's encryption role (client or server).
+
+**Impact**: none on the data path; the platform can tell meso's contract lanes apart like upstream's.
