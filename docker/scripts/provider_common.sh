@@ -986,6 +986,10 @@ func_bootstrap() {
         # image never runs an out-of-date provider.
         if [ -n "$(func_auto_update_interval)" ]; then
             func_check_update
+            # No provider is running yet, so there is nothing to restart. A
+            # leftover marker would make the supervisor treat a later clean
+            # exit (a hot swap) as an update and start a second provider.
+            rm -f "$HOME/.urnetwork/update-pending"
         fi
         # Pass host's actual hostname (if provided) so provider reports correctly on dashboard
         export HOST_HOSTNAME="${HOST_HOSTNAME:-}"
@@ -1003,6 +1007,8 @@ func_bootstrap() {
         func_ip_checker
         func_start_vnstat
         func_check_update
+        # nothing runs yet, so there is nothing to restart (see stable)
+        rm -f "$HOME/.urnetwork/update-pending"
         # choose_network runs after func_check_update: on a fresh nightly
         # container the urnetwork_${A_SYS_ARCH}_${PROVIDER_FLAVOR} binary doesn't exist
         # until the update check downloads it.

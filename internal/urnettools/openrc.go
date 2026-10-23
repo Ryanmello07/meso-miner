@@ -580,8 +580,10 @@ func openrcRouteAutoUpdate(interval string, ensure bool, rest []string, dryRun b
 	if err := openrcSetAutoUpdate(interval, openrcUpdateToolPath(gate)); err != nil {
 		return true, err
 	}
-	if !ensure && gate.StateDir != "" {
-		if err := recordAutoUpdateChoice(gate, interval); err != nil {
+	if !ensure {
+		if gate.StateDir == "" {
+			fmt.Fprintf(os.Stderr, "auto-update: warning: schedule set, but no provider state dir was found to record the choice; a reinstall may reset it to %s (start the provider and run this again to keep it)\n", defaultAutoUpdateInterval)
+		} else if err := recordAutoUpdateChoice(gate, interval); err != nil {
 			fmt.Fprintf(os.Stderr, "auto-update: warning: schedule set, but the choice could not be recorded (%v)\n", err)
 		}
 	}
@@ -788,11 +790,19 @@ func openrcUpdateCronScript(toolPath string) string {
 		"done\n" +
 		// Spread the fleet: busybox crond runs every box's periodic queue at
 		// the same minute, so wait a random 0-30 minutes before the release
-		// check. URNET_UPDATE_SPREAD (seconds) overrides it; 0 disables the
-		// wait.
+		// check. The wait runs detached, so it does not hold up the other
+		// jobs in the same periodic queue (run-parts runs them in turn); its
+		// output goes to syslog. URNET_UPDATE_SPREAD (seconds) overrides it;
+		// 0 disables the wait and runs the update in the foreground.
 		"spread=${URNET_UPDATE_SPREAD:-1800}\n" +
 		"if [ \"$spread\" -gt 0 ] 2>/dev/null; then\n" +
-		"\tsleep $(( $(od -An -N2 -tu2 /dev/urandom 2>/dev/null || echo 0) % spread ))\n" +
+		"\twait_s=$(( $(od -An -N2 -tu2 /dev/urandom 2>/dev/null || echo 0) % spread ))\n" +
+		"\tif command -v logger >/dev/null 2>&1; then\n" +
+		"\t\t( sleep \"$wait_s\"; \"$tool\" update -f 2>&1 | logger -t urnetwork-update ) </dev/null >/dev/null 2>&1 &\n" +
+		"\telse\n" +
+		"\t\t( sleep \"$wait_s\"; \"$tool\" update -f ) </dev/null >/dev/null 2>&1 &\n" +
+		"\tfi\n" +
+		"\texit 0\n" +
 		"fi\n" +
 		"exec \"$tool\" update -f\n"
 }

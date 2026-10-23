@@ -129,6 +129,12 @@ func writeUpdateAgent(plist, calendarName string) error {
 </dict>
 </plist>
 `, exe, updateAgentTrigger(trigger, calendar))
+	// launchd keeps the schedule it loaded: bootstrapping a label that is
+	// already loaded fails and leaves the old schedule running. Unload it
+	// first so a migration or an interval change takes effect now.
+	if _, err := os.Stat(plist); err == nil {
+		launchctlUnload(plist)
+	}
 	if err := os.WriteFile(plist, []byte(content), 0o644); err != nil {
 		return err
 	}
@@ -186,12 +192,19 @@ func launchctlBootstrap(plist string) error {
 // launchctlBootout removes an agent, tolerating "not loaded" (a clean
 // no-op, like deleteTaskIfExists on Windows).
 func launchctlBootout(plist string) error {
-	uid := os.Getuid()
-	_ = exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%d", uid), plist).Run()
-	_ = exec.Command("launchctl", "bootout", fmt.Sprintf("user/%d", uid), plist).Run()
+	launchctlUnload(plist)
 	_ = exec.Command("launchctl", "unload", "-w", plist).Run()
 	_ = os.Remove(plist)
 	return nil
+}
+
+// launchctlUnload boots an agent out of every domain it may be loaded in,
+// keeping its plist and its enabled state (no `unload -w`, which would mark
+// it disabled before the reload). Errors (not loaded) are expected.
+func launchctlUnload(plist string) {
+	uid := os.Getuid()
+	_ = exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%d", uid), plist).Run()
+	_ = exec.Command("launchctl", "bootout", fmt.Sprintf("user/%d", uid), plist).Run()
 }
 
 // cleanupLifecycle removes the LaunchAgents on uninstall.

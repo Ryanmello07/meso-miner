@@ -229,7 +229,12 @@ func (self *RemoteUserNatProvider) markProviderDiagnosticsPublished(sourceId Id,
 
 // publishProviderDiagnostics is nonblocking. Identity publishes once per
 // source; counters republish only after a block changes them. It rides the
-// provider's ordinary return path (companion contract).
+// provider's ordinary return path: the reversed source path, stream id kept,
+// over a companion contract, like the packet returns in Receive.
+//
+// Records are keyed by source client id and bounded; past the bound an
+// evicted source is offered identity again from sequence 1 (upstream bounds
+// its records the same way).
 func (self *RemoteUserNatProvider) publishProviderDiagnostics(source TransferPath) {
 	message := self.providerDiagnosticsMessage(source.SourceId)
 	if message == nil {

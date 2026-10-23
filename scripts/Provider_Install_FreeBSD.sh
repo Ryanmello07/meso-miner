@@ -523,9 +523,17 @@ RCSCRIPT
     # an interval or "off" the operator recorded with `urnet-tools
     # auto-update`. Only the Go tool manages the schedule; the shell wrapper
     # fallback cannot.
+    # The schedule is a crontab entry of whoever runs `ensure`, so under sudo
+    # it runs as the service user: the update must run as the account that
+    # owns the install, not as root.
     if [ "$(head -c 2 "$install_path/bin/urnet-tools" 2>/dev/null)" != "#!" ]; then
-        "$install_path/bin/urnet-tools" auto-update ensure || \
-            pr_warn "could not turn on auto-update; run: urnet-tools auto-update on"
+        if [ "$(id -u)" = "0" ] && [ "$service_user" != "root" ]; then
+            su -m "$service_user" -c "env HOME='$service_home' '$install_path/bin/urnet-tools' auto-update ensure" || \
+                pr_warn "could not turn on auto-update; run as $service_user: urnet-tools auto-update on"
+        else
+            "$install_path/bin/urnet-tools" auto-update ensure || \
+                pr_warn "could not turn on auto-update; run: urnet-tools auto-update on"
+        fi
     else
         pr_warn "auto-update needs the urnet-tools binary; reinstall to get it, then run: urnet-tools auto-update on"
     fi

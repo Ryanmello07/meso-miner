@@ -135,7 +135,7 @@ func writeTimerCalendar(timer string, p Provider, calendar string, userScope boo
 		// template. Write to a temp file and rename so a crash mid-write
 		// never leaves a half-written unit (the shared progress.md
 		// atomicity rule applied to unit files too).
-		tmpl := fmt.Sprintf("[Unit]\nDescription=Run URnetwork Update\n\n[Timer]\nOnCalendar=%s\nRandomizedDelaySec=%s\nPersistent=true\nUnit=%s.service\n\n[Install]\nWantedBy=default.target\n", calendar, timerRandomizedDelay(calendar), strings.TrimSuffix(timer, "-update.timer"))
+		tmpl := fmt.Sprintf("[Unit]\nDescription=Run URnetwork Update\n\n[Timer]\nOnCalendar=%s\nRandomizedDelaySec=%s\nPersistent=true\nUnit=%s.service\n\n[Install]\nWantedBy=default.target\n", calendar, timerRandomizedDelay(calendar), strings.TrimSuffix(timer, ".timer"))
 		if err := writeTimerUnitAtomic(path, tmpl); err != nil {
 			return fmt.Errorf("create timer %s: %w", timer, err)
 		}
@@ -211,8 +211,20 @@ func autoUpdateScheduleExists(p Provider) bool {
 	} else {
 		path = "/etc/systemd/system/" + timer
 	}
-	_, err := os.Stat(path)
-	return err == nil
+	return timerEnabled(path)
+}
+
+// timerEnabled reports whether a timer unit file is installed AND enabled.
+// The old shell installer's `auto-update off` ran `systemctl disable --now`
+// and left the file in place, so the file alone does not mean the operator
+// wants auto-update; an enabled unit has a symlink in a *.wants directory
+// beside it, which `disable` removes. Reading the links needs no user bus.
+func timerEnabled(path string) bool {
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	links, _ := filepath.Glob(filepath.Join(filepath.Dir(path), "*.wants", filepath.Base(path)))
+	return 0 < len(links)
 }
 
 // enableTimer runs daemon-reload + enable --now for a timer unit, choosing

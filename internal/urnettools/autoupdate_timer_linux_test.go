@@ -3,6 +3,8 @@
 package urnettools
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -29,5 +31,31 @@ func TestRewriteTimerCalendarSpreadsTheFleet(t *testing.T) {
 
 	if _, ok := rewriteTimerCalendar("[Timer]\nPersistent=true\n", "daily"); ok {
 		t.Fatal("a unit with no OnCalendar must be reported")
+	}
+}
+
+// A timer the old installer disabled (`auto-update off` left the file) is not
+// a schedule to migrate; only an enabled one is.
+func TestTimerEnabledNeedsWantsLink(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "urnetwork-update.timer")
+	if timerEnabled(path) {
+		t.Fatal("a missing timer counted as enabled")
+	}
+	if err := os.WriteFile(path, []byte("[Timer]\nOnCalendar=weekly\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if timerEnabled(path) {
+		t.Fatal("a disabled timer (file, no wants link) counted as enabled")
+	}
+	wants := filepath.Join(dir, "default.target.wants")
+	if err := os.MkdirAll(wants, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(path, filepath.Join(wants, "urnetwork-update.timer")); err != nil {
+		t.Fatal(err)
+	}
+	if !timerEnabled(path) {
+		t.Fatal("an enabled timer was not seen")
 	}
 }

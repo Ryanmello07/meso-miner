@@ -309,3 +309,37 @@ func TestStreamAuthorizationClosesWithContext(t *testing.T) {
 		t.Fatal("closed state admitted a grant")
 	}
 }
+
+// A stream renewed for longer than the 8 hour retention keeps its lease
+// record, so it still closes when renewals stop.
+func TestStreamAuthorizationLongRenewedStreamKeepsItsLease(t *testing.T) {
+	client := newAuthorizationTestClient(t, NewNoContractClientOob())
+	manager := client.streamManager
+	now := time.Now()
+	anchorClock(manager, &now)
+	state := manager.authorization
+
+	sid, generation, peer := NewId(), NewId(), NewId()
+	open := leasedOpen(sid, generation, peer)
+	receiveControl(manager, open)
+	start := now
+	// renew every 30 seconds for 9 hours of platform time
+	for elapsed := 30 * time.Second; elapsed <= 9*time.Hour; elapsed += 30 * time.Second {
+		state.Lock()
+		now = start.Add(elapsed)
+		state.Unlock()
+		open.AuthorizationDeadlineUnixMillis = testServerClock + elapsed.Milliseconds() + 90000
+		receiveControl(manager, open)
+	}
+	// another stream's open runs the prune
+	receiveControl(manager, leasedOpen(NewId(), NewId(), peer))
+	state.Lock()
+	record := state.records[sid]
+	state.Unlock()
+	if record == nil || record.retired {
+		t.Fatal("a live, renewed lease was pruned")
+	}
+	if !manager.IsStreamOpen(sid) {
+		t.Fatal("renewed stream closed early")
+	}
+}

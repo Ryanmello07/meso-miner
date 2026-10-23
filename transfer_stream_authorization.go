@@ -104,7 +104,10 @@ func (self *StreamManager) authorizeStreamOpen(open *protocol.StreamOpen, run fu
 	}
 	now := state.now()
 	for key, record := range state.records {
-		if !now.Before(record.retainUntil) {
+		// A live lease is never pruned, however long it has been renewed
+		// (meso fix: upstream prunes on retainUntil alone, which drops lease
+		// enforcement for a stream renewed for more than 8 hours).
+		if !now.Before(record.retainUntil) && (record.retired || !now.Before(record.deadline)) {
 			if record.timer != nil {
 				record.timer.Stop()
 			}
@@ -187,6 +190,11 @@ func (self *StreamManager) authorizeStreamOpen(open *protocol.StreamOpen, run fu
 	}
 	if deadline.After(previous.deadline) {
 		previous.deadline = deadline
+		// keep the retirement fence for a full binding lifetime past the
+		// latest deadline
+		if retain := deadline.Add(8*time.Hour + StreamAuthorizationClockMargin); retain.After(previous.retainUntil) {
+			previous.retainUntil = retain
+		}
 	}
 	if previous.timer != nil {
 		previous.timer.Stop()

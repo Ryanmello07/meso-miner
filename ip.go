@@ -3647,7 +3647,7 @@ func (self *RemoteUserNatProvider) ClientReceive(source TransferPath, frames []*
 	served := false
 	defer func() {
 		if served {
-			self.publishProviderDiagnostics(source.LocalMask())
+			self.publishProviderDiagnostics(source)
 		}
 	}()
 	for _, frame := range frames {
