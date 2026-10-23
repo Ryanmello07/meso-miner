@@ -3958,3 +3958,13 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 - Not ported: upstream's per-owner flow cap, idle reaping and FIN teardown of SMTP flow state, which depend on its NAT memory budget and flow retirement work.
 
 **Impact**: plaintext SMTP behind a fake TLS header is reset. Only ports 465/587 are affected; no change on the bulk data path.
+
+## 195. `provider fleet init` Builds a Fleet Manifest
+
+**Purpose**: parity with sn (`fcf2e8d`, 2026-10-20). `provider fleet manifest` only re-prints an existing manifest, and the manifest parser accepts only compact JSON with members sorted by client id, so an operator setting up a fleet had no way to produce one except by hand.
+
+**Files Modified**: `provider/fleet.go`, `provider/main.go`. **Files Added**: `provider/fleet_init.go`, `provider/fleet_init_test.go` (from sn, package renamed).
+
+**Change**: `provider fleet init --chain_id --coordinator --hotkey [--netuid=25] [--fleet_id] [--generation=1] [--client_seed_file --client_id] [--member=<client_id>:<client_key>]...` prints the canonical manifest, its commitment hash and member count, exactly as `fleet manifest` does. The hotkey may be 0x hex or ss58; the fleet id defaults to 32 random bytes. It reads only local files, sends nothing, and never prints a seed. Usage placeholders follow meso's existing `--client_id=<hex16>` / `--client_seed_file=<file>` options.
+
+**Impact**: fleet setup no longer needs hand-written JSON. Round trip checked: `fleet init` output fed back to `fleet manifest` gives the same commitment hash.

@@ -7595,6 +7595,8 @@ Usage:
         [-v...]
     provider unbind-head --manifest=<file> --effective_epoch=<n> [--client_id=<hex16>] [--client_seed_file=<file>] [--rpc=<rpc_url>]... [--key_file=<key_file>] [--dry-run]
         [-v...]
+    provider fleet init --chain_id=<n> --coordinator=<0xhex> --hotkey=<hotkey> [--netuid=<n>] [--fleet_id=<0xhex>] [--generation=<n>] [--client_seed_file=<file>] [--client_id=<hex16>] [--member=<client_id>:<client_key>]...
+        [-v...]
     provider fleet manifest --manifest=<path>
         [-v...]
     provider fleet register --manifest=<path> --hotkey_seed_file=<path> --coldkey_seed_file=<path> --substrate=<ws_url>...
@@ -7720,6 +7722,18 @@ Options:
     --manifest=<file>                Fleet manifest JSON (schema/chain_id/netuid/coordinator/fleet_id/
                                      hotkey/generation/members). Required by bind-head and unbind-head;
                                      the manifest is the single source for the fleet identity.
+                                     fleet init prints one; save it as the --manifest file.
+    --chain_id=<n>                   fleet init: EVM chain id of the fleet coordinator.
+    --coordinator=<0xhex>            fleet init: 20-byte fleet coordinator contract address.
+    --hotkey=<hotkey>                fleet init: fleet hotkey public key as 0x 32-byte hex or ss58.
+    --netuid=<n>                     fleet init: subnet netuid; default 25.
+    --fleet_id=<0xhex>               fleet init: 32-byte fleet id; default 32 random bytes.
+    --generation=<n>                 fleet init: manifest generation; default 1.
+    --member=<client_id>:<client_key>  fleet init: one member, the client id as 16-byte hex or uuid and
+                                     the client key as a 0x 32-byte Ed25519 public key; repeatable. Also
+                                     with --client_seed_file and --client_id it adds this device.
+                                     fleet init reads only local files, sends nothing and prints the
+                                     manifest as fleet manifest does.
     --hotkey_seed_file=<file>        sr25519 hotkey seed file (raw or hex 32 bytes). Required by
                                      bind-head: the fleet binding is dual-signed, and this key must
                                      match the manifest hotkey. With provide --all-operators and --auto-register
