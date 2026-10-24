@@ -621,7 +621,7 @@ RCSCRIPT
         case "$_shell" in
             */zsh)  shell_rc="$service_home/.zshrc" ;;
             */bash) shell_rc="$service_home/.bash_profile" ;;
-            */tcsh) shell_rc="$service_home/.cshrc" ;;
+            */tcsh|*/csh) shell_rc="$service_home/.cshrc" ;;
         esac
         # The service user owns this directory, so a symlink planted at the rc
         # file's name sent root's append (and chown) into a file of their
@@ -629,36 +629,90 @@ RCSCRIPT
         # so warn and carry on instead of failing the whole install.
         if [ -L "$shell_rc" ]; then
             pr_warn "Refusing to edit %s: it is a symlink. Add %s/bin to PATH by hand" "$shell_rc" "$install_path"
-        elif ! grep -qsF "$install_path/bin" "$shell_rc" 2>/dev/null; then
-            # Same rename-not-follow rule as the version file above: build the
-            # new content beside the target, chown only the temp file this
-            # process just created (never a name the service user can plant a
-            # link at), then rename it over the target. Rename replaces the
-            # directory entry instead of following it.
-            if rc_tmp="$(mktemp "$shell_rc.new.XXXXXX" 2>/dev/null)"; then
-                if [ -f "$shell_rc" ] && ! cat "$shell_rc" > "$rc_tmp" 2>/dev/null; then
-                    rm -f "$rc_tmp"
-                    pr_warn "Could not copy %s; leaving it unchanged" "$shell_rc"
-                else
-                    case "$_shell" in
-                        */tcsh) printf '%s\n' "setenv PATH $install_path/bin:\$PATH" >> "$rc_tmp" ;;
-                        *)      printf '%s\n' "export PATH=\"$install_path/bin:\$PATH\"" >> "$rc_tmp" ;;
-                    esac
-                    # mktemp files are 0600; an rc file the service user cannot
-                    # read is worse than no PATH hint at all.
-                    rc_mode="$(stat -c '%a' "$shell_rc" 2>/dev/null || stat -f '%Lp' "$shell_rc" 2>/dev/null)"
-                    chmod "${rc_mode:-644}" "$rc_tmp" 2>/dev/null || true
-                    chown -h "$service_user" "$rc_tmp" 2>/dev/null || true
-                    if mv -f "$rc_tmp" "$shell_rc"; then
-                        pr_info "Added %s to PATH in %s" "$install_path/bin" "$shell_rc"
-                    else
-                        rm -f "$rc_tmp"
-                        pr_warn "Failed to update %s" "$shell_rc"
-                    fi
-                fi
+        else
+            # Everything below runs AS THE SERVICE USER, and WHICH command runs
+            # it is chosen BEFORE the heredoc. Root must not reopen a path
+            # inside a directory that user owns (the name can be swapped for a
+            # link after the check above), so root hands the whole edit over
+            # with su, which needs no password. When the installer already runs
+            # AS that user, su would prompt for a password and hang an
+            # unattended install, so the same script goes straight to /bin/sh.
+            # Any other caller is warned and the edit skipped: the provider is
+            # installed by now, so a missing PATH hint must never fail it.
+            #
+            # The script goes in on stdin and is run by /bin/sh explicitly.
+            # `su -c` would otherwise hand it to the login shell, and a tcsh
+            # service user cannot parse POSIX sh. The login name must come
+            # BEFORE -c: FreeBSD reads an earlier -c as a login class, not as
+            # the command (its -m keeps the environment, so these assignments
+            # reach the script).
+            case "$_shell" in
+                */tcsh|*/csh) rc_line="setenv PATH \"$install_path/bin:\$PATH\"" ;;
+                *)      rc_line="export PATH=\"$install_path/bin:\$PATH\"" ;;
+            esac
+            # The heredoc hangs off the whole if, so the script body below is
+            # written once and whichever branch runs receives it on stdin.
+            if [ "$(id -u)" = 0 ]; then
+                SHELLRC_RC="$shell_rc" SHELLRC_LINE="$rc_line" SHELLRC_BIN="$install_path/bin" \
+                    su -m "$service_user" -c '/bin/sh -s'
+                shellrc_status=$?
+            elif [ "$(id -u)" = "$(id -u "$service_user" 2>/dev/null)" ]; then
+                SHELLRC_RC="$shell_rc" SHELLRC_LINE="$rc_line" SHELLRC_BIN="$install_path/bin" \
+                    /bin/sh -s
+                shellrc_status=$?
             else
-                pr_warn "Could not create a temp file beside %s; add %s/bin to PATH by hand" "$shell_rc" "$install_path"
-            fi
+                pr_warn "Not editing %s: run as root or as %s, or add %s/bin to PATH by hand" \
+                    "$shell_rc" "$service_user" "$install_path"
+                shellrc_status=11
+            fi <<'SHELLRC_END'
+# Runs as the service user, who owns both the rc file and its directory.
+# Exit: 0 wrote it, 10 already active, anything else failed and left the rc
+# byte-for-byte alone (the temp is removed on every failure path).
+set -u
+rc="${SHELLRC_RC:-}"
+line="${SHELLRC_LINE:-}"
+bin="${SHELLRC_BIN:-}"
+[ -n "$rc" ] && [ -n "$line" ] && [ -n "$bin" ] || exit 7
+# mv would move *into* a directory and cat would block forever on a FIFO.
+if [ -e "$rc" ] || [ -L "$rc" ]; then
+    [ -f "$rc" ] || exit 8
+fi
+# Only an ACTIVE entry counts: a line whose first non-space character is not
+# '#'. A commented-out export used to suppress the append for good.
+if [ -f "$rc" ]; then
+    if awk -v want="$bin" '
+        { line = $0; sub(/^[[:space:]]+/, "", line) }
+        line !~ /^#/ && index(line, want) > 0 { found = 1; exit }
+        END { exit(found ? 0 : 1) }
+    ' "$rc"; then
+        exit 10
+    fi
+fi
+# mktemp is O_EXCL and runs as the owner: no name can be planted ahead of it.
+tmp="$(mktemp "$rc.new.XXXXXX")" || exit 3
+if [ -f "$rc" ] && ! cat "$rc" > "$tmp"; then
+    rm -f "$tmp"
+    exit 4
+fi
+# Without this the entry is glued onto the last line; when the file already
+# ends with a newline, adding another would leave a blank line.
+last="$(tail -c 1 "$tmp" 2>/dev/null | wc -l | tr -d ' ')"
+if [ -s "$tmp" ] && [ "${last:-0}" -eq 0 ]; then
+    ( printf '\n' ) >> "$tmp" || { rm -f "$tmp"; exit 5; }
+fi
+# Subshell so a failed write cannot take this script down before the cleanup;
+# the status is checked, and a half-written temp is never renamed over the rc.
+( printf '%s\n' "$line" ) >> "$tmp" || { rm -f "$tmp"; exit 5; }
+mode="$(stat -c '%a' "$rc" 2>/dev/null || stat -f '%Lp' "$rc" 2>/dev/null)"
+chmod "${mode:-644}" "$tmp" 2>/dev/null || { rm -f "$tmp"; exit 6; }
+mv -f "$tmp" "$rc" || { rm -f "$tmp"; exit 6; }
+SHELLRC_END
+            case "$shellrc_status" in
+                0)  pr_info "Added %s to PATH in %s" "$install_path/bin" "$shell_rc" ;;
+                10) : ;;
+                11) : ;;  # the skip above already said why
+                *)  pr_warn "Could not update %s; add %s/bin to PATH by hand" "$shell_rc" "$install_path" ;;
+            esac
         fi
     fi
 
