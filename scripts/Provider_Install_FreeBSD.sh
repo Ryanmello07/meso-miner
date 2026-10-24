@@ -603,13 +603,42 @@ RCSCRIPT
             */bash) shell_rc="$service_home/.bash_profile" ;;
             */tcsh) shell_rc="$service_home/.cshrc" ;;
         esac
-        if ! grep -qsF "$install_path/bin" "$shell_rc" 2>/dev/null; then
-            case "$_shell" in
-                */tcsh) printf '%s\n' "setenv PATH $install_path/bin:\$PATH" >> "$shell_rc" ;;
-                *)      printf '%s\n' "export PATH=\"$install_path/bin:\$PATH\"" >> "$shell_rc" ;;
-            esac
-            chown "$service_user" "$shell_rc" 2>/dev/null || true
-            pr_info "Added %s to PATH in %s" "$install_path/bin" "$shell_rc"
+        # The service user owns this directory, so a symlink planted at the rc
+        # file's name sent root's append (and chown) into a file of their
+        # choosing. Refuse a link outright; the provider is installed by now,
+        # so warn and carry on instead of failing the whole install.
+        if [ -L "$shell_rc" ]; then
+            pr_warn "Refusing to edit %s: it is a symlink. Add %s/bin to PATH by hand" "$shell_rc" "$install_path"
+        elif ! grep -qsF "$install_path/bin" "$shell_rc" 2>/dev/null; then
+            # Same rename-not-follow rule as the version file above: build the
+            # new content beside the target, chown only the temp file this
+            # process just created (never a name the service user can plant a
+            # link at), then rename it over the target. Rename replaces the
+            # directory entry instead of following it.
+            if rc_tmp="$(mktemp "$shell_rc.new.XXXXXX" 2>/dev/null)"; then
+                if [ -f "$shell_rc" ] && ! cat "$shell_rc" > "$rc_tmp" 2>/dev/null; then
+                    rm -f "$rc_tmp"
+                    pr_warn "Could not copy %s; leaving it unchanged" "$shell_rc"
+                else
+                    case "$_shell" in
+                        */tcsh) printf '%s\n' "setenv PATH $install_path/bin:\$PATH" >> "$rc_tmp" ;;
+                        *)      printf '%s\n' "export PATH=\"$install_path/bin:\$PATH\"" >> "$rc_tmp" ;;
+                    esac
+                    # mktemp files are 0600; an rc file the service user cannot
+                    # read is worse than no PATH hint at all.
+                    rc_mode="$(stat -c '%a' "$shell_rc" 2>/dev/null || stat -f '%Lp' "$shell_rc" 2>/dev/null)"
+                    chmod "${rc_mode:-644}" "$rc_tmp" 2>/dev/null || true
+                    chown -h "$service_user" "$rc_tmp" 2>/dev/null || true
+                    if mv -f "$rc_tmp" "$shell_rc"; then
+                        pr_info "Added %s to PATH in %s" "$install_path/bin" "$shell_rc"
+                    else
+                        rm -f "$rc_tmp"
+                        pr_warn "Failed to update %s" "$shell_rc"
+                    fi
+                fi
+            else
+                pr_warn "Could not create a temp file beside %s; add %s/bin to PATH by hand" "$shell_rc" "$install_path"
+            fi
         fi
     fi
 
