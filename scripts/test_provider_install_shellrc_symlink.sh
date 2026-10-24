@@ -61,7 +61,9 @@ su_payload() { # <write-limit 0|1> <command>
 # Re-run as root when we can, so the ownership assertions are a genuine
 # privilege switch rather than a no-op.
 if [ "$(id -u)" != 0 ] && [ "${SHELLRC_TEST_NO_SUDO:-0}" != 1 ] && sudo -n true 2>/dev/null; then
-    exec sudo -n env SHELLRC_TEST_NO_SUDO=1 TMPDIR="${TMPDIR:-/tmp}" \
+    exec sudo -n env SHELLRC_TEST_NO_SUDO=1 \
+        REQUIRE_FALSIFICATION="${REQUIRE_FALSIFICATION:-0}" \
+        TMPDIR="${TMPDIR:-/tmp}" \
         "$here/$(basename "$0")" "$@"
 fi
 
@@ -453,8 +455,9 @@ assert_eq '0STDIN-OK' \
 # the merge that FIRST added the symlink guard (PR #46): it still writes through
 # a planted link, which is the bug this suite is named for, and it stays
 # reachable from main's history after the merge. A rebase that moves that parent
-# must update this SHA. When it is not available (a shallow clone), the run is
-# skipped, never guessed.
+# must update this SHA. A missing pin is skipped locally, but with
+# REQUIRE_FALSIFICATION=1 (how CI runs it) it is a hard failure, so a shallow
+# checkout can never pass by skipping the run.
 pre_fix_commit=f59824470b263aabb51abf4aef4bc9b19ca432d3
 pre_fix_name="$(printf '%.12s' "$pre_fix_commit")"
 
@@ -517,7 +520,11 @@ if git -C "$here/.." show "$pre_fix_commit:scripts/$(basename "$installer")" > "
         pass "pre-fix $pre_fix_name glues the PATH entry onto the last line (bug reproduced)"
     fi
 else
-    skip "pre-fix commit $pre_fix_name not available for the falsification run"
+    if [ "${REQUIRE_FALSIFICATION:-0}" = 1 ]; then
+        fail "pre-fix commit $pre_fix_name is unavailable; refusing to pass without the falsification run (shallow clone? check out with fetch-depth: 0)"
+    else
+        skip "pre-fix commit $pre_fix_name not available for the falsification run"
+    fi
 fi
 
 printf '\n%s: %d failed, %d skipped\n' "$(basename "$0")" "$fails" "$skipped"
