@@ -11,6 +11,7 @@
 - **A completed handshake could go uncounted** ([#259](https://github.com/full-bars/meso-miner/pull/259)): a superseded epoch returned before the count, and a failed identity proof could be counted by every concurrent verifier. Both count once now.
 - **Lifetime session counters dropped on proxy exit** ([#261](https://github.com/full-bars/meso-miner/pull/261)): a `_total` could decrease and `rate()` read it as a reset. A departing manager's counts fold into a provider-wide accumulator first.
 - **The deny-list drift guard matched a literal pipe** ([#263](https://github.com/full-bars/meso-miner/pull/263)): it now matches the old inline list as a fixed string.
+- **A silent platform edge cost proxied H3 nodes about 16 Mbit/s that the governor could not see** (commit `23a7741c4`): with `h3` set to `all`, a count or `auto`, every proxy identity's H3, H3-over-dns and dns-pump carriers redial on their own timer, and a dial the edge never answers runs the whole QUIC retransmit ladder, about 33 KB. The governor counted no QUIC bytes and dropped canceled dials, and H3 never waited on the attempt budget, so the node stayed at `verdict=ok` while it spent a flat 15.5 to 16.4 Mbit/s for about 15 hours. H3 attempts now carry their handshake bytes, a canceled attempt's bytes count toward the failed-byte breaker without counting as an attempt, and a proxied identity's H3 waits on the shared budget like its H1. Nodes on the default `h3 direct` were not affected.
 
 ### Changed
 
