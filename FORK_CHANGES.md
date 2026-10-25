@@ -3982,3 +3982,13 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 - Not ported: FIN teardown (meso's `IpPath` has no FIN flag; idle cleanup covers those tuples within 5 minutes).
 
 **Impact**: the table cannot be filled by one client or by stale tuples. Only ports 465/587 are affected.
+
+## 197. Out-of-Band Control Retries Back Off
+
+**Purpose**: first finding from connect issue #227 (900% CPU with 1000 SOCKS5 proxies). `ControlSyncOob` (the provide-secret delivery each proxy identity runs) retried a failed API call every 1 second, forever. With 1000 identities and an unreachable or failing API that is 1000 HTTPS requests a second through the proxies. The issue's other two claims do not hold for meso: the SOCKS5 library dials the proxy with the proxy's own network setting (not the narrowed destination family) and encodes the destination from its address, and `proxy.SOCKS5` only builds a small struct.
+
+**Files Modified**: `transfer_control_oob.go`. **Files Added**: `transfer_control_oob_backoff_test.go`.
+
+**Change**: each Send's retries start at 1s and double to 60s, each delay jittered over [d/2, d) so identities that failed together spread out. A new Send for the scope still supersedes the old chain.
+
+**Impact**: under a failing API, retries drop from 60 a minute to about 2 a minute per identity after the first minute. A local run with 1000 dead proxies before sign-in already sat at about 1% CPU (sign-in backs off 5 minutes), so the reported spike is after sign-in; it is being profiled live.

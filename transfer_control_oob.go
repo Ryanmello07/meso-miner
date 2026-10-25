@@ -2,6 +2,7 @@ package connect
 
 import (
 	"context"
+	mathrand "math/rand/v2"
 	"sync"
 	"time"
 
@@ -20,9 +21,11 @@ type ControlSyncOob struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	client       *Client
-	scopeTag     string
-	retryTimeout time.Duration
+	client   *Client
+	scopeTag string
+	// retries back off from retryTimeout, doubling to maxRetryTimeout
+	retryTimeout    time.Duration
+	maxRetryTimeout time.Duration
 
 	sendLock  sync.Mutex
 	syncCount uint64
@@ -32,11 +35,12 @@ func NewControlSyncOob(ctx context.Context, client *Client, scopeTag string) *Co
 	cancelCtx, cancel := context.WithCancel(ctx)
 
 	return &ControlSyncOob{
-		ctx:          cancelCtx,
-		cancel:       cancel,
-		client:       client,
-		scopeTag:     scopeTag,
-		retryTimeout: 1 * time.Second,
+		ctx:             cancelCtx,
+		cancel:          cancel,
+		client:          client,
+		scopeTag:        scopeTag,
+		retryTimeout:    1 * time.Second,
+		maxRetryTimeout: 60 * time.Second,
 	}
 }
 
@@ -66,6 +70,10 @@ func (self *ControlSyncOob) Send(frame *protocol.Frame, ackCallback AckFunction)
 
 	handleCtx, handleCancel := context.WithCancel(self.ctx)
 
+	// A provider with many proxy identities runs one of these per identity.
+	// A fixed 1s retry against an unreachable API made every identity retry
+	// every second; back off instead, with jitter so identities spread out.
+	retryDelay := self.retryTimeout
 	var send func()
 	send = func() {
 		// stop if a newer Send for this scope superseded this one, or done
@@ -103,7 +111,8 @@ func (self *ControlSyncOob) Send(frame *protocol.Frame, ackCallback AckFunction)
 				select {
 				case <-handleCtx.Done():
 				case <-self.client.Done():
-				case <-time.After(self.retryTimeout):
+				case <-time.After(oobRetryJitter(retryDelay)):
+					retryDelay = min(2*retryDelay, max(self.maxRetryTimeout, self.retryTimeout))
 					go HandleError(send, handleCancel)
 				}
 			},
@@ -118,4 +127,13 @@ func (self *ControlSyncOob) Send(frame *protocol.Frame, ackCallback AckFunction)
 // Close is idempotent and safe to call from any goroutine.
 func (self *ControlSyncOob) Close() {
 	self.cancel()
+}
+
+// oobRetryJitter spreads a retry delay uniformly over [delay/2, delay).
+func oobRetryJitter(delay time.Duration) time.Duration {
+	if delay < 2 {
+		return delay
+	}
+	half := delay / 2
+	return half + time.Duration(mathrand.Int64N(int64(half)))
 }
