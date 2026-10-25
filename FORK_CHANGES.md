@@ -3992,3 +3992,13 @@ Parity port of the `fragment+segment` dialer from `urfoundation/meso-miner` (PR 
 **Change**: each Send's retries start at 1s and double to 60s, each delay jittered over [d/2, d) so identities that failed together spread out. A new Send for the scope still supersedes the old chain.
 
 **Impact**: under a failing API, retries drop from 60 a minute to about 2 a minute per identity after the first minute. A local run with 1000 dead proxies before sign-in already sat at about 1% CPU (sign-in backs off 5 minutes), so the reported spike is after sign-in; it is being profiled live.
+
+## 198. Control Sync Releases Its Watcher After An Ack
+
+**Purpose**: second finding from connect issue #227, from the live 1000-proxy run on a VPS. 3003 goroutines (3 per proxy identity) were parked in `ControlSync.Send`'s supersede watcher. When the first, non-blocking send succeeded, its ack callback never cancelled the send's context, so the watcher stayed parked until the scope's next Send. The long-lived scopes (provide, client-key, encrypted-key) rarely send again, so each one kept a watcher indefinitely.
+
+**Files Modified**: `transfer_control.go`. **Files Added**: `transfer_control_watcher_test.go`.
+
+**Change**: the first-send ack callback cancels the send's context once the ack arrives, the same as the retry path already does when it finishes.
+
+**Impact**: 3 fewer parked goroutines (and their contexts) per identity. That is about 3000 goroutines and their stacks at 1000 identities. The CPU spike from the issue did not reproduce on a 4-vCPU VPS: under 10% of one core over 95 minutes.

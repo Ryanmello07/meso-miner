@@ -196,6 +196,12 @@ func (self *ControlSync) Send(frame *protocol.Frame, updateFrame func() *protoco
 			if err == nil {
 				safeAckCallback(nil)
 				MessagePoolReturn(frame.MessageBytes)
+				// the send is done: release the supersede watcher. Without this
+				// a long-lived scope (provide, client-key, encrypted-key) kept
+				// one parked watcher per scope until its next Send, which a
+				// bulk provider pays per proxy identity (3000 goroutines at
+				// 1000 identities in the connect#227 live run).
+				handleCancel()
 			} else {
 				go HandleError(func() {
 					controlSync(frame)
